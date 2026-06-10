@@ -7,7 +7,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:all": "vitest run && playwright test"
   },
   "dependencies": {
     "@agentaily/design-system": "^0.1.1",
@@ -15,7 +19,13 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@amiceli/vitest-cucumber": "^6.5.0",
+    "@playwright/test": "^1.60.0",
+    "@testing-library/jest-dom": "^6.6.0",
+    "@testing-library/react": "^16.3.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^6.0.0"
+    "jsdom": "^29.0.0",
+    "vite": "^6.0.0",
+    "vitest": "^4.1.8"
   }
 }
