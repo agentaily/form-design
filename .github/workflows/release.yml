@@ -1,0 +1,40 @@
+name: Release
+
+# Changesets-driven versioning. This app is private (not published to npm), so a
+# "release" = version bump + CHANGELOG + a git tag + a GitHub Release. The app
+# itself is shipped by deploy.yml (GitHub Pages). On push to main this either
+# opens/updates a "Version Packages" PR (consuming pending changesets) or, once
+# that PR is merged, tags the new version and creates the GitHub Release.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the Version PR branch + create tags/Releases
+  pull-requests: write # open/update the Version Packages PR
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changesets needs full history
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: changesets/action@v1
+        with:
+          version: npx changeset version # bump + changelog in the Version PR
+          publish: npx changeset tag # tag the version once the Version PR merges (no npm publish)
+          commit: "chore: version packages"
+          title: "chore: version packages"
+          createGithubReleases: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

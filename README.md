@@ -12,7 +12,8 @@ npm package — every UI surface (chat, inputs, dialog, tabs, schema tree) is a
 real design-system component, so upstream changes flow through automatically.
 
 The full product blueprint (client-side Agent loop, VFS, tool executor, iframe
-rendering, BYOK, publish/collect) lives in **[`SPEC.md`](./SPEC.md)**.
+rendering, BYOK, publish/collect) lives in **[`SPEC.md`](./SPEC.md)**; day-to-day
+ops (hooks, CI/CD, Pages deploy, releases) are in **[`OPERATIONS.md`](./OPERATIONS.md)**.
 
 ## Run
 

@@ -15,6 +15,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:all": "vitest run && playwright test",
+    "changeset": "changeset",
     "prepare": "lefthook install"
   },
   "dependencies": {
@@ -24,6 +25,8 @@
   },
   "devDependencies": {
     "@amiceli/vitest-cucumber": "^6.5.0",
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.0",
     "@playwright/test": "^1.60.0",
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.3.0",

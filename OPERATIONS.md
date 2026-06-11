@@ -1,0 +1,155 @@
+# 运维手册 · Agentaily Forms
+
+对话式表单设计器（前端应用）的运维与协作手册。产品/架构规格见 [SPEC.md](./SPEC.md)，使用说明见 [README.md](./README.md)。
+
+---
+
+## 0. 速查
+
+| 项       | 值                                                                    |
+| -------- | --------------------------------------------------------------------- |
+| 线上地址 | https://agentaily.github.io/form-design/                              |
+| 仓库     | https://github.com/agentaily/form-design                              |
+| 默认分支 | `main`                                                                |
+| 本地开发 | `npm install && npm run dev` → http://localhost:5173                  |
+| 部署方式 | push 到 `main` → GitHub Actions 构建并发布到 GitHub Pages（无需手动） |
+| 包性质   | **私有应用**（`private: true`），不发布到 npm                         |
+
+---
+
+## 1. 这是什么
+
+- **应用本体**（`src/`）：左对话 / 右表单预览的设计器。当前对话是**写死的脚本**（`src/flow.jsx`），不是真 LLM。
+- **SPEC 核心**（`src/core/`，TypeScript）：按 [SPEC.md](./SPEC.md) 实现的、与框架无关的可测核心——VFS、schema、工具执行器、消息队列、srcdoc 渲染、Agent loop。是接入真模型时的地基。
+- **设计系统**：所有 UI 来自已发布的 npm 包 [`@agentaily/design-system`](https://github.com/agentaily/design-system)，上游更新自动跟随。
+
+---
+
+## 2. 本地开发
+
+```bash
+npm install          # 安装依赖；postinstall 的 prepare 会装好 git hooks
+npm run dev          # 开发服务器 http://localhost:5173
+```
+
+### npm 脚本一览
+
+| 脚本                      | 作用                                                    |
+| ------------------------- | ------------------------------------------------------- |
+| `dev`                     | Vite 开发服务器（base `/`）                             |
+| `build`                   | 生产构建到 `dist/`（base `/form-design/`，给 Pages 用） |
+| `preview`                 | 本地预览生产构建                                        |
+| `typecheck`               | `tsc --noEmit`（仅类型检查 `src/core`）                 |
+| `format` / `format:check` | Prettier 写入 / 校验                                    |
+| `test`                    | Vitest：单元（TDD）+ BDD（`.feature`），jsdom           |
+| `test:watch`              | Vitest watch                                            |
+| `test:e2e`                | Playwright 端到端（真实浏览器）                         |
+| `test:all`                | Vitest + Playwright                                     |
+| `changeset`               | 新增一条变更集（版本/changelog 用）                     |
+
+---
+
+## 3. Git Hooks（lefthook）
+
+`prepare` 脚本在 `npm install` 时自动 `lefthook install`。配置见 [`lefthook.yml`](./lefthook.yml)。
+
+| 钩子           | 动作                                                                      |
+| -------------- | ------------------------------------------------------------------------- |
+| **pre-commit** | 对暂存文件跑 `prettier --write` 并重新暂存；改动了 `.ts` 时跑 `typecheck` |
+| **pre-push**   | 跑 `test`（Vitest）+ `build`                                              |
+
+- 手动跑：`npx lefthook run pre-commit`。
+- 临时跳过（应急）：`git commit --no-verify` / `git push --no-verify`。请少用。
+
+---
+
+## 4. 测试
+
+- **单元（TDD）** `tests/unit/`：覆盖每个 `src/core` 模块 + 原型纯逻辑。
+- **BDD** `tests/bdd/`：Gherkin `.feature` + `@amiceli/vitest-cucumber` + Testing Library。
+- **E2E** `e2e/`：Playwright 跑真实设计器（搭表单 → 校验 → 发布）。
+  - 本地默认用系统 Chrome（`channel: "chrome"`，无需下载）。
+  - 没有系统 Chrome（如 CI）：`PW_USE_BUNDLED=1` + `npx playwright install --with-deps chromium`。
+
+---
+
+## 5. CI/CD 工作流
+
+`.github/workflows/`，全部用 Node 22 + `npm ci`。
+
+| 工作流        | 触发               | 做什么                                                                                                       |
+| ------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `ci.yml`      | push `main` / PR   | `verify` job：`prettier --check` → `typecheck` → `test` → `build`；`e2e` job：Playwright（bundled chromium） |
+| `deploy.yml`  | push `main` / 手动 | 构建并发布到 GitHub Pages                                                                                    |
+| `release.yml` | push `main`        | Changesets：开 / 更新「Version Packages」PR，或在其合并后打 tag + 建 GitHub Release                          |
+
+---
+
+## 6. 部署到 GitHub Pages
+
+- **机制**：`deploy.yml` 跑 `npm run build` → `upload-pages-artifact`（`dist/`）→ `deploy-pages`。
+- **base 路径**：站点在 `https://agentaily.github.io/form-design/` 子路径下，所以 `vite.config.js` 在 `build` 时设 `base: "/form-design/"`，否则 JS/CSS 会 404。
+- **Pages 配置**：Source = GitHub Actions（已开启）。
+- **手动触发**：Actions → "Deploy app to Pages" → Run workflow，或 `gh workflow run deploy.yml`。
+
+---
+
+## 7. 版本与发布（Changesets）
+
+本仓库是**私有应用，不发 npm**。Changesets 在这里只管 **版本号 + CHANGELOG + GitHub Release**；应用的「上线」是 Pages 部署。配置见 [`.changeset/config.json`](./.changeset/config.json)（`privatePackages.tag/version` 开启，所以私有包也能打 tag）。
+
+**日常流程**
+
+1. 改动值得记录时：`npm run changeset` → 选 patch/minor/major + 写一行摘要 → 把 `.changeset/*.md` 跟代码一起提交。
+2. 合到 `main` 后 `release.yml` 自动开一个 **「Version Packages」PR**（消费 changeset、bump `package.json`、写 `CHANGELOG.md`）。
+3. 合并那个 PR → `release.yml` 跑 `changeset tag` 打 tag 并创建 **GitHub Release**。
+
+> 不要手改版本号或 changelog——加 changeset，让机器人来做。
+>
+> 一次性前置：仓库 Settings → Actions → General 需允许「Allow GitHub Actions to create and approve pull requests」，否则 Version PR 开不出来。
+
+---
+
+## 8. 故障排查
+
+| 症状                          | 多半是                 | 处理                                                                  |
+| ----------------------------- | ---------------------- | --------------------------------------------------------------------- |
+| Pages 打开白屏 / 资源 404     | base 路径不对          | 确认 `vite.config.js` 的 `base` 是 `/form-design/`；改仓库名要同步改  |
+| Playwright 本地报找不到浏览器 | 没系统 Chrome          | 设 `PW_USE_BUNDLED=1` 并 `npx playwright install chromium`            |
+| pre-push 卡住/失败            | `test` 或 `build` 没过 | 本地先 `npm test && npm run build` 修绿；勿习惯性 `--no-verify`       |
+| `prettier --check` 在 CI 红   | 没格式化               | 本地 `npm run format` 后再提交                                        |
+| Version PR 没出现             | Actions 无建 PR 权限   | 开启上面第 7 节的 PR 权限设置                                         |
+| 设计系统组件样式丢失          | 没 import 样式         | 确认 `src/main.jsx` 里 `import "@agentaily/design-system/styles.css"` |
+
+---
+
+## 9. 常见运维任务 Cookbook
+
+```bash
+# 跑全部检查（提交前自查）
+npm run format && npm run typecheck && npm test && npm run build
+
+# 端到端（真实浏览器）
+npm run test:e2e
+
+# 新增一条变更集
+npm run changeset
+
+# 手动触发部署 / 查看运行
+gh workflow run deploy.yml
+gh run list --limit 5
+gh run watch <run-id>
+
+# 本地预览生产构建（注意 base 是 /form-design/）
+npm run build && npm run preview
+```
+
+---
+
+## 10. 关键约定回顾
+
+- **代码格式**由 Prettier 统一（printWidth 100）；`SPEC.md` 不被格式化（见 `.prettierignore`）。
+- **`src/core` 是 TypeScript 且 strict**；应用 UI 仍是 JSX 原型。
+- **UI 一律复用** `@agentaily/design-system`，不手写组件。
+- **不自建后端**：真模型走 BYOK 浏览器直连，答题数据走托管 BaaS（详见 SPEC.md §8）。
+- **发布即部署**：push `main` 自动上 Pages；版本/Release 由 Changesets 管。
