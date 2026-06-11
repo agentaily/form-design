@@ -1,0 +1,21 @@
+{
+  "name": "@agentaily/form-design-workers",
+  "private": true,
+  "type": "module",
+  "description": "Agentaily Forms backend — Hono on Cloudflare Workers + D1. Owner BYOK config, LLM proxy, Feishu submit.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.12.25"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.14",
+    "@cloudflare/workers-types": "^4.20260611.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.99.0"
+  }
+}
