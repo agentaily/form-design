@@ -3,8 +3,10 @@ Feature: owner 集成配置的保存与读取
   我想连接我的 DeepSeek 与飞书多维表格凭据
   以便后端代为安全持有，后续的 LLM 代理与答题落库都走我自己的额度与租户
 
-  背景：MVP 单 owner，固定单行配置，不做登录鉴权、不做多租户。
+  背景：MVP 单 owner，固定单行配置，不做多租户。
   密钥字段（DeepSeek key、飞书 app secret）加密落库，读取一律掩码、绝不返回明文。
+  鉴权前置（§17）：GET/POST /api/config 现为 owner-only，需先带有效 session token；
+  下列场景的 owner 均已登录，§12 的存取行为不变，只多了这道鉴权门（缺/坏 token → 401，见 auth.feature）。
 
   Scenario: 保存配置后读回得到掩码视图
     Given 一个空的 owner 配置

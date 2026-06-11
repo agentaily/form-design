@@ -1,8 +1,14 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { applySchema, resetConfig, resetForms } from "./helpers";
+import { applySchema, resetConfig, resetForms, login, authHeader } from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
+
+// POST /api/submit stays PUBLIC (SPEC.md §17.1) — answerers send NO token, and
+// these scenarios' behaviour is unchanged. But the SETUP they rely on now hits
+// owner-only endpoints (POST /api/config to save creds, POST /api/forms to
+// publish a form), so those setup calls carry a `Authorization: Bearer <jwt>`
+// from login(). postSubmit itself never sends a token.
 
 // Outer-loop acceptance specs for the submit-to-Bitable endpoint `POST /api/submit`,
 // driven through the real Hono app in workerd via SELF.fetch, with BOTH Feishu
@@ -167,6 +173,9 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
  * (secrets encrypted at rest). The submit route reads back THIS config —
  * credentials are never taken from the /api/submit request body (SPEC.md §15.1).
  */
+// Owner-only setup token (§17.1) for the POST /api/config + POST /api/forms calls.
+let token: string;
+
 async function configureOwner(opts: { feishu: boolean }): Promise<void> {
   const body: Record<string, unknown> = {
     // DeepSeek is the required block — POST /api/config 400s without it.
@@ -180,9 +189,10 @@ async function configureOwner(opts: { feishu: boolean }): Promise<void> {
       tableId: OWNER_FEISHU_TABLE_ID,
     };
   }
+  // owner-only setup endpoint (§17.1) → Bearer token.
   const res = await SELF.fetch(`${BASE}/api/config`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeader(token) },
     body: JSON.stringify(body),
   });
   if (res.status !== 200) {
@@ -190,6 +200,7 @@ async function configureOwner(opts: { feishu: boolean }): Promise<void> {
   }
 }
 
+// POST /api/submit is PUBLIC (§17.1) → intentionally NO Authorization header.
 function postSubmit(body: unknown): Promise<Response> {
   return SELF.fetch(`${BASE}/api/submit`, {
     method: "POST",
@@ -208,9 +219,10 @@ function postSubmit(body: unknown): Promise<Response> {
  * The §15 behaviour under test is unchanged; the slug is just the new front gate.
  */
 async function publishFormAndGetSlug(): Promise<string> {
+  // owner-only setup endpoint (§17.1) → Bearer token.
   const res = await SELF.fetch(`${BASE}/api/forms`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeader(token) },
     body: JSON.stringify({
       meta: { title: "提交测试表单" },
       fields: [
@@ -249,6 +261,9 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   beforeEach(async () => {
     await resetConfig();
     await resetForms();
+    // The submit endpoint is public, but its setup (save config / publish form)
+    // hits owner-only endpoints, so we need a session token for those.
+    token = await login();
   });
 
   afterEach(() => {

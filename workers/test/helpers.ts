@@ -10,14 +10,18 @@
 // schema.sql is the single source of truth for the table shape — we import it
 // raw and apply it here rather than duplicating the DDL.
 
-import { env } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { vi } from "vitest";
 import schemaSql from "../schema.sql?raw";
 
-/** The bindings the owner-config feature relies on, surfaced for the tests. */
+/** The bindings the owner-config + owner-auth features rely on, surfaced for the tests. */
 export interface TestEnv {
   DB: D1Database;
   CONFIG_KEY: string;
+  /** owner 登录密码（明文比对）— fixed throwaway value injected in vitest.config.ts (§17.6). */
+  OWNER_PASSWORD: string;
+  /** session JWT 的 HMAC 签名密钥 — fixed throwaway value injected in vitest.config.ts (§17.6). */
+  AUTH_SECRET: string;
 }
 
 export const testEnv = env as unknown as TestEnv;
@@ -168,4 +172,48 @@ export function installUpstreamMock(reply: UpstreamReply = {}): UpstreamMock {
     called: () => calls.length > 0,
     restore: () => vi.unstubAllGlobals(),
   };
+}
+
+// --- owner auth helpers (SPEC.md §17) --------------------------------------
+//
+// owner-only endpoints now sit behind requireAuth. Outer-loop suites that drive
+// those endpoints first log in to obtain a session JWT, then send it as
+// `Authorization: Bearer <token>`. `login()` exercises the REAL POST /api/auth/login
+// route (public, no auth) with the fixed test OWNER_PASSWORD injected in
+// vitest.config.ts, so the token it returns is signed with the test AUTH_SECRET
+// the same way prod would sign it.
+
+/** Base origin for SELF.fetch requests in the worker tests. */
+export const AUTH_BASE = "https://api.local";
+
+/** The fixed owner login password injected as a miniflare binding (vitest.config.ts). */
+export const OWNER_PASSWORD = "test-owner-password-correct-horse-battery-staple";
+
+/**
+ * Log in via the real public `POST /api/auth/login` and return the session JWT.
+ *
+ * Used by every owner-only outer-loop suite (config / conntest / chat / forms /
+ * submissions) to obtain a Bearer token for `authHeader(token)`. Throws if login
+ * does not return a 200 `{ token }` — surfacing a broken login route as a loud
+ * setup failure rather than a silent undefined token.
+ */
+export async function login(password: string = OWNER_PASSWORD): Promise<string> {
+  const res = await SELF.fetch(`${AUTH_BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (res.status !== 200) {
+    throw new Error(`setup login failed: ${res.status} ${await res.text()}`);
+  }
+  const json = (await res.json()) as { token?: string };
+  if (typeof json.token !== "string" || json.token.length === 0) {
+    throw new Error(`setup login returned no token: ${JSON.stringify(json)}`);
+  }
+  return json.token;
+}
+
+/** Build an `Authorization: Bearer <token>` header object for owner-only requests. */
+export function authHeader(token: string): { Authorization: string } {
+  return { Authorization: `Bearer ${token}` };
 }
