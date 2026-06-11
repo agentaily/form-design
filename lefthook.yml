@@ -1,0 +1,25 @@
+# Git hooks via lefthook. Installed automatically on `npm install`
+# (see the "prepare" script). Run manually: `npx lefthook run pre-commit`.
+
+pre-commit:
+  parallel: false # the format job re-stages files — keep ordering deterministic
+  commands:
+    # Format only the files being committed; re-stage what Prettier changed.
+    format:
+      glob: "*.{js,jsx,ts,tsx,mjs,cjs,css,md,json,yml,yaml,html}"
+      run: npx prettier --write {staged_files}
+      stage_fixed: true
+    # Type-check the TypeScript core whenever a .ts(x) file is committed.
+    typecheck:
+      glob: "*.{ts,tsx}"
+      run: npm run typecheck
+
+pre-push:
+  parallel: true
+  commands:
+    # Unit + BDD must pass before code leaves the machine.
+    test:
+      run: npm test
+    # Catch a broken production build.
+    build:
+      run: npm run build

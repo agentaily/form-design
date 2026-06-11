@@ -26,6 +26,8 @@ test.describe("Agentaily Forms · 设计器", () => {
     await expect(page.getByText("LIVE")).toBeVisible({ timeout: 20_000 });
     // the share dialog shows the public link (scope to the dialog — the tool-call
     // result echoes the same URL elsewhere in the thread)
-    await expect(page.locator(".d-share__url")).toHaveText("forms.agentaily.dev/agentaily-salon-sh");
+    await expect(page.locator(".d-share__url")).toHaveText(
+      "forms.agentaily.dev/agentaily-salon-sh",
+    );
   });
 });

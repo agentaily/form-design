@@ -35,7 +35,11 @@ const str = { type: "string" } as const;
 
 /** File-operation tools (SPEC §3.1) — the baseline. */
 export const FILE_TOOLS: ToolDef[] = [
-  { name: "list_files", description: "返回文件树。", input_schema: { type: "object", properties: {} } },
+  {
+    name: "list_files",
+    description: "返回文件树。",
+    input_schema: { type: "object", properties: {} },
+  },
   {
     name: "read_file",
     description: "返回文件内容。",
@@ -44,7 +48,11 @@ export const FILE_TOOLS: ToolDef[] = [
   {
     name: "write_file",
     description: "创建或全量覆盖文件。",
-    input_schema: { type: "object", properties: { path: str, content: str }, required: ["path", "content"] },
+    input_schema: {
+      type: "object",
+      properties: { path: str, content: str },
+      required: ["path", "content"],
+    },
   },
   {
     name: "str_replace",
@@ -64,16 +72,28 @@ export const FILE_TOOLS: ToolDef[] = [
 
 /** Form-operation tools (SPEC §3.2) — the form-collection backbone. */
 export const FORM_TOOLS: ToolDef[] = [
-  { name: "get_form_schema", description: "返回当前 schema。", input_schema: { type: "object", properties: {} } },
+  {
+    name: "get_form_schema",
+    description: "返回当前 schema。",
+    input_schema: { type: "object", properties: {} },
+  },
   {
     name: "add_field",
     description: "增加字段。",
-    input_schema: { type: "object", properties: { field: { type: "object" } }, required: ["field"] },
+    input_schema: {
+      type: "object",
+      properties: { field: { type: "object" } },
+      required: ["field"],
+    },
   },
   {
     name: "update_field",
     description: "改字段属性。",
-    input_schema: { type: "object", properties: { id: str, patch: { type: "object" } }, required: ["id", "patch"] },
+    input_schema: {
+      type: "object",
+      properties: { id: str, patch: { type: "object" } },
+      required: ["id", "patch"],
+    },
   },
   {
     name: "remove_field",
@@ -92,7 +112,11 @@ export const FORM_TOOLS: ToolDef[] = [
   {
     name: "set_validation",
     description: "设校验规则。",
-    input_schema: { type: "object", properties: { id: str, rules: { type: "object" } }, required: ["id", "rules"] },
+    input_schema: {
+      type: "object",
+      properties: { id: str, rules: { type: "object" } },
+      required: ["id", "rules"],
+    },
   },
 ];
 

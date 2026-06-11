@@ -46,7 +46,13 @@ describe("agentLoop · tool execution", () => {
       [text("加好了")],
     ]);
 
-    const res = await runAgentTurn({ userText: "加个姓名", messages, callLLM, executeTool, onPreview });
+    const res = await runAgentTurn({
+      userText: "加个姓名",
+      messages,
+      callLLM,
+      executeTool,
+      onPreview,
+    });
 
     expect(res.stopped).toBe("text");
     expect(schema.fields.map((f) => f.id)).toEqual(["name"]); // tool mutated state

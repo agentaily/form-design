@@ -20,7 +20,14 @@ function FormHarness() {
   const [values, setValues] = React.useState({});
   const setValue = (id, v) => setValues((s) => ({ ...s, [id]: v }));
   return (
-    <FormPreview meta={null} fields={FIELDS} values={values} setValue={setValue} style="card" building={false} />
+    <FormPreview
+      meta={null}
+      fields={FIELDS}
+      values={values}
+      setValue={setValue}
+      style="card"
+      building={false}
+    />
   );
 }
 

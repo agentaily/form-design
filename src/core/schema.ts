@@ -132,8 +132,7 @@ export function setValidation(schema: Schema, id: string, rules: ValidationRules
  * Used by both the live preview and the published renderer.
  */
 export function validateValue(field: Field, value: unknown): string | null {
-  const empty =
-    value == null || value === "" || (Array.isArray(value) && value.length === 0);
+  const empty = value == null || value === "" || (Array.isArray(value) && value.length === 0);
   if (field.required && empty) return field.validation?.message || "此项必填";
   if (empty) return null;
   const v = field.validation || {};

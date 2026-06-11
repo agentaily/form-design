@@ -31,9 +31,7 @@ export type RunTurn = (merged: string) => Promise<unknown>;
 export function mergeBatch(batch: Pick<QueueItem, "text" | "typedWhileBusy">[]): string {
   const typedWhileBusy = batch.some((m) => m.typedWhileBusy);
   const body =
-    batch.length === 1
-      ? batch[0].text
-      : batch.map((m, i) => `${i + 1}. ${m.text}`).join("\n");
+    batch.length === 1 ? batch[0].text : batch.map((m, i) => `${i + 1}. ${m.text}`).join("\n");
   if (!typedWhileBusy) return body;
   return `<context note="${MIDWORK_NOTE}">\n${body}\n</context>`;
 }

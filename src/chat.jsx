@@ -5,23 +5,69 @@ import { Message, Reasoning, ToolCall, Composer, Suggestions } from "@agentaily/
 
 // ---- Lucide-geometry icons (brand-sanctioned: copy paths, never freehand) ----
 const ICON_PATHS = {
-  send: <g><path d="M12 19V5" /><path d="M5 12l7-7 7 7" /></g>,
+  send: (
+    <g>
+      <path d="M12 19V5" />
+      <path d="M5 12l7-7 7 7" />
+    </g>
+  ),
   spark: <path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3z" />,
-  share: <g><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13" /></g>,
-  sun: <g><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></g>,
+  share: (
+    <g>
+      <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13" />
+    </g>
+  ),
+  sun: (
+    <g>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+    </g>
+  ),
   moon: <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />,
-  eye: <g><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></g>,
+  eye: (
+    <g>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </g>
+  ),
   code: <path d="m16 18 6-6-6-6M8 6l-6 6 6 6" />,
   check: <path d="M20 6 9 17l-5-5" />,
-  layout: <g><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 3v18" /></g>,
-  phone: <g><rect x="7" y="2" width="10" height="20" rx="2" /><path d="M11 18h2" /></g>,
-  qr: <g><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><path d="M14 14h3v3M21 14v.01M14 21h.01M21 17v4" /></g>,
+  layout: (
+    <g>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M9 3v18" />
+    </g>
+  ),
+  phone: (
+    <g>
+      <rect x="7" y="2" width="10" height="20" rx="2" />
+      <path d="M11 18h2" />
+    </g>
+  ),
+  qr: (
+    <g>
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <path d="M14 14h3v3M21 14v.01M14 21h.01M21 17v4" />
+    </g>
+  ),
 };
 
 export function Icon({ name, size = 16, ...rest }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...rest}>
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...rest}
+    >
       {ICON_PATHS[name] || null}
     </svg>
   );
@@ -30,10 +76,23 @@ export function Icon({ name, size = 16, ...rest }) {
 // ---- one thread turn, mapped onto DS components ----
 function Turn({ m }) {
   if (m.role === "user") {
-    return <div className="d-turn--user"><Message role="user"><p>{m.text}</p></Message></div>;
+    return (
+      <div className="d-turn--user">
+        <Message role="user">
+          <p>{m.text}</p>
+        </Message>
+      </div>
+    );
   }
   if (m.kind === "reasoning") {
-    return <Reasoning steps={m.steps} duration={m.duration} streaming={m.streaming} defaultOpen={m.streaming} />;
+    return (
+      <Reasoning
+        steps={m.steps}
+        duration={m.duration}
+        streaming={m.streaming}
+        defaultOpen={m.streaming}
+      />
+    );
   }
   if (m.kind === "tool") {
     return <ToolCall name={m.name} args={m.args} result={m.result} status={m.status} />;
@@ -54,18 +113,28 @@ function Turn({ m }) {
 // ---- thread ----
 export function ChatThread({ messages, empty, onStarter, density }) {
   const ref = useRef(null);
-  useEffect(() => { const el = ref.current; if (el) el.scrollTop = el.scrollHeight; }, [messages]);
+  useEffect(() => {
+    const el = ref.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
 
   if (empty) {
     return (
       <div className="d-thread ax-dotgrid" ref={ref}>
         <div className="d-empty">
           <div className="d-empty__inner">
-            <div className="d-empty__mark"><Icon name="spark" size={22} /></div>
+            <div className="d-empty__mark">
+              <Icon name="spark" size={22} />
+            </div>
             <h2 className="d-empty__h">描述你想要的表单</h2>
-            <p className="d-empty__p">用一句话说明用途和要收集的信息，Agent 会边想边把字段搭到右侧预览。</p>
+            <p className="d-empty__p">
+              用一句话说明用途和要收集的信息，Agent 会边想边把字段搭到右侧预览。
+            </p>
             <div className="d-empty__chips">
-              <Suggestions items={["做一个线下活动报名表", "收集一份客户满意度问卷", "招聘投递表单"]} onSelect={onStarter} />
+              <Suggestions
+                items={["做一个线下活动报名表", "收集一份客户满意度问卷", "招聘投递表单"]}
+                onSelect={onStarter}
+              />
             </div>
           </div>
         </div>
@@ -75,7 +144,9 @@ export function ChatThread({ messages, empty, onStarter, density }) {
   return (
     <div className={"d-thread" + (density === "compact" ? " is-compact" : "")} ref={ref}>
       <div className="d-thread__col">
-        {messages.map((m) => <Turn key={m.id} m={m} />)}
+        {messages.map((m) => (
+          <Turn key={m.id} m={m} />
+        ))}
       </div>
     </div>
   );
@@ -84,7 +155,13 @@ export function ChatThread({ messages, empty, onStarter, density }) {
 // ---- composer (DS) ----
 export function ChatComposer({ value, onChange, onSend, disabled, placeholder }) {
   return (
-    <Composer value={value} onChange={onChange} onSend={onSend} disabled={disabled}
-      model="agentaily-2 · forms" placeholder={placeholder} />
+    <Composer
+      value={value}
+      onChange={onChange}
+      onSend={onSend}
+      disabled={disabled}
+      model="agentaily-2 · forms"
+      placeholder={placeholder}
+    />
   );
 }

@@ -34,7 +34,9 @@ describe("schema · addField", () => {
 
   it("rejects unknown field types", () => {
     const s = createSchema();
-    expect(() => addField(s, { id: "x", type: "slider", label: "x" })).toThrow(/unknown field type/i);
+    expect(() => addField(s, { id: "x", type: "slider", label: "x" })).toThrow(
+      /unknown field type/i,
+    );
   });
 
   it("rejects duplicate ids", () => {
