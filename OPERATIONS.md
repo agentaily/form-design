@@ -146,7 +146,17 @@ npm run build && npm run preview
 
 ---
 
-## 10. 关键约定回顾
+## 10. 设计同步（Claude Design → 代码）
+
+设计稿在 Claude Design 里迭代，用 **`design-sync` 技能**（用户级，`~/.claude/skills/design-sync/`）把每次 handoff 同步进本仓库，**不覆盖本地工程改动**。
+
+- **机制**：三方合并 —— `base`（上次同步的基线，存在 `.design-baseline/`）↔ `new`（新 handoff）↔ `local`（当前实现）。只把 `base→new` 真正变化的设计增量映射进来；`local` 独有的东西（`src/core` TS、`tests/`、CI、lefthook/changeset、tweak 过的默认值、消费 npm 包而非内联 `_ds`）原样保留；落到本地改动上的冲突会先问、不静默覆盖。
+- **基线**：`.design-baseline/`（git-ignored，含 `BASELINE.md` 记录来源 URL/design id/日期）。每次成功同步后由技能覆盖更新。
+- **怎么用**：把新的 `https://api.anthropic.com/v1/design/h/<id>` 链接发给我，或自己 `/design-sync`。设计系统组件用法走 `agentaily-design` 技能 + `@agentaily/design-system` 包，不重新内联 `_ds_bundle.js`。
+
+---
+
+## 11. 关键约定回顾
 
 - **代码格式**由 Prettier 统一（printWidth 100）；`SPEC.md` 不被格式化（见 `.prettierignore`）。
 - **`src/core` 是 TypeScript 且 strict**；应用 UI 仍是 JSX 原型。

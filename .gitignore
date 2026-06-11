@@ -8,3 +8,6 @@ coverage
 playwright-report
 test-results
 .playwright
+
+# design-sync baseline (working snapshot of the last Claude Design handoff)
+.design-baseline
