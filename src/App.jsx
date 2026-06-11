@@ -1,14 +1,40 @@
 // App.jsx — App shell: header, split layout, scripted runner, schema, share dialog.
 // All chrome composed from @agentaily/design-system.
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Badge, IconButton, Button, Tabs, Dialog, SchemaDisplay } from "@agentaily/design-system";
+import {
+  Badge,
+  IconButton,
+  Button,
+  Tabs,
+  Dialog,
+  SchemaDisplay,
+  Queue,
+} from "@agentaily/design-system";
 
 import { buildScript, intentReply, uid, INITIAL_META } from "./flow.jsx";
 import { Icon, ChatThread, ChatComposer } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
 import { MarkupLayer } from "./markup.jsx";
+import { MessageQueue } from "./core/queue";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// reactive media query — drives the single-column mobile layout.
+// Defensive: in non-browser/test environments without matchMedia, default to
+// desktop (false) and skip the listener so render never throws.
+function useMediaQuery(q) {
+  const supported = typeof window !== "undefined" && typeof window.matchMedia === "function";
+  const [match, setMatch] = useState(() => (supported ? window.matchMedia(q).matches : false));
+  useEffect(() => {
+    if (!supported) return;
+    const mq = window.matchMedia(q);
+    const on = () => setMatch(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, [q, supported]);
+  return match;
+}
 
 // UI state for the designer. In the design prototype these were exposed through a
 // Tweaks panel; here they're plain app state — theme + split are user-driven, the
@@ -67,7 +93,16 @@ export default function App() {
   const [markupOn, setMarkupOn] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [published, setPublished] = useState(false);
+  // single-column mobile layout (≤720px): one pane at a time via the sub-bar.
+  const isMobile = useMediaQuery("(max-width: 720px)");
+  const [mobileView, setMobileView] = useState("chat");
+  // continuous-send buffer (SPEC §4.1): pending messages shown above the composer.
+  const [queueItems, setQueueItems] = useState([]);
   const draggingRef = useRef(false);
+  // Latest fields, read inside async turns so a buffered batch sees current state.
+  const fieldsRef = useRef(fields);
+  // Whether the first message has bootstrapped the form (single scripted build).
+  const initRef = useRef(false);
   // Always points at the latest onSend. The scripted runner stores suggestion
   // handlers in message state at build time; routing them through this ref keeps
   // them from capturing a stale onSend (one that still sees fields=[]/meta=null).
@@ -76,6 +111,9 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", t.theme === "light" ? "light" : "dark");
   }, [t.theme]);
+  useEffect(() => {
+    fieldsRef.current = fields;
+  }, [fields]);
 
   const setValue = useCallback((id, v) => setValuesState((s) => ({ ...s, [id]: v })), []);
   const pushMsg = (m) => {
@@ -92,7 +130,6 @@ export default function App() {
     );
 
   const runBuild = async (brief) => {
-    setBuilding(true);
     for (const step of buildScript(brief)) {
       if (step.t === "reasoning") {
         const id = pushMsg({
@@ -142,14 +179,45 @@ export default function App() {
         await sleep(300);
       }
     }
-    setBuilding(false);
   };
 
-  const runFollowup = async (text) => {
-    setBuilding(true);
-    await sleep(250);
-    const r = intentReply(text, { fields });
-    if (r.tool) {
+  // apply a single resolved intent to form state (no chat side-effects)
+  const applyIntent = (r) => {
+    if (r.kind === "add") {
+      const fld = { ...r.field, id: uid("fld"), _new: true };
+      setFields((fs) => {
+        const ci = fs.findIndex((x) => x.type === "consent");
+        if (ci >= 0) {
+          const n = [...fs];
+          n.splice(ci, 0, fld);
+          return n;
+        }
+        return [...fs, fld];
+      });
+      clearNew(fld.id);
+    } else if (r.kind === "remove") {
+      setFields((fs) => fs.slice(0, -1));
+    } else if (r.kind === "require") {
+      setFields((fs) =>
+        fs.map((f) =>
+          r.match && f.label.includes(r.match) ? { ...f, required: true, _new: true } : f,
+        ),
+      );
+      if (r.match) setTimeout(() => setFields((fs) => fs.map((f) => ({ ...f, _new: false }))), 700);
+    } else if (r.kind === "meta") {
+      setMeta((m) => ({ ...m, ...r.set }));
+    } else if (r.kind === "publish") {
+      setPublished(true);
+    }
+  };
+
+  // process a BUFFER of follow-up prompts together: one set of tool calls, one
+  // combined reply (not one reply per message).
+  const runBatch = async (texts) => {
+    await sleep(280);
+    const results = texts.map((tx) => intentReply(tx, { fields: fieldsRef.current }));
+    for (const r of results) {
+      if (!r.tool) continue;
       const tid = pushMsg({
         role: "assistant",
         kind: "tool",
@@ -158,53 +226,70 @@ export default function App() {
         result: r.tool.result,
         status: "running",
       });
-      await sleep(500);
-      if (r.kind === "add") {
-        const fld = { ...r.field, id: uid("fld"), _new: true };
-        setFields((fs) => {
-          const ci = fs.findIndex((x) => x.type === "consent");
-          if (ci >= 0) {
-            const n = [...fs];
-            n.splice(ci, 0, fld);
-            return n;
-          }
-          return [...fs, fld];
-        });
-        clearNew(fld.id);
-      } else if (r.kind === "remove") {
-        setFields((fs) => fs.slice(0, -1));
-      } else if (r.kind === "require") {
-        setFields((fs) =>
-          fs.map((f) =>
-            r.match && f.label.includes(r.match) ? { ...f, required: true, _new: true } : f,
-          ),
-        );
-        if (r.match)
-          setTimeout(() => setFields((fs) => fs.map((f) => ({ ...f, _new: false }))), 700);
-      } else if (r.kind === "meta") {
-        setMeta((m) => ({ ...m, ...r.set }));
-      } else if (r.kind === "publish") {
-        setPublished(true);
-      }
+      await sleep(420);
+      applyIntent(r);
       patchMsg(tid, { status: "done" });
-      await sleep(250);
+      await sleep(160);
     }
-    const id = pushMsg({ role: "assistant", kind: "text", text: r.text, streaming: true });
-    await sleep(Math.min(1000, 350 + r.text.length * 16));
+    const text =
+      results.length === 1
+        ? results[0].text
+        : "好，这几处我一起改好了：" + results.map((r) => r.text).join(" ");
+    const id = pushMsg({ role: "assistant", kind: "text", text, streaming: true });
+    await sleep(Math.min(1100, 400 + text.length * 14));
     patchMsg(id, { streaming: false });
-    setBuilding(false);
-    if (r.kind === "publish") setShareOpen(true);
+    if (results.some((r) => r.kind === "publish")) setShareOpen(true);
   };
+
+  // One message queue for the whole session: connect-send N times → exactly one
+  // consumer loop; the first message bootstraps the form (single scripted build),
+  // everything after is drained as a BUFFER — whatever accumulated flushes together.
+  // `bufferRef` mirrors the queue's atomic flush so the scripted runner can render
+  // the exact per-message texts the consumer is processing this turn.
+  const queueRef = useRef(null);
+  const bufferRef = useRef([]);
+  if (!queueRef.current) {
+    const q = new MessageQueue(async () => {
+      const texts = bufferRef.current;
+      bufferRef.current = [];
+      texts.forEach((tx) => pushMsg({ role: "user", text: tx }));
+      setBuilding(true);
+      try {
+        if (!initRef.current) {
+          initRef.current = true;
+          // first turn: bootstrap from the first prompt only; any extras buffered
+          // in the same flush get handled as a follow-up batch right after.
+          await runBuild(texts[0]);
+          if (texts.length > 1) await runBatch(texts.slice(1));
+        } else {
+          await runBatch(texts);
+        }
+      } finally {
+        setBuilding(false);
+      }
+    });
+    q.onChange = (items) => setQueueItems(items.filter((m) => m.status === "pending"));
+    queueRef.current = q;
+  }
 
   const onSend = (override) => {
     const text = (override != null ? override : draft).trim();
-    if (!text || building) return;
-    setDraft("");
-    pushMsg({ role: "user", text });
-    if (fields.length === 0 && !meta) runBuild(text);
-    else runFollowup(text);
+    if (!text) return;
+    if (override == null) setDraft("");
+    bufferRef.current = [...bufferRef.current, text];
+    queueRef.current.enqueue(text);
   };
   onSendRef.current = onSend;
+
+  const removeQueued = (i) => {
+    const item = queueItems[i];
+    if (!item) return;
+    if (queueRef.current.cancel(item.id)) {
+      // keep the flush buffer in sync so the cancelled text is never sent
+      const j = bufferRef.current.indexOf(item.text);
+      if (j >= 0) bufferRef.current = bufferRef.current.filter((_, idx) => idx !== j);
+    }
+  };
 
   useEffect(() => {
     const move = (e) => {
@@ -260,13 +345,19 @@ export default function App() {
           >
             <Icon name={t.theme === "dark" ? "sun" : "moon"} size={15} />
           </IconButton>
-          <Button
-            variant="secondary"
-            icon={<Icon name="share" size={14} />}
-            onClick={() => setShareOpen(true)}
-          >
-            分享
-          </Button>
+          {isMobile ? (
+            <IconButton label="分享" onClick={() => setShareOpen(true)}>
+              <Icon name="share" size={15} />
+            </IconButton>
+          ) : (
+            <Button
+              variant="secondary"
+              icon={<Icon name="share" size={14} />}
+              onClick={() => setShareOpen(true)}
+            >
+              分享
+            </Button>
+          )}
           <Button
             variant="primary"
             icon={<Icon name="spark" size={14} />}
@@ -278,7 +369,25 @@ export default function App() {
         </div>
       </header>
 
-      <div className="d-split">
+      {isMobile ? (
+        <div className="d-mbar">
+          <button
+            className={"d-mseg" + (mobileView === "chat" ? " is-on" : "")}
+            onClick={() => setMobileView("chat")}
+          >
+            <Icon name="message" size={15} /> 对话
+          </button>
+          <button
+            className={"d-mseg" + (mobileView === "preview" ? " is-on" : "")}
+            onClick={() => setMobileView("preview")}
+          >
+            <Icon name="eye" size={15} /> 预览
+            {fieldCount ? <span className="d-mseg__count">{fieldCount}</span> : null}
+          </button>
+        </div>
+      ) : null}
+
+      <div className="d-split" data-mview={mobileView}>
         <section className="d-pane d-pane--chat" style={{ width: t.split + "%" }}>
           <ChatThread
             messages={messages}
@@ -287,13 +396,25 @@ export default function App() {
             density={t.density}
           />
           <div className="d-foot">
+            {queueItems.length > 0 ? (
+              <div className="d-foot__queue">
+                <Queue
+                  title="缓冲区·下一轮一起发"
+                  items={queueItems.map((q) => ({ text: q.text }))}
+                  onRemove={removeQueued}
+                />
+              </div>
+            ) : null}
             <ChatComposer
               value={draft}
               onChange={setDraft}
               onSend={() => onSend()}
-              disabled={building}
               placeholder={
-                empty ? "描述你想要的表单，例如：做一个活动报名表…" : "继续描述要怎么改…"
+                empty
+                  ? "描述你想要的表单，例如：做一个活动报名表…"
+                  : building
+                    ? "可继续输入，会收进缓冲区一起处理…"
+                    : "继续描述要怎么改…"
               }
             />
             <p className="d-foot__note">AGENTAILY 会出错 · 发布前请核对字段</p>
@@ -338,23 +459,27 @@ export default function App() {
                 >
                   <Icon name="markup" size={13} />
                 </IconButton>
-                <span className="d-seg__sep" />
-                <IconButton
-                  label="桌面宽度"
-                  size="sm"
-                  variant={device === "full" ? "solid" : "outline"}
-                  onClick={() => setDevice("full")}
-                >
-                  <Icon name="layout" size={13} />
-                </IconButton>
-                <IconButton
-                  label="手机宽度"
-                  size="sm"
-                  variant={device === "phone" ? "solid" : "outline"}
-                  onClick={() => setDevice("phone")}
-                >
-                  <Icon name="phone" size={13} />
-                </IconButton>
+                {!isMobile ? (
+                  <React.Fragment>
+                    <span className="d-seg__sep" />
+                    <IconButton
+                      label="桌面宽度"
+                      size="sm"
+                      variant={device === "full" ? "solid" : "outline"}
+                      onClick={() => setDevice("full")}
+                    >
+                      <Icon name="layout" size={13} />
+                    </IconButton>
+                    <IconButton
+                      label="手机宽度"
+                      size="sm"
+                      variant={device === "phone" ? "solid" : "outline"}
+                      onClick={() => setDevice("phone")}
+                    >
+                      <Icon name="phone" size={13} />
+                    </IconButton>
+                  </React.Fragment>
+                ) : null}
               </div>
             ) : null}
           </div>

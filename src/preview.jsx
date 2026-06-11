@@ -1,6 +1,7 @@
 // preview.jsx — live form preview, composed from @agentaily/design-system inputs.
-// Exports: FormPreview
-import React, { useState } from "react";
+// Validation is driven by the design-system Form.useForm hook (per-field rules,
+// focus-first-error on submit, live re-validation). Exports: FormPreview
+import React, { useEffect } from "react";
 import {
   Field,
   Input,
@@ -9,42 +10,82 @@ import {
   RadioGroup,
   Checkbox,
   Button,
+  Form,
 } from "@agentaily/design-system";
 import { fieldKindLabel, mkLabel } from "./core/markup";
 
-function FieldView({ field, value, onChange, error }) {
-  const { type, label, placeholder, required, options, _new } = field;
+// ── validation: one schema-style fn over the current (dynamic) fields ──
+const PV_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PV_TEL_RE = /^1[3-9]\d{9}$/;
+
+function pvIsEmpty(field, v) {
+  if (field.type === "checks") return !(Array.isArray(v) && v.length);
+  if (field.type === "consent") return !v;
+  return v === undefined || v === null || v === "";
+}
+
+function pvValidate(fields, vals) {
+  const errs = {};
+  fields.forEach((f) => {
+    const v = vals[f.id];
+    if (f.required && pvIsEmpty(f, v)) {
+      errs[f.id] =
+        f.type === "consent"
+          ? "请勾选后再提交"
+          : f.type === "radio" || f.type === "select"
+            ? "请选择一项"
+            : f.type === "checks"
+              ? "请至少选择一项"
+              : "此项必填";
+      return;
+    }
+    if (pvIsEmpty(f, v)) return; // optional + empty → skip format checks
+    if (f.type === "email" && !PV_EMAIL_RE.test(String(v))) errs[f.id] = "请输入有效的邮箱地址";
+    else if (f.type === "tel" && !PV_TEL_RE.test(String(v).replace(/[\s-]/g, "")))
+      errs[f.id] = "请输入有效的 11 位手机号";
+  });
+  return errs;
+}
+
+// ── one field, bound to the form hook ──
+function FieldView({ field, form }) {
+  const { id, type, label, placeholder, required, options, _new } = field;
   // DS Field has no className prop, so the entrance animation lives on a wrapper.
   const cls = _new ? "pv-in" : undefined;
-  const errText = error ? "此项必填" : undefined;
+
+  // form.field() registers the control + returns { name, value/checked, onChange, onBlur, error }.
+  // Build control props EXPLICITLY (never spread `error` onto a control, or it
+  // double-renders the message — the outer <Field> owns the message).
+  const b = form.field(id, type === "consent" ? { type: "checkbox" } : undefined);
+  const err = b.error;
 
   let control;
   if (type === "consent") {
     control = (
-      <Field error={errText}>
+      <Field error={err}>
         <Checkbox
           label={label + (required ? " *" : "")}
-          checked={!!value}
-          onChange={(e) => onChange(e.target.checked)}
+          name={b.name}
+          checked={!!b.checked}
+          onChange={b.onChange}
+          onBlur={b.onBlur}
         />
       </Field>
     );
   } else if (type === "radio") {
     control = (
-      <Field label={label} required={required} error={errText}>
-        <RadioGroup
-          name={field.id}
-          value={value || ""}
-          options={options}
-          onChange={(v) => onChange(v)}
-        />
+      <Field label={label} required={required} error={err}>
+        <RadioGroup name={b.name} value={b.value || ""} options={options} onChange={b.onChange} />
       </Field>
     );
   } else if (type === "checks") {
-    const arr = Array.isArray(value) ? value : [];
-    const toggle = (o, on) => onChange(on ? [...arr, o] : arr.filter((x) => x !== o));
+    const arr = Array.isArray(form.values[id]) ? form.values[id] : [];
+    const toggle = (o, on) =>
+      form.setValue(id, on ? [...arr, o] : arr.filter((x) => x !== o), {
+        shouldValidate: form.formState.isSubmitted,
+      });
     control = (
-      <Field label={label} required={required} error={errText}>
+      <Field label={label} required={required} error={err}>
         <div className="pv-checks">
           {options.map((o) => (
             <Checkbox
@@ -63,30 +104,41 @@ function FieldView({ field, value, onChange, error }) {
       ...options.map((o) => ({ value: o, label: o })),
     ];
     control = (
-      <Field label={label} required={required} error={errText}>
-        <Select options={opts} value={value || ""} onChange={(e) => onChange(e.target.value)} />
+      <Field label={label} required={required} error={err}>
+        <Select
+          options={opts}
+          name={b.name}
+          value={b.value || ""}
+          onChange={b.onChange}
+          onBlur={b.onBlur}
+        />
       </Field>
     );
   } else if (type === "textarea") {
     control = (
-      <Field label={label} required={required} error={errText}>
+      <Field label={label} required={required} error={err}>
         <Textarea
           rows={3}
           placeholder={placeholder}
-          value={value || ""}
-          onChange={(e) => onChange(e.target.value)}
+          name={b.name}
+          value={b.value || ""}
+          onChange={b.onChange}
+          onBlur={b.onBlur}
         />
       </Field>
     );
   } else {
     // text / tel / email
     control = (
-      <Field label={label} required={required} error={errText}>
+      <Field label={label} required={required} error={err}>
         <Input
           type={type === "email" ? "email" : type === "tel" ? "tel" : "text"}
           placeholder={placeholder}
-          value={value || ""}
-          onChange={(e) => onChange(e.target.value)}
+          className={err ? "ax-input--error" : ""}
+          name={b.name}
+          value={b.value || ""}
+          onChange={b.onChange}
+          onBlur={b.onBlur}
         />
       </Field>
     );
@@ -104,22 +156,32 @@ function FieldView({ field, value, onChange, error }) {
 }
 
 export function FormPreview({ meta, fields, values, setValue, style, building }) {
-  const [submitted, setSubmitted] = useState(false);
-  const [errors, setErrors] = useState({});
+  // The DS validation hook owns field state; validation runs over the live `fields`.
+  const form = Form.useForm({
+    mode: "onSubmit", // quiet until first submit
+    reValidateMode: "onChange",
+    validate: (vals) => pvValidate(fields, vals),
+  });
 
-  const submit = () => {
-    const errs = {};
-    fields.forEach((f) => {
-      if (!f.required) return;
-      const v = values[f.id];
-      const empty = f.type === "checks" ? !(Array.isArray(v) && v.length) : !v;
-      if (empty) errs[f.id] = true;
-    });
-    setErrors(errs);
-    if (Object.keys(errs).length === 0) setSubmitted(true);
-  };
+  const submitted = form.formState.isSubmitted && form.formState.isValid;
+
+  // Mirror the hook's values up to the app shell (kept in sync for schema/markup).
+  useEffect(() => {
+    const fv = form.values;
+    for (const k in fv) {
+      if (values[k] !== fv[k]) setValue(k, fv[k]);
+    }
+  }, [form.values]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live re-validation after the first submit. The hook's own onChange path reads
+  // the field value before React commits it (one change stale), so we re-run
+  // validation here, after values have actually committed.
+  useEffect(() => {
+    if (form.formState.isSubmitted) form.trigger();
+  }, [form.values]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (submitted) {
+    const firstName = form.getValues(fields[0]?.id) || "你";
     return (
       <div className={"pv-card pv-card--" + style + " pv-done"}>
         <div className="pv-done__mark">
@@ -138,13 +200,19 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
         </div>
         <h3 className="pv-done__h">报名成功</h3>
         <p className="pv-done__p">
-          我们已收到 <strong>{values[fields[0]?.id] || "你"}</strong>{" "}
+          我们已收到 <strong>{firstName}</strong>{" "}
           的报名，确认信会发送到你的邮箱。现场签到请出示手机号。
         </p>
         <div className="pv-done__code">
           CONFIRM · AGS-2026-0628-{String(Math.floor(Math.random() * 900) + 100)}
         </div>
-        <Button variant="secondary" full onClick={() => setSubmitted(false)}>
+        <Button
+          variant="secondary"
+          full
+          onClick={() => {
+            form.reset({});
+          }}
+        >
           再填一份
         </Button>
       </div>
@@ -177,21 +245,7 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
 
       <div className="pv-fields">
         {fields.map((f) => (
-          <FieldView
-            key={f.id}
-            field={f}
-            value={values[f.id]}
-            error={errors[f.id]}
-            onChange={(v) => {
-              setValue(f.id, v);
-              if (errors[f.id])
-                setErrors((e) => {
-                  const n = { ...e };
-                  delete n[f.id];
-                  return n;
-                });
-            }}
-          />
+          <FieldView key={f.id} field={f} form={form} />
         ))}
         {building ? (
           <div className="pv-building">
@@ -204,7 +258,7 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
 
       {fields.length > 0 ? (
         <div className="pv-footer" data-mk-label="提交按钮" data-mk-kind="按钮">
-          <Button variant="primary" size="lg" full disabled={building} onClick={submit}>
+          <Button variant="primary" size="lg" full disabled={building} onClick={form.handleSubmit}>
             提交报名
           </Button>
           <p className="pv-footer__note">提交即表示同意活动须知 · Powered by Agentaily Forms</p>
