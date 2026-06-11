@@ -23,14 +23,15 @@
 - **发布闭环（PR #4）**：表单发布 `POST /api/forms`、公开拉取 `GET /api/forms/:slug`、`/api/submit` 关联 form
 - **鉴权 + 数据后台（PR #5）**：`POST /api/auth/login`（密码 → session JWT）+ `requireAuth` 保护 owner-only 端点、`GET /api/forms/:slug/submissions`（读飞书提交列表）
 - **补严**：CORS（白名单跨域）、提交校验（表单状态门 + 必填校验，脏 / 未发布不写飞书）、表单管理 CRUD（`GET /api/forms` 列表 · `PATCH` 改状态 · `DELETE`）、安全收尾（常量时间密码比较、字段递归深度上限、飞书探测 `res.ok`）
+- **部署上线（2026-06-11）**：后端已上线 **https://form-design-api.agentaily.workers.dev** —— D1 `form-design-db`（APAC）建库 + 建表、3 个 runtime secret（`CONFIG_KEY`/`AUTH_SECRET`/`OWNER_PASSWORD`）已设、`wrangler deploy` 跑通、独立 CI `deploy-workers.yml`（push main 且 `workers/**` 变更自动部署）。独立 yarnbcoder 账户，Workers+D1 token 与运行时 secret 均进 vault。冒烟测试全绿（health 200 / 公开拉取 404 / 登录对 200 错 401）。详见 [OPERATIONS.md](./OPERATIONS.md) §12。
 
-> 后端全程双循环 TDD（spec → outer → impl → review），凭据进 vault（DeepSeek key、飞书自建应用）。
+> 后端全程双循环 TDD（spec → outer → impl → review），凭据进 vault（DeepSeek key、飞书自建应用、CF token、runtime secret）。
 
 ---
 
 ## 🚧 进行中
 
-- 后端核心已补严完整；下一步是待办里的 **部署** 与 **前端接入**
+- 后端核心已补严完整 **且已部署上线**；下一步是待办里的 **前端接入** 与 **飞书端到端**
 
 ---
 
@@ -38,7 +39,7 @@
 
 ### 后端
 
-- **部署**：`wrangler d1 create` + `secret put`（`CONFIG_KEY` / `OWNER_PASSWORD` / `AUTH_SECRET`）+ `wrangler deploy` + 给 `workers/` 配独立 CI
+- 绑自定义域名 `api.form-design.agentaily.com`（可选；现走 `*.workers.dev` 默认域）
 - 多 owner / 注册（现恒单 owner `default`）
 - 数据后台增强：聚合统计、分页、CSV 导出
 - 公开端点限流 / 防刷

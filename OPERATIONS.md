@@ -168,3 +168,65 @@ npm run build && npm run preview
 - **UI 一律复用** `@agentaily/design-system`，不手写组件。
 - **不自建后端**：真模型走 BYOK 浏览器直连，答题数据走托管 BaaS（详见 SPEC.md §8）。
 - **发布即部署**：push `main` 自动上 Pages；版本/Release 由 Changesets 管。
+
+---
+
+## 12. 后端运维（Workers + D1）
+
+后端是 `workers/` 子包（Hono on Cloudflare Workers + D1），与前端**独立部署**。规格见 SPEC.md §12–§21。
+
+### 速查
+
+| 项            | 值                                                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------------------------------ |
+| 线上 API      | **https://form-design-api.agentaily.workers.dev**                                                                  |
+| 健康检查      | `GET /health` → 200                                                                                                |
+| CF 账户       | yarnbcoder@gmail.com（account_id `e6ce8ba3…`，与前端 Pages 同账户）                                                |
+| Worker 名     | `form-design-api`（workers.dev 子域名 `agentaily`）                                                                |
+| D1 数据库     | `form-design-db`（id `9666fb73-…`，APAC，表 `owner_config` / `forms`）                                             |
+| 部署凭据      | vault `credentials/cloudflare-yarnbcoder-workers-deploy`（Workers Scripts:Edit + D1:Edit + Account Settings:Read） |
+| 运行时 secret | vault `credentials/form-design-workers-runtime`（`CONFIG_KEY` / `AUTH_SECRET` / `OWNER_PASSWORD`）                 |
+| 资源台账      | vault `resources/cloudflare/worker/form-design-api`、`resources/cloudflare/d1/form-design-db`                      |
+
+### CI/CD
+
+`.github/workflows/deploy-workers.yml`：push `main` 且 `workers/**`（或本 workflow）变更时自动 `wrangler deploy`。
+用 GitHub secret **`CLOUDFLARE_WORKERS_API_TOKEN`**（独立于 Pages 的 `CLOUDFLARE_API_TOKEN`）+ 共享 `CLOUDFLARE_ACCOUNT_ID`。手动触发：`gh workflow run deploy-workers.yml -R agentaily/form-design`。
+
+### 本地手动部署 / 运维
+
+在 `workers/` 内，凭据从 vault 内联取（明文不进上下文）：
+
+```bash
+cd workers && npm ci
+export CLOUDFLARE_API_TOKEN="$(jq -r .values.api_token ~/.claude/skills/vault/data/credentials/cloudflare-yarnbcoder-workers-deploy.json)"
+export CLOUDFLARE_ACCOUNT_ID="e6ce8ba37ac129ecb40227f2025d4fa6"
+
+npx wrangler deploy                                              # 部署
+npx wrangler d1 execute form-design-db --remote --file=schema.sql -y   # 重建/迁移表
+npx wrangler secret list                                        # 查 secret（不显值）
+npx wrangler tail                                               # 实时日志
+```
+
+### Secret 管理
+
+三个运行时 secret 用 `wrangler secret put`（**需 Worker 已部署存在**），值从 vault 经 stdin 灌入、不回显：
+
+```bash
+jq -r .values.config_key ~/.claude/skills/vault/data/credentials/form-design-workers-runtime.json \
+  | npx wrangler secret put CONFIG_KEY
+# AUTH_SECRET / OWNER_PASSWORD 同理（vault key: auth_secret / owner_password）
+```
+
+- `CONFIG_KEY`：AES-GCM 主密钥，加密 owner 的 DeepSeek/飞书凭据落 D1。**轮换会使已存密文无法解密**——换前需让 owner 重填配置。
+- `AUTH_SECRET`：session JWT（HS256）签名密钥。轮换会让所有已签发 token 失效（owner 需重新登录）。
+- `OWNER_PASSWORD`：owner 后台登录密码。
+
+### 故障排查
+
+| 症状                                  | 多半是                       | 处理                                                                                  |
+| ------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------- |
+| 部署报 `workers.dev subdomain` 未注册 | 账户首次用 Workers           | dashboard 打开 Workers & Pages 落地页自动建，或 `PUT /accounts/:id/workers/subdomain` |
+| `secret put` 报 script not found      | Worker 还没部署              | 先 `wrangler deploy` 再设 secret                                                      |
+| owner-only 端点 401                   | 缺/过期 JWT                  | 先 `POST /api/auth/login` 拿 token，再带 `Authorization: Bearer`                      |
+| 提交不写飞书                          | 表单未发布 / 必填缺 / 配置缺 | 查表单 status、必填项、owner `/api/config`（app_token/table_id）                      |
