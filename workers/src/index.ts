@@ -15,6 +15,7 @@ import {
   parseChatRequest,
   type ChatRequest,
 } from "./chat";
+import { testDeepSeek, testFeishu, type ConnProbe, type ConnTestResult } from "./conntest";
 
 /** Worker bindings (see wrangler.toml + vitest.config.ts). */
 interface Env {
@@ -134,6 +135,34 @@ app.post("/api/chat", async (c) => {
     status: 200,
     headers: { "content-type": "text/event-stream" },
   });
+});
+
+// POST /api/config/test — probe whether the SAVED owner config can connect.
+// Reads + decrypts the stored config (credentials are NOT taken from the request
+// body), then probes DeepSeek and Feishu INDEPENDENTLY: an unconfigured block is
+// reported as ok:false "未配置" without touching its upstream, and one probe's
+// failure never blocks the other. HTTP is always 200 — "can't connect" is a
+// normal result, not an HTTP error. The owner key / app_secret never appear in
+// any message, header, or body. See SPEC.md §14.
+app.post("/api/config/test", async (c) => {
+  const key = await importConfigKey(c.env.CONFIG_KEY);
+  const owner = await getOwnerConfig(c.env.DB, key);
+
+  // DeepSeek: unconfigured → "未配置" (no upstream call); otherwise probe.
+  const deepseek: ConnProbe =
+    owner.deepseek === null
+      ? { ok: false, message: "未配置" }
+      : await testDeepSeek(owner.deepseek.apiKey);
+
+  // Feishu: independent of DeepSeek's outcome. Unconfigured → "未配置" (no
+  // upstream call); otherwise probe with the saved app_id + app_secret.
+  const feishu: ConnProbe =
+    owner.feishu === null
+      ? { ok: false, message: "未配置" }
+      : await testFeishu(owner.feishu.appId, owner.feishu.appSecret);
+
+  const result: ConnTestResult = { deepseek, feishu };
+  return c.json(result, 200);
 });
 
 export default app;

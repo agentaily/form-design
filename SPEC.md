@@ -650,3 +650,74 @@ Worker 内部流程：
 - **明文 key 只进 Authorization、不出网（除上游）：** owner 的 DeepSeek 明文 key 仅在 Worker 内由 `getOwnerConfig` 解密得到，唯一去向是发往 `api.deepseek.com` 的 `Authorization: Bearer` 头。它**绝不**出现在：返回给前端的任何响应（成功流或错误体）、HTTP 头回显、日志。
 - **不回显上游凭据相关信息：** 上游 4xx（如 401 invalid key）转成给前端的错误时，只保留「上游拒绝/出错」语义，不把 owner key 或可反推 key 的内容带回。
 - **沿用 §12 的加密边界：** key 的解密只发生在 Worker 内（`CONFIG_KEY` + `getOwnerConfig`）；D1 里仍是密文，浏览器侧自始至终拿不到明文。
+
+---
+
+## 14. 后端 · 连接测试 `POST /api/config/test`（探一下已保存配置能否连通）
+
+> **与第 12/13 节的关系：** §12 把 owner 的 DeepSeek key 与飞书凭据加密存进 D1；§13 用 DeepSeek key 代理对话。本节给「集成设置」的「测试连接」按钮提供后端：用 owner **已保存的**那份配置（由 `getOwnerConfig` 解密得到，**不**在请求体里收凭据），各自探一下 DeepSeek 与飞书能否连通，把每条连接的结果分别回报。
+>
+> **测的是 D1 里存的那份：** MVP 不接收请求体里的临时凭据——「测试连接」测的就是当前已保存、后续真正会用的那份配置。请求体为空（或被忽略）。
+>
+> **本节范围（第一刀，仅 Worker 端）：** `POST /api/config/test` 的探测目标（上游轻量端点）、判定规则、响应形状、未配置约定、安全（key/secret 不出网、不进 message）。
+>
+> **不在本节：** 飞书多维表格的读写（`appToken` / `tableId` 是否指向有效表）、答题提交落库（那是 #4 `/api/submit`）、前端「测试连接」按钮接入。本刀只验**凭据级**连通性：DeepSeek key 是否有效、飞书自建应用的 `app_id` + `app_secret` 能否换到 `tenant_access_token`。
+
+### 14.1 端点职责
+
+`POST /api/config/test` 读取已保存配置（`getOwnerConfig`，§13.1 同一内部视图），对两块凭据**各自独立**发起一次轻量上游探测，互不影响地把两条结果汇成一个对象返回。任一探测的成败都**不**改变 HTTP 状态码——「连不上」是正常的探测结果，不是 HTTP 错误。
+
+Worker 内部流程：
+
+```
+1) importConfigKey(env.CONFIG_KEY)                  ← AES-GCM 主密钥（§12.2）
+2) getOwnerConfig(env.DB, key)                       ← 读单行 + 解密 → OwnerConfig 内部视图
+3) DeepSeek 探测：
+     owner.deepseek === null  → { ok:false, message:"未配置" }（不打上游）
+     否则 testDeepSeek(owner.deepseek.apiKey)
+4) 飞书探测：
+     owner.feishu === null    → { ok:false, message:"未配置" }（不打上游）
+     否则 testFeishu(owner.feishu.appId, owner.feishu.appSecret)
+5) 200 { deepseek, feishu }                          ← 两条结果各自独立
+```
+
+> 两条探测彼此**独立**：DeepSeek 连不通不影响飞书探测照常进行，反之亦然。任一上游不可达/超时也只把**那一条**判为 `ok:false`，另一条照常返回。
+
+### 14.2 各连接的上游探测与判定
+
+| 块 | 上游端点 | 凭据用法 | 判定 `ok:true` 的条件 |
+|---|---|---|---|
+| DeepSeek | `GET https://api.deepseek.com/models` | `Authorization: Bearer <ownerKey>` | 上游 `2xx`（key 有效、能列模型）|
+| 飞书 | `POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal` | body `{ app_id, app_secret }`（JSON） | 上游 `200` 且响应体 `code === 0`（拿到 `tenant_access_token`，自建应用凭据有效）|
+
+- **DeepSeek：** 用 owner 明文 key 调一个最便宜的校验端点（`GET /models`，不消耗推理额度），上游 `2xx` 即认为 key 有效 → `ok:true`；`401`/其它非 2xx → `ok:false`（key 失效 / 被拒）。
+- **飞书：** 用 owner 的 `app_id` + `app_secret` 走自建应用换 `tenant_access_token` 的标准端点；飞书的约定是 HTTP `200` 也可能带业务错误码，所以**必须看 body 的 `code`**：`code === 0` 才算连通（凭据有效），`code !== 0`（如 `99991663` app secret 错）→ `ok:false`。
+- **`appToken` / `tableId` 不在本刀校验**：本节只验自建应用凭据本身能否换 token，不验它对某张多维表格的读写权限（留给 `/api/submit`）。
+
+### 14.3 响应契约（`ConnTestResult`）
+
+`200`，`application/json`：
+
+```jsonc
+{
+  "deepseek": { "ok": true },
+  "feishu":   { "ok": false, "message": "凭据无效" }
+}
+```
+
+- 形状：`{ deepseek: ConnProbe, feishu: ConnProbe }`，每个 `ConnProbe` 为 `{ ok: boolean, message?: string }`。
+- **HTTP 永远 `200`**（除非请求本身异常，如 `CONFIG_KEY` 缺失这类基础设施错才走 5xx）。「测不通」是正常结果，体现在 `ok:false` + `message`，**不是** HTTP 错误码。
+- `message` 是**人可读的**简短说明（成功可省略；失败给一句排障线索，如「未配置」「凭据无效」「上游不可达」「上游返回 401」）。它只描述结果语义，**绝不**回显凭据或可反推凭据的内容。
+
+### 14.4 未配置约定
+
+- 某块在 D1 里从未配置（`owner.deepseek === null` 或 `owner.feishu === null`）→ 该块 `{ ok:false, message:"未配置" }`，**不打上游**。
+- 约定用 `ok:false` 表达「未配置」（而非引入第三态 `skipped`）：对调用方「测试连接」而言，「没配过」和「配了但连不通」都属于「这条还不能用」，统一成 `ok:false` 最简单；`message` 区分二者（「未配置」vs「凭据无效」/「上游…」）。
+- 两块都未配置 → 两条都 `{ ok:false, message:"未配置" }`，HTTP 仍 `200`。
+
+### 14.5 安全（凭据不出网、不进 message）
+
+- **明文凭据只发往对应上游：** owner 的 DeepSeek 明文 key 仅用于 DeepSeek 探测的 `Authorization: Bearer`；飞书 `app_secret`（与 `app_id`）仅用于飞书探测的请求体。它们解密自 `getOwnerConfig`，唯一去向是各自的上游探测请求。
+- **凭据绝不进响应：** key / `app_secret` **绝不**出现在响应 body（含任何 `message`）、响应头、或日志中。
+- **即便上游回错也不拼凭据：** 上游 `401`/`code≠0` 等错误转成 `message` 时，只保留「上游拒绝/出错」语义（可带上游状态码或飞书 `code` 这类**非敏感**摘要供排障），**绝不**把凭据或其片段拼进 `message`。
+- **沿用 §12 的加密边界：** 解密只发生在 Worker 内；D1 里仍是密文，浏览器侧拿不到明文。
