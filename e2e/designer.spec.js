@@ -1,12 +1,14 @@
 import { test, expect } from "@playwright/test";
-import { mockChat } from "./chatMock.js";
+import { mockChat, mockPublish } from "./chatMock.js";
 
 // End-to-end against the real designer in a real browser. The chat designer
 // streams from POST /api/chat (OpenAI/DeepSeek tool-calling); mockChat intercepts
 // it with a canned SSE stream so the build is deterministic and needs no backend.
+// mockPublish intercepts POST /api/forms (§16.2) so 发布 succeeds without a backend.
 test.describe("Agentaily Forms · 设计器", () => {
   test.beforeEach(async ({ page }) => {
     await mockChat(page);
+    await mockPublish(page);
     await page.goto("/");
   });
 
@@ -26,11 +28,11 @@ test.describe("Agentaily Forms · 设计器", () => {
     await page.getByRole("button", { name: "提交报名" }).click();
     await expect(page.getByText("此项必填").first()).toBeVisible();
 
-    // publish from the header → LIVE + share dialog with the public link
+    // publish from the header → PublishFeedback auto-publishes via POST /api/forms
+    // (mockPublish → { slug }) and renders the public /f/:slug fill link; on success
+    // onPublished flips the header badge DRAFT → LIVE.
     await page.getByRole("button", { name: "发布", exact: true }).click();
+    await expect(page.locator(".d-publish__url")).toHaveText("/f/f8Kq2pXa");
     await expect(page.getByText("LIVE")).toBeVisible();
-    await expect(page.locator(".d-share__url")).toHaveText(
-      "forms.agentaily.dev/agentaily-salon-sh",
-    );
   });
 });
