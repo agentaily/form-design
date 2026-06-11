@@ -4,10 +4,12 @@ import {
   addField,
   updateField,
   removeField,
+  duplicateField,
   reorderFields,
   setValidation,
   validateValue,
   FIELD_TYPES,
+  __resetFieldIdCounter,
 } from "../../src/core/schema";
 
 const txt = (id, label = "L") => ({ id, type: "text", label });
@@ -69,6 +71,103 @@ describe("schema · removeField", () => {
     const removed = removeField(s, "a");
     expect(removed.id).toBe("a");
     expect(s.fields.map((x) => x.id)).toEqual(["b"]);
+  });
+});
+
+describe("schema · duplicateField", () => {
+  it("inserts the copy right after the source field", () => {
+    const s = createSchema([txt("name", "姓名"), txt("email", "邮箱")]);
+    const copy = duplicateField(s, "name");
+    expect(s.fields.map((x) => x.id)).toEqual(["name", copy.id, "email"]);
+  });
+
+  it("gives the copy the same content but a different id", () => {
+    const s = createSchema([{ id: "name", type: "text", label: "姓名", required: true }]);
+    const copy = duplicateField(s, "name");
+    expect(copy.id).not.toBe("name");
+    expect({ ...copy, id: undefined }).toEqual({ ...s.fields[0], id: undefined });
+  });
+
+  it("grows the field count by one", () => {
+    const s = createSchema([txt("name", "姓名"), txt("email", "邮箱")]);
+    duplicateField(s, "name");
+    expect(s.fields).toHaveLength(3);
+  });
+
+  it("returns the newly inserted field", () => {
+    const s = createSchema([txt("name", "姓名")]);
+    const copy = duplicateField(s, "name");
+    expect(s.fields[1]).toBe(copy);
+  });
+
+  it("deep-copies so edits to the copy do not leak into the source", () => {
+    const s = createSchema([
+      { id: "g", type: "group", label: "组", children: [{ id: "c1", type: "text", label: "子" }] },
+    ]);
+    const copy = duplicateField(s, "g");
+    copy.children[0].label = "改了";
+    expect(s.fields[0].children[0].label).toBe("子");
+  });
+
+  it("gives cloned group children fresh ids recursively", () => {
+    const s = createSchema([
+      {
+        id: "g",
+        type: "group",
+        label: "组",
+        children: [
+          { id: "c1", type: "text", label: "子1" },
+          {
+            id: "c2",
+            type: "group",
+            label: "嵌套",
+            children: [{ id: "c3", type: "text", label: "孙" }],
+          },
+        ],
+      },
+    ]);
+    const copy = duplicateField(s, "g");
+    const copyIds = [copy.children[0].id, copy.children[1].id, copy.children[1].children[0].id];
+    expect(copyIds).not.toContain("c1");
+    expect(copyIds).not.toContain("c2");
+    expect(copyIds).not.toContain("c3");
+    expect(new Set(copyIds).size).toBe(3);
+  });
+
+  it("throws for an unknown id and leaves the schema unchanged", () => {
+    const s = createSchema([txt("name", "姓名"), txt("email", "邮箱")]);
+    expect(() => duplicateField(s, "ghost")).toThrow(/not found/i);
+    expect(s.fields).toHaveLength(2);
+  });
+
+  // regression: an explicit id matching the auto-id pattern must not collide with
+  // genFieldId()'s counter (the bug the reviewer caught). The reset pins the
+  // counter to the collision window, so this FAILS if the collision-aware
+  // allocator is reverted (without it, the clone would re-mint "field_1").
+  it("mints unique ids even when an explicit id matches the auto-id pattern", () => {
+    __resetFieldIdCounter(); // next genFieldId() would be "field_1"
+    const s = createSchema([{ id: "field_1", type: "text", label: "x" }]);
+    const copy = duplicateField(s, "field_1");
+    expect(copy.id).not.toBe("field_1");
+    const ids = s.fields.map((f) => f.id);
+    expect(new Set(ids).size).toBe(ids.length); // every id unique
+  });
+
+  it("deep-copies options and validation (no shared references)", () => {
+    const s = createSchema([
+      {
+        id: "sel",
+        type: "select",
+        label: "方向",
+        options: [{ label: "前端", value: "fe" }],
+        validation: { message: "必选" },
+      },
+    ]);
+    const copy = duplicateField(s, "sel");
+    copy.options[0].value = "changed";
+    copy.validation.message = "改了";
+    expect(s.fields[0].options[0].value).toBe("fe");
+    expect(s.fields[0].validation.message).toBe("必选");
   });
 });
 

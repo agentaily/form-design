@@ -58,6 +58,33 @@ export function genFieldId(): string {
   return `field_${(++_idCounter).toString(36)}`;
 }
 
+/** @internal Test hook: reset the auto-id counter so id-dependent tests are deterministic. */
+export function __resetFieldIdCounter(): void {
+  _idCounter = 0;
+}
+
+/** Collect every field id in the schema, recursively including nested children. */
+function collectIds(fields: Field[], into: Set<string> = new Set()): Set<string> {
+  for (const f of fields) {
+    into.add(f.id);
+    if (f.children) collectIds(f.children, into);
+  }
+  return into;
+}
+
+/**
+ * Generate a field id that is guaranteed free of every id in `used`, then record
+ * it in `used` so subsequent calls (siblings/children of the same clone) stay unique.
+ * Collision-aware: explicit ids elsewhere in the schema can sit ahead of the counter,
+ * so we keep bumping until the generated id is unused.
+ */
+function genFreshFieldId(used: Set<string>): string {
+  let id = genFieldId();
+  while (used.has(id)) id = genFieldId();
+  used.add(id);
+  return id;
+}
+
 function normalizeField(f: FieldInput): Field {
   if (!f || typeof f !== "object") throw new Error("field must be an object");
   if (!FIELD_TYPES.includes(f.type)) throw new Error(`Unknown field type: ${f.type}`);
@@ -108,6 +135,29 @@ export function removeField(schema: Schema, id: string): Field {
   const i = indexOf(schema, id);
   if (i < 0) throw new Error(`Field not found: ${id}`);
   return schema.fields.splice(i, 1)[0];
+}
+
+/**
+ * Deep-copy a field, assigning a fresh id to it and (recursively) to any children.
+ * `used` carries every id already taken in the target schema (plus ids allocated by
+ * earlier nodes of this same clone), so freshly minted ids are unique schema-wide.
+ */
+function cloneFieldWithFreshIds(field: Field, used: Set<string>): Field {
+  const copy: Field = { ...field, id: genFreshFieldId(used) };
+  if (field.options) copy.options = field.options.map((o) => ({ ...o }));
+  if (field.validation) copy.validation = { ...field.validation };
+  if (field.children) copy.children = field.children.map((c) => cloneFieldWithFreshIds(c, used));
+  return copy;
+}
+
+/** Duplicate a field by id; the copy keeps the same content with a fresh id and is inserted right after the original. Returns the new field. */
+export function duplicateField(schema: Schema, id: string): Field {
+  const i = indexOf(schema, id);
+  if (i < 0) throw new Error(`Field not found: ${id}`);
+  const used = collectIds(schema.fields);
+  const copy = cloneFieldWithFreshIds(schema.fields[i], used);
+  schema.fields.splice(i + 1, 0, copy);
+  return copy;
 }
 
 /** Reorder fields. `ids` must be a permutation of the existing field ids. */

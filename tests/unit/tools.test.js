@@ -11,7 +11,7 @@ function setup() {
 }
 
 describe("tools · definitions", () => {
-  it("declares the 5 file tools + 6 form tools as Anthropic tool schemas", () => {
+  it("declares the 5 file tools + 7 form tools as Anthropic tool schemas", () => {
     expect(FILE_TOOLS.map((t) => t.name)).toEqual([
       "list_files",
       "read_file",
@@ -24,10 +24,11 @@ describe("tools · definitions", () => {
       "add_field",
       "update_field",
       "remove_field",
+      "duplicate_field",
       "reorder_fields",
       "set_validation",
     ]);
-    expect(ALL_TOOLS).toHaveLength(11);
+    expect(ALL_TOOLS).toHaveLength(12);
     for (const t of ALL_TOOLS) {
       expect(t).toHaveProperty("name");
       expect(t).toHaveProperty("description");
@@ -71,6 +72,18 @@ describe("tools · form-op dispatch mutates the schema", () => {
 
     await executeTool("remove_field", { id: "name" });
     expect(schema.fields).toHaveLength(0);
+  });
+
+  it("duplicate_field inserts a same-content, fresh-id copy after the source", async () => {
+    const { schema, executeTool } = setup();
+    await executeTool("add_field", { field: { id: "name", type: "text", label: "姓名" } });
+    await executeTool("add_field", { field: { id: "email", type: "text", label: "邮箱" } });
+
+    const copy = await executeTool("duplicate_field", { id: "name" });
+    expect(schema.fields).toHaveLength(3);
+    expect(schema.fields.map((x) => x.id)).toEqual(["name", copy.id, "email"]);
+    expect(copy.id).not.toBe("name");
+    expect(copy.label).toBe("姓名");
   });
 
   it("get_form_schema returns the live schema", async () => {

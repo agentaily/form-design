@@ -9,6 +9,7 @@ import {
   addField,
   updateField,
   removeField,
+  duplicateField,
   reorderFields,
   setValidation,
 } from "./schema";
@@ -101,6 +102,11 @@ export const FORM_TOOLS: ToolDef[] = [
     input_schema: { type: "object", properties: { id: str }, required: ["id"] },
   },
   {
+    name: "duplicate_field",
+    description: "复制字段；在原字段之后插入一个内容相同、id 不同的副本。",
+    input_schema: { type: "object", properties: { id: str }, required: ["id"] },
+  },
+  {
     name: "reorder_fields",
     description: "排序字段。",
     input_schema: {
@@ -148,6 +154,7 @@ export function createToolExecutor({ vfs, schema }: ToolContext): ExecuteTool {
     add_field: ({ field }) => addField(schema, field),
     update_field: ({ id, patch }) => updateField(schema, id, patch),
     remove_field: ({ id }) => removeField(schema, id),
+    duplicate_field: ({ id }) => duplicateField(schema, id),
     reorder_fields: ({ ids }) => reorderFields(schema, ids),
     set_validation: ({ id, rules }) => setValidation(schema, id, rules),
   };
