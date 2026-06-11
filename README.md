@@ -36,8 +36,9 @@ npm run test:e2e   # Playwright end-to-end (real browser; PW_PORT overrides 5173
 The designer talks to the Cloudflare Workers backend over `VITE_API_BASE`
 (`POST /api/chat`, etc. — see `SPEC.md` §12–§21). Leave it empty for same-origin
 `/api/*`; point it at a local backend with `cd workers && npx wrangler dev` then
-`VITE_API_BASE=http://127.0.0.1:8787`. `/api/chat` is owner-only, so a session
-token (owner login) is sent as a Bearer header once that flow is wired.
+`VITE_API_BASE=http://127.0.0.1:8787`. `/api/chat` is owner-only, so the owner
+logs in (`POST /api/auth/login`) and the session token rides every owner-only
+request as a Bearer header (`core/auth` + the account dialog in `src/auth.jsx`).
 
 ## How it's wired
 
@@ -47,6 +48,7 @@ token (owner login) is sent as a Bearer header once that flow is wired.
   sub-bar), the live agent turn (streamed prose + tool-call cards) driven through
   `core/queue` (continuous-send buffer + `Queue` UI), Schema view, share dialog.
 - `src/chat.jsx` — chat side: `Message` / `Reasoning` / `ToolCall` / `Composer` / `Suggestions` / `Alert`.
+- `src/auth.jsx` — owner login / account dialog (`Dialog` / `Input` / `Button` / `Alert`); password form when logged out, confirmation + logout when logged in.
 - `src/preview.jsx` — live form: `Field` / `Input` / `Textarea` / `Select` / `RadioGroup` / `Checkbox` / `Button`, with validation via the DS `Form.useForm` hook.
 - `src/app.css` — layout-only styles (page chrome, split, form-card shell); all values reference DS tokens.
 - `src/core/` — the **SPEC architecture's testable core** (TypeScript, strict),
@@ -55,7 +57,8 @@ token (owner login) is sent as a Bearer header once that flow is wired.
   typed `ApiError`), `sse.ts` (SSE decoder), `openaiStream.ts` (OpenAI/DeepSeek
   stream assembly), `designerTools.ts` (UI field model + tool defs + system
   prompt), `designerLoop.ts` (ReAct turn, OpenAI shape, self-healing),
-  `designerChat.ts` (the real `POST /api/chat` caller). Plus the original blocks:
+  `designerChat.ts` (the real `POST /api/chat` caller), `auth.ts` (owner login →
+  session token via `POST /api/auth/login`, stored in `apiClient`). Plus the original blocks:
   `vfs.ts`, `schema.ts`, `tools.ts` (Anthropic tool defs/executor), `queue.ts`
   (single-consumer queue + batch merge), `srcdoc.ts`, `agentLoop.ts` — the VFS →
   iframe rendering path described in `SPEC.md`.
@@ -94,5 +97,6 @@ backend proxy `POST /api/chat` (SPEC §13) via `designerChat`. The model calls t
 form tools in `designerTools` (`set_form_meta`, `add_field`, …), which mutate the
 live form model that `preview.jsx` renders; failed tool calls backfill as errors so
 the model self-heals. Tests inject a fake `chat` into `<App chat={…} />` for
-deterministic builds. `/api/chat` is owner-only — the owner-login/Bearer flow and
-the config/publish/submit endpoints land in later phases (see `ROADMAP.md`).
+deterministic builds. `/api/chat` is owner-only — the owner-login/Bearer flow is
+wired (`core/auth` + `src/auth.jsx`; a 401 auto-opens the login dialog), while the
+config/publish/submit endpoints land in later phases (see `ROADMAP.md`).

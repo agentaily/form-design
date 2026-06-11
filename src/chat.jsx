@@ -62,6 +62,18 @@ const ICON_PATHS = {
   ),
   x: <path d="M18 6 6 18M6 6l12 12" />,
   arrow: <path d="M5 12h14M12 5l7 7-7 7" />,
+  lock: (
+    <g>
+      <rect x="3" y="11" width="18" height="11" rx="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </g>
+  ),
+  user: (
+    <g>
+      <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </g>
+  ),
   markup: (
     <g>
       <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />

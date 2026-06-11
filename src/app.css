@@ -534,6 +534,19 @@ body {
   margin: 12px 0 0;
 }
 
+/* ───────────────────────── owner login / account dialog ───────────────────────── */
+.d-auth-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.d-auth__note {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  line-height: var(--leading-snug);
+  margin: 0;
+}
+
 /* ───────────────────────── responsive: phone (single column) ───────────────────────── */
 .d-mbar {
   display: none;
