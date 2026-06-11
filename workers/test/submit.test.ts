@@ -70,8 +70,10 @@ function stubFetch(
 }
 
 describe("parseSubmitRequest (SPEC.md §15.2 request shape)", () => {
-  it("accepts a well-formed body with text + multi-select answers", () => {
+  it("accepts a well-formed body with formSlug + text + multi-select answers", () => {
+    // §16.5 made formSlug a required, non-empty field on the submit body.
     const body = {
+      formSlug: "f8Kq2pXa",
       answers: [
         { label: "姓名", value: "张三" },
         { label: "兴趣", value: ["阅读", "运动"] },
@@ -80,9 +82,20 @@ describe("parseSubmitRequest (SPEC.md §15.2 request shape)", () => {
 
     const parsed = parseSubmitRequest(body);
 
+    expect(parsed.formSlug).toBe("f8Kq2pXa");
     expect(parsed.answers).toHaveLength(2);
     expect(parsed.answers[0]).toEqual({ label: "姓名", value: "张三" });
     expect(parsed.answers[1]).toEqual({ label: "兴趣", value: ["阅读", "运动"] });
+  });
+
+  it("rejects a body missing formSlug (now required, §16.5)", () => {
+    expect(() => parseSubmitRequest({ answers: [{ label: "姓名", value: "张三" }] })).toThrow();
+  });
+
+  it("rejects an empty formSlug (now required non-empty, §16.5)", () => {
+    expect(() =>
+      parseSubmitRequest({ formSlug: "", answers: [{ label: "姓名", value: "张三" }] }),
+    ).toThrow();
   });
 
   it("rejects an empty answers array", () => {

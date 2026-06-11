@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { applySchema, resetConfig } from "./helpers";
+import { applySchema, resetConfig, resetForms } from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
@@ -198,10 +198,46 @@ function postSubmit(body: unknown): Promise<Response> {
   });
 }
 
-// A representative submission: one text answer + one multi-select answer.
+/**
+ * Publish a form via the real POST /api/forms route and return its slug.
+ *
+ * §16.5 made `formSlug` a required field on POST /api/submit and added a
+ * "先校验 form 存在" gate before any Feishu call. So every submit scenario that
+ * means to exercise the §15 Feishu write must FIRST publish a form and attach
+ * its slug — otherwise it would 400 on the missing slug before reaching Feishu.
+ * The §15 behaviour under test is unchanged; the slug is just the new front gate.
+ */
+async function publishFormAndGetSlug(): Promise<string> {
+  const res = await SELF.fetch(`${BASE}/api/forms`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      meta: { title: "提交测试表单" },
+      fields: [
+        { id: "f_name", type: "text", label: "姓名" },
+        { id: "f_hobby", type: "checkbox", label: "兴趣" },
+      ],
+    }),
+  });
+  if (res.status !== 201) {
+    throw new Error(`setup publishForm failed: ${res.status} ${await res.text()}`);
+  }
+  const json = (await res.json()) as { slug?: string };
+  if (typeof json.slug !== "string" || json.slug.length === 0) {
+    throw new Error(`setup publishForm returned no slug: ${JSON.stringify(json)}`);
+  }
+  return json.slug;
+}
+
+// A representative submission: one text answer + one multi-select answer. The
+// `formSlug` is filled per-scenario after publishing a form (see makeSubmission).
 const TEXT_ANSWER = { label: "姓名", value: "张三" };
 const MULTI_ANSWER = { label: "兴趣", value: ["阅读", "运动"] };
-const SUBMISSION = { answers: [TEXT_ANSWER, MULTI_ANSWER] };
+
+/** A full, valid submission body for `slug`: required formSlug + the answers. */
+function makeSubmission(slug: string): { formSlug: string; answers: unknown[] } {
+  return { formSlug: slug, answers: [TEXT_ANSWER, MULTI_ANSWER] };
+}
 
 describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   let mock: FeishuMock | undefined;
@@ -212,6 +248,7 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
 
   beforeEach(async () => {
     await resetConfig();
+    await resetForms();
   });
 
   afterEach(() => {
@@ -222,6 +259,8 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   it("Scenario: 飞书已配且上游都 OK 时写入成功并返回 recordId", async () => {
     // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
+    // And 一份已发布的表单（§16.5：submit 需带合法 formSlug 才会走飞书写入）
+    const slug = await publishFormAndGetSlug();
     // And 上游飞书 tenant_access_token 接口将返回 code 为 0
     // And 上游飞书多维表格新增记录接口将返回 code 为 0 且带 record id
     mock = installFeishuMock({
@@ -229,8 +268,8 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
       record: { status: 200, body: BITABLE_OK_BODY },
     });
 
-    // When 答题者向 /api/submit 提交一份作答
-    const res = await postSubmit(SUBMISSION);
+    // When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
+    const res = await postSubmit(makeSubmission(slug));
 
     // Then 响应状态码为 200
     expect(res.status).toBe(200);
@@ -248,6 +287,8 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   it("Scenario: answers 正确映射进飞书 fields", async () => {
     // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
+    // And 一份已发布的表单（带 slug 提交的前置门，§16.5）
+    const slug = await publishFormAndGetSlug();
     // And 两段上游都将返回 code 为 0
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
@@ -255,7 +296,7 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
     });
 
     // When 答题者提交含一个文本答案与一个多选答案的作答
-    const res = await postSubmit(SUBMISSION);
+    const res = await postSubmit(makeSubmission(slug));
     expect(res.status).toBe(200);
 
     // The token-exchange request carried the owner's saved app_id/app_secret in
@@ -284,12 +325,15 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   it("Scenario: 飞书未配时返回 409 且不打上游", async () => {
     // Given 一个未配置飞书的 owner (DeepSeek only).
     await configureOwner({ feishu: false });
+    // And 一份已发布的表单：slug 合法，使 formExists 门通过，让 409「未配飞书」成为
+    // 触发原因（而非 404），以隔离测原本的 §15 未配飞书行为（§16.5）。
+    const slug = await publishFormAndGetSlug();
     // BOTH upstream replies OMITTED: any Feishu call would THROW, proving the route
     // makes zero outbound calls when Feishu is unconfigured.
     mock = installFeishuMock({});
 
-    // When 答题者向 /api/submit 提交一份作答
-    const res = await postSubmit(SUBMISSION);
+    // When 答题者带着合法 slug 向 /api/submit 提交一份作答
+    const res = await postSubmit(makeSubmission(slug));
 
     // Then 响应状态码为 409 并提示 owner 未配置飞书
     expect(res.status).toBe(409);
@@ -306,11 +350,13 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   it("Scenario: 空 answers 时返回 400 且不打上游", async () => {
     // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
+    // And 一份已发布的表单：formSlug 合法，使 400 是「空 answers」所致（隔离原断言）。
+    const slug = await publishFormAndGetSlug();
     // Upstream replies OMITTED: a 400 must short-circuit before any Feishu call.
     mock = installFeishuMock({});
 
-    // When 答题者向 /api/submit 提交一份空 answers 的请求
-    const res = await postSubmit({ answers: [] });
+    // When 答题者向 /api/submit 提交一份空 answers 的请求（formSlug 合法）
+    const res = await postSubmit({ formSlug: slug, answers: [] });
 
     // Then 响应状态码为 400
     expect(res.status).toBe(400);
@@ -325,10 +371,12 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   it("Scenario: 缺少 answers 时返回 400 且不打上游", async () => {
     // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
+    // And 一份已发布的表单：formSlug 合法，使 400 是「缺 answers」所致（隔离原断言）。
+    const slug = await publishFormAndGetSlug();
     mock = installFeishuMock({});
 
-    // When 答题者向 /api/submit 提交缺少 answers 的请求
-    const res = await postSubmit({ foo: "bar" });
+    // When 答题者向 /api/submit 提交缺少 answers 的请求（formSlug 合法）
+    const res = await postSubmit({ formSlug: slug, foo: "bar" });
 
     // Then 响应状态码为 400
     expect(res.status).toBe(400);
@@ -343,6 +391,8 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   it("Scenario: 换 tenant_access_token 失败时返回错误且不泄漏 app secret", async () => {
     // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
+    // And 一份已发布的表单（带 slug 提交的前置门，§16.5）
+    const slug = await publishFormAndGetSlug();
     // And 上游飞书 tenant_access_token 接口将返回非 0 的业务错误码 (HTTP 仍 200！)
     // The add-record reply is OMITTED: reaching stage ② after a failed token
     // exchange would THROW, proving "不再打第二段".
@@ -350,8 +400,8 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
       token: { status: 200, body: FEISHU_TOKEN_BAD_BODY },
     });
 
-    // When 答题者向 /api/submit 提交一份作答
-    const res = await postSubmit(SUBMISSION);
+    // When 答题者带着合法 slug 向 /api/submit 提交一份作答
+    const res = await postSubmit(makeSubmission(slug));
 
     // Then 代理返回可辨识的错误响应 (4xx/5xx JSON error — not a 2xx success).
     expect(res.status).toBeGreaterThanOrEqual(400);
@@ -374,6 +424,8 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   it("Scenario: 写记录上游报错时返回错误且不泄漏 token", async () => {
     // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
+    // And 一份已发布的表单（带 slug 提交的前置门，§16.5）
+    const slug = await publishFormAndGetSlug();
     // And 上游飞书 tenant_access_token 接口将返回 code 为 0
     // And 上游飞书多维表格新增记录接口将返回非 0 的业务错误码
     mock = installFeishuMock({
@@ -381,8 +433,8 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
       record: { status: 200, body: BITABLE_BAD_BODY },
     });
 
-    // When 答题者向 /api/submit 提交一份作答
-    const res = await postSubmit(SUBMISSION);
+    // When 答题者带着合法 slug 向 /api/submit 提交一份作答
+    const res = await postSubmit(makeSubmission(slug));
 
     // Then 代理返回可辨识的错误响应
     expect(res.status).toBeGreaterThanOrEqual(400);
@@ -404,14 +456,16 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   it("Scenario: 整个响应里不含任何明文凭据", async () => {
     // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
+    // And 一份已发布的表单（带 slug 提交的前置门，§16.5）
+    const slug = await publishFormAndGetSlug();
     // And 两段上游都将返回 code 为 0 (the success path still must not echo creds).
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: { status: 200, body: BITABLE_OK_BODY },
     });
 
-    // When 答题者向 /api/submit 提交一份作答
-    const res = await postSubmit(SUBMISSION);
+    // When 答题者带着合法 slug 向 /api/submit 提交一份作答
+    const res = await postSubmit(makeSubmission(slug));
 
     // The route must actually serve the submit (200) — guards this leakage scan
     // from passing vacuously against a 404 with an empty body before the route exists.
