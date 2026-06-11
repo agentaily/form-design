@@ -36,6 +36,7 @@ import {
   Empty,
 } from "@agentaily/design-system";
 import { Icon } from "./chat.jsx";
+import { SubmissionsView } from "./submissions-view.jsx";
 import {
   publishForm as defaultPublishForm,
   listForms as defaultListForms,
@@ -43,6 +44,7 @@ import {
   deleteForm as defaultDeleteForm,
   publicFormUrl as defaultPublicFormUrl,
 } from "./core/formsClient";
+import { listSubmissions as defaultListSubmissions } from "./core/submissionsClient";
 import { ApiError } from "./core/apiClient";
 
 // A 401 from any owner-only call means the session is missing/expired (§17): hand off
@@ -95,6 +97,7 @@ async function copyLink(link) {
  * @param {(slug: string, patch: import("./core/formsClient").UpdateFormInput) => Promise<import("./core/formsClient").UpdateFormResult>} [props.updateForm]
  * @param {(slug: string) => Promise<import("./core/formsClient").DeleteFormResult>} [props.deleteForm]
  * @param {(slug: string, base?: string) => string} [props.publicFormUrl]
+ * @param {(slug: string) => Promise<import("./core/submissionsClient").SubmissionsResult>} [props.listSubmissions]
  */
 export function FormsPanel({
   open,
@@ -104,6 +107,7 @@ export function FormsPanel({
   updateForm = defaultUpdateForm,
   deleteForm = defaultDeleteForm,
   publicFormUrl = defaultPublicFormUrl,
+  listSubmissions = defaultListSubmissions,
 } = {}) {
   const [forms, setForms] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -113,6 +117,8 @@ export function FormsPanel({
   const [busy, setBusy] = useState({});
   // The form pending a delete confirmation (its summary), or null when none.
   const [pendingDelete, setPendingDelete] = useState(null);
+  // The form whose submissions are being viewed (数据后台「看提交」), or null when closed.
+  const [viewing, setViewing] = useState(null);
 
   const handleError = useCallback(
     (e) => {
@@ -133,6 +139,7 @@ export function FormsPanel({
     setLoadError("");
     setLoading(true);
     setPendingDelete(null);
+    setViewing(null);
     Promise.resolve()
       .then(() => listForms())
       .then((list) => {
@@ -207,6 +214,9 @@ export function FormsPanel({
           <Button variant="ghost" size="sm" onClick={() => copyLink(link)}>
             复制链接
           </Button>
+          <Button variant="ghost" size="sm" onClick={() => setViewing(form)}>
+            看提交
+          </Button>
           <Button
             variant="secondary"
             size="sm"
@@ -259,6 +269,21 @@ export function FormsPanel({
         confirmLabel="确定"
         onCancel={() => setPendingDelete(null)}
         onConfirm={confirmDelete}
+      />
+
+      {/* 数据后台「看提交」(§18): opens for one form's slug, reading via the owner-only
+          submissionsClient (Bearer). A 401 routes through the SAME onNeedLogin as the
+          panel — close the view and hand off to login (App closes the panel + pops it). */}
+      <SubmissionsView
+        open={!!viewing}
+        slug={viewing?.slug}
+        title={viewing?.meta?.title}
+        onClose={() => setViewing(null)}
+        onNeedLogin={() => {
+          setViewing(null);
+          onNeedLogin?.();
+        }}
+        listSubmissions={listSubmissions}
       />
     </Dialog>
   );
