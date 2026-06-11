@@ -867,3 +867,121 @@ body {
   color: var(--text-body);
   background: var(--border-strong);
 }
+
+/* ── 公开填写页 (答题者侧, 第 6 步) ───────────────────────────────────────────── */
+.pf-page {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  padding: 48px 20px 72px;
+  background: var(--surface-app, var(--surface-card));
+}
+.pf-card {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.pf-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-default);
+}
+.pf-title {
+  margin: 0;
+  font-family: var(--font-display, var(--font-body));
+  font-size: var(--text-2xl, 1.5rem);
+  font-weight: var(--weight-medium, 500);
+  letter-spacing: -0.02em;
+  color: var(--text-body);
+}
+.pf-desc {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.pf-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.pf-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.pf-actions {
+  margin-top: 6px;
+}
+.pf-loading,
+.pf-done {
+  display: flex;
+  justify-content: center;
+  padding: 32px 0;
+}
+.pf-foot {
+  text-align: center;
+  color: var(--text-faint);
+  margin: 8px 0 0;
+}
+
+/* ── 数据后台「看提交」(owner 侧, 第 6 步) ───────────────────────────────────── */
+.d-subs {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.d-subs__count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-faint);
+}
+.d-subs__loading {
+  display: flex;
+  justify-content: center;
+  padding: 28px 0;
+}
+.d-subs__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.d-subrow {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-3, 8px);
+  padding: 14px 16px;
+}
+.d-subrow__fields {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.d-subrow__pair {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+}
+.d-subrow__key {
+  flex: none;
+  min-width: 96px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-label, 0.08em);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.d-subrow__val {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-body);
+  word-break: break-word;
+}

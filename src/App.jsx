@@ -19,6 +19,8 @@ import { MarkupLayer } from "./markup.jsx";
 import { LoginDialog } from "./auth.jsx";
 import { SettingsDialog } from "./settings.jsx";
 import { FormsPanel, PublishFeedback } from "./forms-panel.jsx";
+import { PublicFormPage } from "./public-form.jsx";
+import { matchPublicForm, currentPathname } from "./core/router";
 import { MessageQueue } from "./core/queue";
 import { createFormModel, applyDesignerTool, uid, DESIGNER_SYSTEM } from "./core/designerTools";
 import { runDesignerTurn } from "./core/designerLoop";
@@ -91,7 +93,38 @@ function schemaFor(meta, fields) {
   return out;
 }
 
+// ── 路由分流挂载点 (第 6 步, SPEC §16.4.1) ───────────────────────────────────
+// The app's ONE route split (no react-router — see src/core/router.ts). App reads the
+// current pathname (injectable for tests, defaults to currentPathname()) and:
+//   • /f/:slug  → render ONLY <PublicFormPage slug=...> — the bare answerer view, with
+//     NONE of the designer chrome (no chat / preview / login / settings / publish) and
+//     no owner token. publicClient handles its I/O with NO Bearer.
+//   • anything else → the full designer (<DesignerApp>) below.
+// This wrapper does the decision with no hooks before the branch, so the two routes
+// never share hook order. Tests drive the split by passing an explicit `pathname`
+// (and may inject getPublicForm/submitForm through to PublicFormPage).
 export default function App({
+  pathname = currentPathname(),
+  // PublicFormPage I/O seams, injected straight through on the public route so
+  // App-level tests can drive the public-page fetch/submit deterministically.
+  getPublicForm,
+  submitForm,
+  ...rest
+} = {}) {
+  const publicRoute = matchPublicForm(pathname);
+  if (publicRoute) {
+    return (
+      <PublicFormPage
+        slug={publicRoute.slug}
+        getPublicForm={getPublicForm}
+        submitForm={submitForm}
+      />
+    );
+  }
+  return <DesignerApp {...rest} />;
+}
+
+function DesignerApp({
   chat = streamDesignerChat,
   login,
   logout,
@@ -111,6 +144,9 @@ export default function App({
   updateForm,
   deleteForm,
   publicFormUrl,
+  // 数据后台「看提交」(§18). Defaults to the real submissionsClient inside SubmissionsView
+  // (mounted per-row by FormsPanel); injectable here for App-level tests, same seam.
+  listSubmissions,
 } = {}) {
   const [t, setTweak] = useUiState(UI_DEFAULTS);
   const [messages, setMessages] = useState([]);
@@ -591,6 +627,7 @@ export default function App({
         updateForm={updateForm}
         deleteForm={deleteForm}
         publicFormUrl={publicFormUrl}
+        listSubmissions={listSubmissions}
       />
 
       {/* Publish feedback (§16): opened by the 发布 button, it publishes the live model

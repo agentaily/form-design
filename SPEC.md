@@ -908,6 +908,7 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 - **路径约定：** 一份发布出来的表单按其 `slug` 暴露在前端路由 `/f/:slug`（同源），完整链接形如 `https://<站点域名>/f/<slug>`，例：`https://form-design.agentaily.com/f/f8Kq2pXa`。这是「公开填写链接」的对外形态——owner 发布后展示/复制的就是它，分享给答题者。
 - **slug 是唯一标识：** 前端只持有高熵 `slug`（§16.3），由 `formsClient.publicFormUrl(slug)` 拼出展示用链接；`POST /api/forms` 若返回 `url` 字段则以其为准，否则按本约定拼。
 - **第 6 步公开页据此实现：** 公开填写页（`GET /api/forms/:slug` 渲染 + `POST /api/submit` 提交）从 `/f/:slug` 解析出 `slug` 再拉 schema 渲染——发布（第 5 步）与公开填写（第 6 步）由这条 URL 约定衔接。前端契约见 `src/core/formsClient.ts`（`PUBLIC_FORM_PATH` / `publicFormUrl`）。
+- **第 6 步前端契约（已落桩）：** 路由分流不引重路由库——`src/core/router.ts` 的纯函数 `matchPublicForm(pathname)` 识别 `/f/:slug` 取出 `slug`，`App.jsx` 据此在公开路由只渲染 `PublicFormPage`（纯答题视图，不挂设计器/登录/设置那套），其它路由仍渲染设计器。公开页的拉取/提交走 `src/core/publicClient.ts`（`getPublicForm` / `submitForm` + `PublicForm` / `Answer` / `SubmitInput` / `SubmitResult`）——**不带 Bearer**（公开端点，`answers` 来自答题者、非 owner），与 owner-only 的 `formsClient`/`configClient` 走 `apiFetch(auth:true)` 形成对照。答题者填好的值收集成 `answers:[{ label, value:string|string[] }]`（多选 → 数组），与 §15.2 对齐。页面与各错误态（404 不存在 / 409 已停止收集 / 400 缺必填）见 `src/public-form.jsx`。
 
 ### 16.5 submit 关联约定与从简校验
 
@@ -1080,6 +1081,8 @@ Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以�
 > **本节范围（仅 Worker 端）：** `GET /api/forms/:slug/submissions`（owner-only）的契约、读飞书记录的上游流程、响应形状（提交列表 + count）、错误码、安全（不返回 owner 凭据）。
 >
 > **不在本节：** 分页 / 游标（MVP 一次性拉，或拉上游一页即可，见 §18.4）、筛选 / 排序 / 搜索、字段级聚合 / 图表统计、导出 CSV、删除 / 编辑提交、跨 owner 数据隔离（MVP 单 owner，`sub='default'`）。这些留后续 feature。
+>
+> **第 6 步前端接入（已落桩）：** owner 侧「数据后台」是「我的表单」(`src/forms-panel.jsx`) 每份表单行下的「看提交」入口——打开后按该 `slug` 调本端点。前端契约见 `src/core/submissionsClient.ts`（`listSubmissions(slug)` + `Submission` / `SubmissionsResult`，**owner-only**，复用 `apiClient` 的 Bearer 注入 `auth:true`），视图见 `src/submissions-view.jsx`（`SubmissionsView`）。空态友好、`401` → `onNeedLogin` 引导先登录（复用 §17 模式）、`409` 未配飞书 → 引导去集成设置。
 
 ### 18.1 端点职责
 
