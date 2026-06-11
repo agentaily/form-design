@@ -158,29 +158,39 @@ export default function App({ chat = streamDesignerChat } = {}) {
   };
 
   // One streamed LLM call → one assistant bubble. Text streams in live; a turn
-  // that only calls tools (no prose) drops its empty bubble.
+  // that only calls tools (no prose) drops its empty bubble. On failure (401 未登录,
+  // 409 未配置, 502 上游, network) the placeholder bubble is removed before the error
+  // rethrows — otherwise an empty typing bubble would be orphaned next to the Alert.
   const callChat = async ({ messages: history }) => {
     let acc = "";
     const mid = pushMsg({ role: "assistant", kind: "text", text: "", streaming: true });
-    const res = await chat({
-      messages: history,
-      onText: (d) => {
-        acc += d;
-        patchMsg(mid, { text: acc });
-      },
-    });
+    let res;
+    try {
+      res = await chat({
+        messages: history,
+        onText: (d) => {
+          acc += d;
+          patchMsg(mid, { text: acc });
+        },
+      });
+    } catch (e) {
+      // drop the placeholder (and any partial stream) so only the error Alert shows
+      removeMsg(mid);
+      throw e;
+    }
     const finalText = res.text || acc;
     if (finalText) patchMsg(mid, { text: finalText, streaming: false });
     else removeMsg(mid);
     return res;
   };
 
-  // Run one agent turn over a buffered batch of user prompts (§4 ReAct loop):
+  // Run one agent turn over a merged batch of user prompts (§4 ReAct loop):
   // stream prose, execute form tools (rendered as tool-call cards), rerender preview.
-  const runTurn = async (texts) => {
-    const userText =
-      texts.length === 1 ? texts[0] : texts.map((tx, i) => `${i + 1}. ${tx}`).join("\n");
-    historyRef.current.push({ role: "user", content: userText });
+  // `merged` is the queue's batch-merged text (numbered + <context>-wrapped for
+  // mid-work input per §4.1) — sent verbatim as the user turn so the model never
+  // misreads buffered messages as a reply to its last output.
+  const runTurn = async (merged) => {
+    historyRef.current.push({ role: "user", content: merged });
     const midById = new Map();
     try {
       await runDesignerTurn({
@@ -213,18 +223,20 @@ export default function App({ chat = streamDesignerChat } = {}) {
 
   // One message queue for the whole session: connect-send N times → exactly one
   // consumer loop; whatever accumulated flushes together as a single agent turn.
-  // `bufferRef` mirrors the queue's atomic flush so we send the exact texts the
-  // consumer is processing this turn.
+  // The consumer receives `merged` (queue.mergeBatch of this flush's batch) — the
+  // exact text sent to the model, numbered + <context>-wrapped for mid-work input.
+  // `bufferRef` mirrors the same atomic flush so the visible thread shows each raw
+  // message as its own bubble (and stays in sync when a queued item is cancelled).
   const queueRef = useRef(null);
   const bufferRef = useRef([]);
   if (!queueRef.current) {
-    const q = new MessageQueue(async () => {
+    const q = new MessageQueue(async (merged) => {
       const texts = bufferRef.current;
       bufferRef.current = [];
       texts.forEach((tx) => pushMsg({ role: "user", text: tx }));
       setBuilding(true);
       try {
-        await runTurn(texts);
+        await runTurn(merged);
       } finally {
         setBuilding(false);
       }
