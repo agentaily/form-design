@@ -1,5 +1,6 @@
 // App.jsx — App shell: header, split layout, live agent loop (streamed prose +
-// tool-call cards over POST /api/chat), schema view, share dialog.
+// tool-call cards over POST /api/chat), schema view, and the real publish surface
+// (发布 / 分享 → PublishFeedback → POST /api/forms → public /f/:slug link).
 // All chrome composed from @agentaily/design-system.
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -7,7 +8,6 @@ import {
   IconButton,
   Button,
   Tabs,
-  Dialog,
   SchemaDisplay,
   Queue,
   Suggestions,
@@ -18,6 +18,7 @@ import { FormPreview } from "./preview.jsx";
 import { MarkupLayer } from "./markup.jsx";
 import { LoginDialog } from "./auth.jsx";
 import { SettingsDialog } from "./settings.jsx";
+import { FormsPanel, PublishFeedback } from "./forms-panel.jsx";
 import { MessageQueue } from "./core/queue";
 import { createFormModel, applyDesignerTool, uid, DESIGNER_SYSTEM } from "./core/designerTools";
 import { runDesignerTurn } from "./core/designerLoop";
@@ -101,6 +102,15 @@ export default function App({
   getConfig,
   saveConfig,
   testConnections,
+  // Forms publish + management client (SPEC §16/§21). Defaults to the real formsClient
+  // functions inside FormsPanel/PublishFeedback; injectable here so App-level tests can
+  // drive the publish flow + the 401 → close-panel + open-login wiring deterministically
+  // (same seam as getConfig/saveConfig). Left undefined → the children use their defaults.
+  publishForm,
+  listForms,
+  updateForm,
+  deleteForm,
+  publicFormUrl,
 } = {}) {
   const [t, setTweak] = useUiState(UI_DEFAULTS);
   const [messages, setMessages] = useState([]);
@@ -112,8 +122,13 @@ export default function App({
   const [tab, setTab] = useState("preview");
   const [device, setDevice] = useState("full");
   const [markupOn, setMarkupOn] = useState(false);
-  const [shareOpen, setShareOpen] = useState(false);
+  // Header LIVE/DRAFT badge: flips to LIVE only when a publish actually succeeds
+  // (PublishFeedback fires onPublished → setPublished(true)).
   const [published, setPublished] = useState(false);
+  // Publish feedback (SPEC §16): opened by the 发布 / 分享 button; it publishes the live
+  // model and shows the public fill link. 「我的表单」 management panel (SPEC §21).
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [formsOpen, setFormsOpen] = useState(false);
   // owner session (SPEC §17): logged-in unlocks the owner-only /api/chat proxy.
   const [loggedIn, setLoggedIn] = useState(() => authIsLoggedIn());
   const [loginOpen, setLoginOpen] = useState(false);
@@ -343,6 +358,9 @@ export default function App({
           >
             <Icon name={loggedIn ? "user" : "lock"} size={15} />
           </IconButton>
+          <IconButton label="我的表单" onClick={() => setFormsOpen(true)}>
+            <Icon name="list" size={15} />
+          </IconButton>
           <IconButton label="集成设置" onClick={() => setSettingsOpen(true)}>
             <Icon name="settings" size={15} />
           </IconButton>
@@ -353,14 +371,14 @@ export default function App({
             <Icon name={t.theme === "dark" ? "sun" : "moon"} size={15} />
           </IconButton>
           {isMobile ? (
-            <IconButton label="分享" onClick={() => setShareOpen(true)}>
+            <IconButton label="分享" onClick={() => setPublishOpen(true)}>
               <Icon name="share" size={15} />
             </IconButton>
           ) : (
             <Button
               variant="secondary"
               icon={<Icon name="share" size={14} />}
-              onClick={() => setShareOpen(true)}
+              onClick={() => setPublishOpen(true)}
             >
               分享
             </Button>
@@ -369,10 +387,11 @@ export default function App({
             variant="primary"
             icon={<Icon name="spark" size={14} />}
             disabled={building || fieldCount === 0}
-            onClick={() => {
-              setPublished(true);
-              setShareOpen(true);
-            }}
+            // Open the real publish-feedback surface (§16): it publishes the live model
+            // via publishForm, shows the public fill link, and fires onPublished — which
+            // is what flips the header badge to LIVE. The header stays DRAFT until that
+            // publish actually succeeds (no optimistic flip on click).
+            onClick={() => setPublishOpen(true)}
           >
             发布
           </Button>
@@ -556,33 +575,41 @@ export default function App({
         testConnections={testConnections}
       />
 
-      <Dialog
-        open={shareOpen}
-        title={published ? "表单已发布" : "分享这份表单"}
-        onClose={() => setShareOpen(false)}
-        footer={
-          <Button
-            variant="primary"
-            icon={<Icon name="check" size={14} />}
-            onClick={() => setShareOpen(false)}
-          >
-            复制链接
-          </Button>
-        }
-      >
-        <div className="d-share-body">
-          <div className="d-qr">
-            <Icon name="qr" size={92} />
-          </div>
-          <div className="d-share">
-            <div className="ax-label">公开链接</div>
-            <div className="d-share__url">forms.agentaily.dev/agentaily-salon-sh</div>
-            <p className="d-share__note">
-              任何拿到链接的人都可以填写。提交将实时进入「数据」后台。
-            </p>
-          </div>
-        </div>
-      </Dialog>
+      {/* 「我的表单」 management panel (§21). Mounted unconditionally (inert when closed,
+          like SettingsDialog) so it fires no listForms until opened. A 401 from any forms
+          call means the owner session is missing/expired — close the panel and pop login
+          (same handler shape as SettingsDialog). */}
+      <FormsPanel
+        open={formsOpen}
+        onClose={() => setFormsOpen(false)}
+        onNeedLogin={() => {
+          setFormsOpen(false);
+          setLoggedIn(false);
+          setLoginOpen(true);
+        }}
+        listForms={listForms}
+        updateForm={updateForm}
+        deleteForm={deleteForm}
+        publicFormUrl={publicFormUrl}
+      />
+
+      {/* Publish feedback (§16): opened by the 发布 button, it publishes the live model
+          and shows the public fill link. onPublished flips the header status to LIVE; a
+          401 routes into login (same handler as above). */}
+      <PublishFeedback
+        open={publishOpen}
+        onClose={() => setPublishOpen(false)}
+        onNeedLogin={() => {
+          setPublishOpen(false);
+          setLoggedIn(false);
+          setLoginOpen(true);
+        }}
+        meta={meta}
+        fields={fields}
+        publishForm={publishForm}
+        publicFormUrl={publicFormUrl}
+        onPublished={() => setPublished(true)}
+      />
     </div>
   );
 }

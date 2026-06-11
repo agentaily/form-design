@@ -903,6 +903,12 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 - **类型级边界：** 公开拉取返回 `PublicForm`，其类型**只有** `slug` + `meta` + `fields` 三个字段，没有承载任何凭据（也没有 `owner_id` / `status` / `created_at`）的位置。即便将来 `forms` 行挂上更多 owner 私有信息，公开拉取也只能投影出这三样——「不泄漏」不是运行期过滤的产物，而是类型 + 查询路径的双重保证。
 - **不可反推：** `slug` 不暴露 owner 身份（随机串），`meta` / `fields` 是 owner 主动要公开给答题者看的内容，本就该公开。
 
+### 16.4.1 公开填写页 URL 约定（前端）
+
+- **路径约定：** 一份发布出来的表单按其 `slug` 暴露在前端路由 `/f/:slug`（同源），完整链接形如 `https://<站点域名>/f/<slug>`，例：`https://form-design.agentaily.com/f/f8Kq2pXa`。这是「公开填写链接」的对外形态——owner 发布后展示/复制的就是它，分享给答题者。
+- **slug 是唯一标识：** 前端只持有高熵 `slug`（§16.3），由 `formsClient.publicFormUrl(slug)` 拼出展示用链接；`POST /api/forms` 若返回 `url` 字段则以其为准，否则按本约定拼。
+- **第 6 步公开页据此实现：** 公开填写页（`GET /api/forms/:slug` 渲染 + `POST /api/submit` 提交）从 `/f/:slug` 解析出 `slug` 再拉 schema 渲染——发布（第 5 步）与公开填写（第 6 步）由这条 URL 约定衔接。前端契约见 `src/core/formsClient.ts`（`PUBLIC_FORM_PATH` / `publicFormUrl`）。
+
 ### 16.5 submit 关联约定与从简校验
 
 §15 的 `POST /api/submit` 在本节**增加 `formSlug`** 字段，把作答关联回一份已发布表单：

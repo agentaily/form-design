@@ -484,56 +484,6 @@ body {
   padding: 28px 24px;
 }
 
-/* share dialog body (composition inside DS Dialog) */
-.d-share-body {
-  display: flex;
-  gap: 22px;
-  align-items: center;
-}
-.d-qr {
-  width: 116px;
-  height: 116px;
-  flex: none;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-body);
-  background: var(--bg-0);
-}
-[data-theme="light"] .d-qr {
-  background: #fff;
-}
-.d-share {
-  flex: 1;
-  min-width: 0;
-}
-.d-share__url {
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--text-body);
-  word-break: break-all;
-  padding: 8px 10px;
-  background: var(--bg-0);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-2);
-  margin: 6px 0 12px;
-}
-[data-theme="light"] .d-share__url {
-  background: var(--bg-1);
-}
-.d-share {
-  flex: 1;
-  min-width: 0;
-}
-.d-share__note {
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  line-height: var(--leading-snug);
-  margin: 12px 0 0;
-}
-
 /* ───────────────────────── owner login / account dialog ───────────────────────── */
 .d-auth-body {
   display: flex;
@@ -684,17 +634,6 @@ body {
   }
   .d-schema {
     padding: 18px 14px;
-  }
-
-  /* share dialog: stack QR over text */
-  .d-share-body {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 16px;
-  }
-  .d-qr {
-    width: 100%;
-    height: 132px;
   }
 }
 
