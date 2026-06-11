@@ -1,0 +1,16 @@
+name = "form-design-api"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 — the owner-config feature needs it. The real `database_id` gets filled
+# after `wrangler d1 create form-design`; under vitest-pool-workers the binding
+# runs against a local miniflare D1, so the placeholder id is fine for tests.
+[[d1_databases]]
+binding = "DB"
+database_name = "form-design"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# CONFIG_KEY (AES-GCM master key for encrypting owner secrets) is set via
+# `wrangler secret put CONFIG_KEY` in prod, never committed. For tests it's
+# injected as a miniflare binding in vitest.config.ts (a throwaway 256-bit key).
