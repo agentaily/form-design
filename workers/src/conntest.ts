@@ -14,16 +14,15 @@
 // in index.ts and is exercised by the outer loop via SELF.fetch with mocked
 // api.deepseek.com / open.feishu.cn.
 
+import { getFeishuTenantToken, FeishuTokenError } from "./feishu";
+
 /** DeepSeek lightweight verification endpoint — cheapest valid-key check. SPEC.md §14.2. */
 export const DEEPSEEK_MODELS_URL = "https://api.deepseek.com/models";
 
-/** Feishu self-built-app tenant token endpoint — credential validity check. SPEC.md §14.2. */
-export const FEISHU_TENANT_TOKEN_URL =
-  "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal";
-
-/** Feishu business-success code: HTTP 200 may still carry a non-zero error code,
- * so connectivity requires `code === 0`. SPEC.md §14.2. */
-export const FEISHU_OK_CODE = 0;
+// The Feishu token endpoint URL + success code are owned by feishu.ts as the
+// single source of truth (shared with §15's submit flow). Re-export them here so
+// existing §14 consumers (tests, callers) keep their import site unchanged.
+export { FEISHU_TENANT_TOKEN_URL, FEISHU_OK_CODE } from "./feishu";
 
 /**
  * The result of probing one connection. `ok` is the only required field;
@@ -100,32 +99,20 @@ export async function testDeepSeek(apiKey: string): Promise<ConnProbe> {
  * @param appSecret owner's plaintext Feishu app secret (from getOwnerConfig).
  */
 export async function testFeishu(appId: string, appSecret: string): Promise<ConnProbe> {
-  let res: Response;
+  // Delegate to the shared §15 helper so the upstream contract lives in one place
+  // (feishu.ts). The behavioral difference is deliberate: getFeishuTenantToken
+  // THROWS on any failure (its submit caller needs to abort), whereas a connection
+  // test maps the same failure to a soft ConnProbe and NEVER throws (SPEC.md §14.3).
+  // The thrown FeishuTokenError message is already credential-free (§15.7), so it
+  // is safe to surface as the troubleshooting hint.
   try {
-    res = await fetch(FEISHU_TENANT_TOKEN_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-    });
-  } catch {
-    // Network error / timeout. Same as DeepSeek: a fixed, credential-free hint.
-    return { ok: false, message: "上游不可达" };
-  }
-
-  // Feishu's quirk: HTTP 200 can still carry a non-zero business code, so the
-  // verdict is the body `code`, not the status. A body we can't parse as JSON is
-  // treated as "can't reach a usable token endpoint". SPEC.md §14.2.
-  let body: { code?: number; msg?: string };
-  try {
-    body = (await res.json()) as { code?: number; msg?: string };
-  } catch {
-    return { ok: false, message: `上游返回 ${res.status}` };
-  }
-
-  if (body.code === FEISHU_OK_CODE) {
+    await getFeishuTenantToken(appId, appSecret);
     return { ok: true };
+  } catch (err) {
+    if (err instanceof FeishuTokenError) {
+      return { ok: false, message: err.message };
+    }
+    // Defensive: any non-FeishuTokenError (shouldn't happen) still must not throw.
+    return { ok: false, message: "飞书连接测试失败" };
   }
-  // Surface only the (non-sensitive) upstream code/msg as a troubleshooting hint —
-  // never the app_id / app_secret. SPEC.md §14.5.
-  return { ok: false, message: `飞书返回 code ${body.code}` };
 }

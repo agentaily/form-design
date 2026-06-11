@@ -16,6 +16,15 @@ import {
   type ChatRequest,
 } from "./chat";
 import { testDeepSeek, testFeishu, type ConnProbe, type ConnTestResult } from "./conntest";
+import { getFeishuTenantToken, FeishuTokenError } from "./feishu";
+import {
+  answersToFields,
+  parseSubmitRequest,
+  writeToBitable,
+  BitableWriteError,
+  FeishuNotConfiguredError,
+  type SubmitRequest,
+} from "./submit";
 
 /** Worker bindings (see wrangler.toml + vitest.config.ts). */
 interface Env {
@@ -163,6 +172,71 @@ app.post("/api/config/test", async (c) => {
 
   const result: ConnTestResult = { deepseek, feishu };
   return c.json(result, 200);
+});
+
+// POST /api/submit — write one answerer's submission into the owner's Feishu
+// Bitable. Reads the owner's SAVED Feishu creds (never from the request body),
+// exchanges them for a tenant_access_token, then writes one record. The owner's
+// app_secret / tenant_access_token stay in-Worker and never appear in any
+// response, header, or log. See SPEC.md §15.
+app.post("/api/submit", async (c) => {
+  // 1) Parse + validate the request body. Non-JSON / missing / empty / mis-shaped
+  //    answers → 400, nothing forwarded upstream.
+  let request: SubmitRequest;
+  try {
+    const raw = await c.req.json();
+    request = parseSubmitRequest(raw);
+  } catch (err) {
+    const error = err instanceof SyntaxError ? "invalid JSON body" : "answers is required";
+    return c.json({ error }, 400);
+  }
+
+  // 2) Read + decrypt the owner config (plaintext, in-Worker view only).
+  const key = await importConfigKey(c.env.CONFIG_KEY);
+  const owner = await getOwnerConfig(c.env.DB, key);
+
+  // 3) No Feishu configured → 409, never touch upstream.
+  try {
+    if (owner.feishu === null) {
+      throw new FeishuNotConfiguredError();
+    }
+  } catch (err) {
+    if (err instanceof FeishuNotConfiguredError) {
+      return c.json({ error: err.message }, 409);
+    }
+    throw err;
+  }
+  const feishu = owner.feishu;
+
+  // 4) Exchange the owner's saved app_id/app_secret for a tenant_access_token.
+  //    The plaintext app_secret rides ONLY this request body (§15.7); any failure
+  //    surfaces as 502 with no credential in the error.
+  let token: string;
+  try {
+    token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
+  } catch (err) {
+    if (err instanceof FeishuTokenError) {
+      return c.json({ error: err.message }, 502);
+    }
+    throw err;
+  }
+
+  // 5) Map answers → Feishu fields and write one record. The tenant_access_token
+  //    rides ONLY the add-record Authorization header (§15.7); any failure
+  //    surfaces as 502 with neither token nor secret in the error.
+  const fields = answersToFields(request.answers);
+  let recordId: string;
+  try {
+    ({ recordId } = await writeToBitable(token, feishu.appToken, feishu.tableId, fields));
+  } catch (err) {
+    if (err instanceof BitableWriteError) {
+      return c.json({ error: err.message }, 502);
+    }
+    throw err;
+  }
+
+  // 6) Success → only ok + recordId; never the written fields, token, or creds.
+  return c.json({ ok: true, recordId }, 200);
 });
 
 export default app;

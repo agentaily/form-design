@@ -721,3 +721,102 @@ Worker 内部流程：
 - **凭据绝不进响应：** key / `app_secret` **绝不**出现在响应 body（含任何 `message`）、响应头、或日志中。
 - **即便上游回错也不拼凭据：** 上游 `401`/`code≠0` 等错误转成 `message` 时，只保留「上游拒绝/出错」语义（可带上游状态码或飞书 `code` 这类**非敏感**摘要供排障），**绝不**把凭据或其片段拼进 `message`。
 - **沿用 §12 的加密边界：** 解密只发生在 Worker 内；D1 里仍是密文，浏览器侧拿不到明文。
+
+---
+
+## 15. 后端 · 提交写飞书多维表格 `POST /api/submit`（答题落库）
+
+> **与第 8/12/14 节的关系：** §8.2 描述「纯设计器」形态——答题数据写托管 BaaS。本节面向**发布型表单**形态（见项目记忆 `form-design-byok-feishu-architecture`）：答题者在公开填写页提交一份作答，Worker 用 owner **已保存的**飞书凭据（由 §12 加密、`getOwnerConfig` 解密得到）把这份作答写进 owner 自己的飞书多维表格。owner 的 `app_secret` / `tenant_access_token` 全程留在 Worker 内、永不出网。
+> §14「连接测试」只验自建应用凭据能否换到 `tenant_access_token`；本节在此之上**真正写一条记录**进 `app_token` / `table_id` 指向的那张表。
+>
+> **本节范围（第一刀，仅 Worker 端）：** `POST /api/submit` 的请求形状、写入流程（换 token → 新增记录）、`answers` → 飞书 `fields` 的映射约定、响应/错误的状态码与体、安全（token/secret 不出网）。
+>
+> **不在本节：** 建多维表格本身、字段类型的精确映射（select 选项 id、日期/数字/附件等结构化转换）、防刷 / 限流 / 校验答案是否符合 schema、公开填写页前端。鉴权 / 多租户仍按 §12 的 MVP 单 owner 假设（固定 `owner_id`）。
+
+### 15.1 端点职责
+
+`POST /api/submit` 吃一份答题者作答，读取 owner 已保存的飞书凭据，向飞书自建应用换一个 `tenant_access_token`，再用它向「多维表格新增记录」端点写一条记录，成功后回报新记录 id。
+
+Worker 内部流程：
+
+```
+1) parseSubmitRequest(body)                          ← 校验请求体；空 answers → 400 不打上游
+2) importConfigKey(env.CONFIG_KEY)                    ← AES-GCM 主密钥（§12.2）
+3) getOwnerConfig(env.DB, key)                         ← 读单行 + 解密 → OwnerConfig 内部视图
+4) 若 owner.feishu === null（未配飞书）              → 409 { error }，不打上游
+5) getFeishuTenantToken(appId, appSecret)             ← 用 owner 凭据换 tenant_access_token（§15.5 共享 helper）
+6) answersToFields(answers)                           ← answers 直转飞书 fields（§15.3 映射约定）
+7) writeToBitable(token, appToken, tableId, fields)   ← POST 多维表格新增记录
+8) 上游 code === 0    → 200 { ok:true, recordId }
+   换 token 失败 / 写记录 code≠0 / 非 2xx → 可辨识错误（状态码 + { error }），不泄漏 token/secret
+```
+
+> **解密后的明文 secret 只进换 token 请求；换来的 `tenant_access_token` 只进写记录请求的 `Authorization` 头**：两者都绝不写进返回给前端的任何字段、HTTP 头回显、或日志（§15.6）。
+
+### 15.2 请求契约（`SubmitRequest`）
+
+请求体（JSON）：
+
+```jsonc
+{
+  "answers": [                          // 必填，非空数组；一份作答的所有字段值
+    { "label": "姓名", "value": "张三" },
+    { "label": "兴趣", "value": ["阅读", "运动"] }  // 多选 → 字符串数组
+  ]
+}
+```
+
+- 每条 `answer` 是 `{ label: string; value: string | string[] }`：`label` 对应 §3.2 Field 的 `label`（MVP 用 label 作为飞书表列名直接对位，字段 id ↔ 列的精确映射留后续 feature）；`value` 是答题者填的值，多选 / 多文件这类一对多用 `string[]`。
+- `answers` 缺失 / 非数组 / 空数组 → `400 { error }`，不打上游（没有任何字段可写，提前拒绝）。
+- 单条 `answer` 的 `label` 为空、或 `value` 既非字符串也非字符串数组 → `400 { error }`（请求体形状非法，不打上游）。
+- `answers` 内 `label` 的语义校验（是否对得上当前 schema、是否漏填必填项）**不在本刀**——本刀只做形状级校验，把合法形状的 answers 透传成飞书 fields。
+
+### 15.3 `answers` → 飞书 `fields` 的映射约定（`answersToFields`）
+
+MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对象——
+
+- 每条 `answer` 产出一个键值对：键 = `answer.label`，值 = `answer.value`（`string` 原样、`string[]` 原样传数组）。
+- 同一 `label` 出现多次时的归并策略（覆盖 / 报错）由 implementer 在合约内决定，但需在 feature 里有据可依；MVP 表单 schema 的 label 唯一，可不强求。
+- **不做**字段类型的结构化转换（select 选项映射成飞书选项 id、日期转时间戳、数字转 number、附件上传换 file token 等）——这些留后续 feature。本刀把值原样塞进 `fields`，由飞书按列类型自行接收 / 报错。
+
+### 15.4 成功响应
+
+`200`，`application/json`：
+
+```jsonc
+{ "ok": true, "recordId": "recXXXXXXXX" }
+```
+
+- `recordId` 取自飞书新增记录响应体的 `data.record.record_id`。
+- 成功响应里**只**含 `ok` 与 `recordId`，不回显写入的 `fields`、token、或任何 owner 凭据。
+
+### 15.5 写入的上游端点与判定
+
+| 步骤 | 上游端点 | 凭据用法 | 判定 |
+|---|---|---|---|
+| 换 token | `POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal` | body `{ app_id, app_secret }`（JSON） | 上游 `200` 且 body `code === 0` → 拿到 `tenant_access_token`；否则视为换 token 失败 |
+| 新增记录 | `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records` | `Authorization: Bearer <tenant_access_token>`，body `{ fields: { <label>: <value>, ... } }` | 上游 `2xx` 且 body `code === 0` → 取 `data.record.record_id`；否则视为写记录失败 |
+
+- 飞书的约定是 HTTP `200` 也可能带非 0 业务错误码，所以两步都**必须看 body 的 `code`**，`code === 0` 才算成功（与 §14.2 一致，复用 `FEISHU_OK_CODE`）。
+- `{app_token}` / `{table_id}` 用 `getOwnerConfig` 解出的 `feishu.appToken` / `feishu.tableId` 填充。
+
+### 15.6 错误响应（状态码 + `{ error }`）
+
+| 情况 | 状态码 | 响应体 | 说明 |
+|---|---|---|---|
+| owner 未配飞书（`owner.feishu === null`） | `409` | `{ "error": "owner 未配置飞书" }` | 不打上游；前端据此引导去「集成设置」（§12）|
+| `answers` 缺失 / 非数组 / 空 | `400` | `{ "error": "answers is required" }` | 不打上游 |
+| 单条 answer 形状非法（label 空 / value 类型错） | `400` | `{ "error": "..." }` | 不打上游 |
+| 请求体非合法 JSON | `400` | `{ "error": "invalid JSON body" }` | 不打上游 |
+| 换 `tenant_access_token` 失败（非 2xx / `code≠0` / 不可达） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `app_secret`；可携带飞书 `code` / HTTP 状态这类非敏感摘要 |
+| 写记录失败（非 2xx / `code≠0`） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `tenant_access_token` / `app_secret` |
+
+- 错误体一律 `application/json` 的 `{ error }`——前端先看状态码与 `ok` 决定成功 / 失败分支。
+- 上游错误状态码归一策略（透传上游码 vs 统一 `502`）由 implementer 在合约内决定，但**必须**满足：(a) 可辨识为「上游 / 配置出错」而非代理自身 bug；(b) 错误体绝不包含 `tenant_access_token` 或 `app_secret`。
+
+### 15.7 安全（token/secret 不出网）
+
+- **明文 `app_secret` 只进换 token 请求体**：解密自 `getOwnerConfig`，唯一去向是 `POST .../tenant_access_token/internal` 的 body，绝不出现在返回给前端的任何响应、HTTP 头、日志。
+- **`tenant_access_token` 只进写记录请求的 Authorization 头**：换到后唯一去向是 `POST .../records` 的 `Authorization: Bearer`，绝不写进成功响应（`recordId` 之外）、错误体、HTTP 头回显、日志。
+- **即便上游回错也不拼凭据**：换 token / 写记录的 `code≠0` 或非 2xx 转成 `{ error }` 时，只保留「上游拒绝 / 出错」语义（可带飞书 `code` 或 HTTP 状态这类非敏感摘要供排障），绝不把 `app_secret` / `tenant_access_token` 或其片段拼进 `error`。
+- **沿用 §12 的加密边界：** secret 的解密只发生在 Worker 内（`CONFIG_KEY` + `getOwnerConfig`）；D1 里仍是密文，浏览器侧自始至终拿不到明文。
