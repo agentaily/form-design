@@ -1,7 +1,12 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { applySchema, resetConfig } from "./helpers";
+import { applySchema, resetConfig, login, authHeader } from "./helpers";
 import { DEEPSEEK_MODELS_URL, FEISHU_TENANT_TOKEN_URL, type ConnTestResult } from "../src/conntest";
+
+// POST /api/config/test (and the POST /api/config setup it relies on) are now
+// owner-only (SPEC.md §17.1): every request carries `Authorization: Bearer <jwt>`
+// from login(). The §14 behaviour under test is unchanged — auth is just the new
+// front gate.
 
 // Outer-loop acceptance specs for the connection test `POST /api/config/test`,
 // driven through the real Hono app in workerd via SELF.fetch, with BOTH upstreams
@@ -143,6 +148,9 @@ function installConnMock(opts: ConnMockOpts): ConnMock {
  * (secrets encrypted at rest). The conn test reads back THIS config — credentials
  * are never taken from the /api/config/test request body (SPEC.md §14.1).
  */
+// Owner-only (§17.1): attach the session token obtained in beforeEach.
+let token: string;
+
 async function configureOwner(opts: { deepseek?: boolean; feishu?: boolean }): Promise<void> {
   const body: Record<string, unknown> = {};
   // DeepSeek is the required block — POST /api/config 400s without it. When the
@@ -161,7 +169,7 @@ async function configureOwner(opts: { deepseek?: boolean; feishu?: boolean }): P
   }
   const res = await SELF.fetch(`${BASE}/api/config`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeader(token) },
     body: JSON.stringify(body),
   });
   if (res.status !== 200) {
@@ -172,10 +180,10 @@ async function configureOwner(opts: { deepseek?: boolean; feishu?: boolean }): P
 function postConnTest(): Promise<Response> {
   // Body is empty/ignored — the conn test probes the SAVED config, not request
   // credentials (SPEC.md §14, §14.1). We still send a content-type so the route's
-  // body handling (if any) sees a well-formed request.
+  // body handling (if any) sees a well-formed request. Owner-only → Bearer token.
   return SELF.fetch(`${BASE}/api/config/test`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeader(token) },
     body: "{}",
   });
 }
@@ -189,6 +197,8 @@ describe("conn test POST /api/config/test (workers/features/conn-test.feature)",
 
   beforeEach(async () => {
     await resetConfig();
+    // owner-only endpoints (POST /api/config + POST /api/config/test) need a token.
+    token = await login();
   });
 
   afterEach(() => {

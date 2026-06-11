@@ -959,3 +959,176 @@ CREATE TABLE IF NOT EXISTS forms (
 - 表只存表单的展示 `meta` 与字段定义，**绝不**存任何凭据（凭据全在 `owner_config`，§16.4）。
 - 公开拉取只投影 `meta_json` + `schema_json` + `slug`；`owner_id` / `status` / `created_at` 不回给答题者。
 - 单 owner 约束靠 `owner_id` 恒 `'default'`；后续接鉴权时换成真实租户键即可平滑扩成多行，公开拉取的投影不变。
+
+---
+
+## 17. 后端 · owner 鉴权（方案 A：owner 密码 → session JWT）
+
+> **与第 12–16 节的关系：** §12–§16 落地了发布型 BYOK 的完整后端闭环，但所有端点**当前全无鉴权**（MVP 单 owner 假设）。本节补上最后一块：把 **owner-only**（设计态 / 管理态）端点用一道轻量鉴权门保护起来，公开端点（答题者用）保持开放。这样 owner 的配置存取、表单发布、连接测试、数据后台只对持有 owner 密码的人开放，而答题者拉表单 / 提交作答仍无需任何凭据。
+>
+> **方案 A（owner 密码 → session JWT）：** owner 用一个预置的 owner 密码（Worker secret `OWNER_PASSWORD`）登录，后端校验后签发一个短期 session JWT（用 Worker secret `AUTH_SECRET` 签名）；后续 owner-only 端点凭 `Authorization: Bearer <jwt>` 通行。**单 owner**：登录后 JWT 的 `sub` 恒为 `'default'`（与 `owner_config.owner_id` / `forms.owner_id` 同约定）。
+>
+> **本节范围（仅 Worker 端）：** `POST /api/auth/login`（密码 → token）、auth 中间件（验签 + 未过期）、owner-only 端点保护清单、env secret 约定、安全。
+>
+> **不在本节：** 多 owner（登录后恒 `sub='default'`，不区分租户）、注册 / 改密 / 找回密码、刷新 token / 登出黑名单、限流 / 防爆破、RBAC / 细粒度权限、前端登录页 UI。这些留后续 feature。
+
+### 17.1 端点职责与鉴权矩阵
+
+| 端点 | 谁调 | 鉴权 | 说明 |
+|---|---|---|---|
+| `POST /api/auth/login` | owner | **公开**（鉴权入口自身不保护） | body `{ password }` → 校验 `OWNER_PASSWORD` → 200 `{ token }`；密码错 / 缺 → 401 |
+| `GET /api/config` | owner | **owner-only** | 读掩码配置（§12） |
+| `POST /api/config` | owner | **owner-only** | 保存配置（§12） |
+| `POST /api/config/test` | owner | **owner-only** | 连接测试（§14） |
+| `POST /api/chat` | owner（设计态） | **owner-only** | LLM 代理（§13）——只供 owner 在设计器里用，归 owner-only |
+| `POST /api/forms` | owner（设计器） | **owner-only** | 发布表单（§16） |
+| `GET /api/forms/:slug/submissions` | owner（数据后台） | **owner-only** | 提交列表（§18） |
+| `GET /api/forms/:slug` | 答题者 | **公开** | 公开拉取表单（§16）——不变 |
+| `POST /api/submit` | 答题者 | **公开** | 答题落库（§15）——不变 |
+| `GET /health` | 任意 | **公开** | 健康检查——不变 |
+
+> **划分原则：** owner 的设计态 / 管理态（持有或操作 owner 凭据、私有数据）一律 owner-only；答题者面向的公开读 / 写（拉表单、交作答）保持无鉴权。`POST /api/chat` 虽不直接落库，但它消费 owner 的 DeepSeek 额度、且只在设计器里用，故归 owner-only，防止陌生人盗刷 owner 的 key。
+
+### 17.2 `POST /api/auth/login` 契约
+
+请求体（JSON）：
+
+```jsonc
+{ "password": "owner 的登录密码" }
+```
+
+- 成功（密码与 `OWNER_PASSWORD` 一致）：`200`，`{ "token": "<jwt>" }`。
+- 密码错 / 缺 `password` / body 非合法 JSON：`401`，`{ "error": "..." }`（**统一 401**，不区分「密码错」与「缺字段」，避免给爆破者额外信号；body 非 JSON 也按鉴权失败处理）。
+- 服务端未配置 `OWNER_PASSWORD` / `AUTH_SECRET`（部署疏漏）：`500`，`{ "error": "..." }`（这是部署错误，不是鉴权失败，不能误判成 401 把所有人放进来或全部锁死的歧义态）。
+- 校验只比对 owner 密码本身，**不**触碰 D1 / 飞书 / DeepSeek——登录是纯 secret 比对 + 签名。
+
+### 17.3 session JWT 约定
+
+- **签名：** HMAC（`HS256`），密钥取自 Worker secret `AUTH_SECRET`。复用 Hono 内置的 `hono/jwt`（`sign` / `verify`）。
+- **payload：** 至少含
+  - `sub`: 恒 `'default'`（MVP 单 owner，对齐 `owner_config.owner_id` / `forms.owner_id`）。
+  - `exp`: 过期时间（Unix 秒）。签发时设一个合理的短期窗口（建议 ≤ 24h；具体时长由 implementer 在合约内定，但**必须**带 `exp`）。
+  - 可选 `iat`。
+- **token 里绝不放敏感物：** `OWNER_PASSWORD` / `AUTH_SECRET` / 任何 owner 凭据都不进 payload；payload 是可被客户端解码的（JWT 仅签名、非加密）。
+- **无状态：** 不维护服务端 session 表 / 黑名单；token 一经签发，在 `exp` 前一直有效（登出 / 吊销留后续 feature）。
+
+### 17.4 auth 中间件
+
+owner-only 端点统一挂一道 auth 中间件，校验 `Authorization: Bearer <jwt>`：
+
+- **取 token：** 从 `Authorization` 头解析 `Bearer <jwt>`；缺头 / 格式不对（非 `Bearer ` 前缀）→ `401 { error }`，**不进入** route handler。
+- **验签 + 未过期：** 用 `AUTH_SECRET` 验签且校验 `exp` 未过；验签失败 / 过期 / payload 非法 → `401 { error }`。
+- **放行：** 校验通过则把解出的 session（至少 `sub`）挂到请求上下文（如 `c.set('session', ...)`），交给 route handler。
+- **错误体不泄漏：** 401 的 `{ error }` 只表「未授权」语义，**绝不**包含 `AUTH_SECRET`、被拒 token 的内容、或任何可辅助伪造 / 爆破的细节。
+- **实现选型：** 可直接用 `hono/jwt` 的 `jwt({ secret })` 中间件，或在 `auth.ts` 里基于 `verify` 写一个薄中间件（统一 401 文案 + 把 session 挂上下文）。两者皆可；implementer 在合约内择一并保持上面的可观察行为。
+
+### 17.5 index.ts 如何挂载（cross-cutting）
+
+鉴权是**横切关注点**，在 `index.ts` 路由层统一挂，不渗进各 route handler 的业务体：
+
+- **公开端点先注册 / 或显式豁免：** `GET /health`、`POST /api/auth/login`、`GET /api/forms/:slug`、`POST /api/submit` 不挂 auth 中间件。
+- **owner-only 端点挂中间件：** 推荐用 Hono 的路径前缀中间件 / 分组，对 owner-only 路径前缀套 `requireAuth`，例如：
+  - `app.use('/api/config', requireAuth)` 与 `app.use('/api/config/*', requireAuth)`（覆盖 `GET/POST /api/config`、`POST /api/config/test`）。
+  - `app.use('/api/chat', requireAuth)`。
+  - `app.post('/api/forms', requireAuth, handler)`（注意**只**保护 `POST /api/forms`，而 `GET /api/forms/:slug` 公开——用 method 级挂载或精确路径，避免把公开拉取也罩进去）。
+  - `app.get('/api/forms/:slug/submissions', requireAuth, handler)`（数据后台，§18）。
+- **关键陷阱：** `/api/forms/:slug`（公开）与 `POST /api/forms`、`/api/forms/:slug/submissions`（owner-only）共享 `/api/forms` 前缀。**不能**用一句 `app.use('/api/forms/*', requireAuth)` 把公开拉取也保护了。挂载方式以「精确匹配 owner-only 的 method + 路径」为准，公开的 `GET /api/forms/:slug` 必须不受影响。implementer 在合约内决定具体挂法（method 级中间件 / 精确路径），但**必须**满足 §17.1 的矩阵：公开端点无鉴权、owner-only 端点缺 / 坏 token 一律 401。
+
+### 17.6 env secret 约定
+
+| secret | 用途 | 来源 |
+|---|---|---|
+| `OWNER_PASSWORD` | owner 登录密码（明文比对） | 生产 `wrangler secret put OWNER_PASSWORD`；测试由 `vitest.config.ts` 注入固定值 |
+| `AUTH_SECRET` | session JWT 的 HMAC 签名密钥 | 生产 `wrangler secret put AUTH_SECRET`；测试由 `vitest.config.ts` 注入固定值 |
+
+- 二者均为 Worker secret，**绝不**入 git、不进任何响应 / 日志。与 §12 的 `CONFIG_KEY` 同等对待。
+- `Env` 接口（`index.ts`）需扩展出这两个绑定（`OWNER_PASSWORD: string`、`AUTH_SECRET: string`）。
+
+### 17.7 安全
+
+- **统一 401：** 登录失败与中间件拒绝都回 `401`，文案只表「未授权」，不泄漏「密码长度 / 是否存在 / 验签为何失败」等可被利用的信号。
+- **secret 不出网：** `OWNER_PASSWORD` / `AUTH_SECRET` 只在 Worker 内用于比对 / 签名验签，绝不进 token payload、响应体、HTTP 头、日志。
+- **token 非加密：** JWT payload 可被任何持有者解码，故 payload 里只放 `sub='default'` + `exp` 这类非敏感物。
+- **保护半径：** 加上鉴权后，owner 的配置、表单发布、连接测试、LLM 代理、数据后台都需 token；这道门也是后续多 owner（把 `sub` 换成真实租户键，按 `sub` 过滤数据）的接入点。
+
+---
+
+## 18. 后端 · 数据后台 · 提交列表 `GET /api/forms/:slug/submissions`
+
+> **与第 15/16/17 节的关系：** §15 把答题者的作答写进 owner 的飞书多维表格，§16 让 owner 发布表单 / 答题者公开填写，§17 给 owner-only 端点加了鉴权。本节补上 owner 视角的「**读回**」：owner 登录后，在数据后台按 `slug` 拉取这份表单已收集到的提交列表——从 owner 自己的飞书多维表格里读记录，而非另存一份。
+>
+> **本节范围（仅 Worker 端）：** `GET /api/forms/:slug/submissions`（owner-only）的契约、读飞书记录的上游流程、响应形状（提交列表 + count）、错误码、安全（不返回 owner 凭据）。
+>
+> **不在本节：** 分页 / 游标（MVP 一次性拉，或拉上游一页即可，见 §18.4）、筛选 / 排序 / 搜索、字段级聚合 / 图表统计、导出 CSV、删除 / 编辑提交、跨 owner 数据隔离（MVP 单 owner，`sub='default'`）。这些留后续 feature。
+
+### 18.1 端点职责
+
+`GET /api/forms/:slug/submissions`（**owner-only**，挂 §17 的 auth 中间件）：
+
+```
+0) requireAuth                       ← 缺 / 坏 token → 401（§17.4），不进入下面
+1) formExists(db, slug)              ← 查 forms 表：不存在 → 404 { error }，不打飞书上游
+2) importConfigKey(env.CONFIG_KEY)   ← AES-GCM 主密钥（§12.2）
+3) getOwnerConfig(env.DB, key)        ← 读单行 + 解密 → OwnerConfig 内部视图
+4) 若 owner.feishu === null（未配飞书）→ 409 { error }，不打上游
+5) getFeishuTenantToken(appId, appSecret)        ← 换 tenant_access_token（§15.5 共享 helper）
+6) listSubmissions(token, appToken, tableId)     ← GET 多维表格记录列表（§18.3）
+7) 上游 code === 0 → 200 { submissions: [...], count }
+   换 token 失败 / 读记录 code≠0 / 非 2xx → 502 { error }，不泄漏 token/secret
+```
+
+> 复用 §15 的凭据解密 + 换 token 路径；区别只在第 6 步从「写一条记录」换成「读记录列表」。
+
+### 18.2 响应契约
+
+成功（`200`，`application/json`）：
+
+```jsonc
+{
+  "submissions": [
+    {
+      "recordId": "recXXXXXXXX",        // 上游 record_id
+      "fields": { "姓名": "张三", "兴趣": ["阅读", "运动"] },  // 上游记录的 fields，原样投影
+      "createdTime": 1700000000000       // 可选：上游 created_time（毫秒时间戳），无则省略
+    }
+  ],
+  "count": 1                            // submissions 的条数（本期等于本次返回的记录数）
+}
+```
+
+- `submissions`：把上游 `data.items` 里每条记录映射成简洁形状 `{ recordId, fields, createdTime? }`。空表 → `[]`（正常态，不是错误）。
+- `count`：`submissions.length`（本期不分页，等于这一批的条数；将来分页时可换成上游 `total`）。
+- **响应里绝不含**任何 owner 凭据（DeepSeek key / 飞书 app_secret / app_token / table_id）、`tenant_access_token`、或 `owner_id`——只回提交数据本身（§18.5）。
+
+### 18.3 读记录的上游端点与判定
+
+| 步骤 | 上游端点 | 凭据用法 | 判定 |
+|---|---|---|---|
+| 换 token | `POST .../auth/v3/tenant_access_token/internal` | body `{ app_id, app_secret }` | 同 §15.5：`200` 且 `code === 0` → 拿到 token |
+| 读记录 | `GET https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records` | `Authorization: Bearer <tenant_access_token>` | `2xx` 且 body `code === 0` → 取 `data.items`（每项 `{ record_id, fields, created_time? }`）；否则视为读记录失败 |
+
+- 读记录复用与 §15 写记录**同一个** URL 模板（`FEISHU_BITABLE_RECORDS_URL`，`submit.ts` 已导出），区别只是 method 为 `GET`、无 body。
+- 同 §15.5：飞书 HTTP `200` 也可能带非 0 业务码，判定**必须**看 body 的 `code`，复用 `FEISHU_OK_CODE`。
+
+### 18.4 分页（MVP 从简）
+
+- MVP **不分页**：要么一次性拉（上游默认页大小通常够小数据量用），要么只拉上游第一页即可。是否携带 `page_size` / 跟 `page_token` 翻页由 implementer 在合约内定，但本期对外契约**不暴露**分页参数 / 游标——`count` 反映本次返回的条数即可。
+- 后续接分页时，可在响应里加 `hasMore` / `pageToken`，`count` 换成上游 `total`；本期形状向前兼容。
+
+### 18.5 错误响应（状态码 + `{ error }`）
+
+| 情况 | 状态码 | 响应体 | 说明 |
+|---|---|---|---|
+| 缺 / 坏 / 过期 token | `401` | `{ "error": "..." }` | auth 中间件拦截（§17.4），不进入 handler |
+| `slug` 对应 form 不存在 | `404` | `{ "error": "..." }` | 不打飞书上游 |
+| owner 未配飞书（`owner.feishu === null`） | `409` | `{ "error": "owner 未配置飞书" }` | 不打上游；引导去集成设置（§12） |
+| 换 token 失败 / 读记录失败（非 2xx / `code≠0` / 不可达） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `app_secret` / `tenant_access_token`；可带飞书 `code` / HTTP 状态这类非敏感摘要 |
+
+- 错误体一律 `application/json` 的 `{ error }`。
+- 上游错误状态码归一策略同 §15.6：可辨识为「上游 / 配置出错」、且错误体绝不含凭据。
+
+### 18.6 安全（不返回 owner 凭据）
+
+- 与 §15.7 同源的边界：明文 `app_secret` 只进换 token 请求体；`tenant_access_token` 只进读记录请求的 `Authorization` 头；二者绝不进响应、HTTP 头回显、日志。
+- 数据后台只投影**提交数据**（`recordId` / `fields` / `createdTime`），不回 owner 的任何凭据 / 配置，也不回 `app_token` / `table_id`（它们是「数据存在哪」的私有信息）。
+- 这是 owner-only 端点（§17 保护），陌生人无 token 拿不到任何提交数据。

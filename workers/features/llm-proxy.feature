@@ -6,6 +6,9 @@ Feature: LLM 代理 POST /api/chat 用 owner key 直连 DeepSeek
   背景：owner 的 DeepSeek key 已由集成配置加密存入 D1，代理在 Worker 内解密后
   只用于发往上游的 Authorization 头；上游是 https://api.deepseek.com 的 OpenAI 兼容
   /chat/completions，代理把上游的流式响应原样透传回前端。
+  鉴权前置（§17）：POST /api/chat 现为 owner-only（只供设计器用、消费 owner 额度），
+  需先带有效 session token；下列场景的 owner 均已登录，§13 的代理行为不变，
+  只多了这道鉴权门（缺/坏 token → 401，见 auth.feature）。
 
   Scenario: owner 已配 key 时代理用其 key 调上游并流式返回
     Given 一个已配置 DeepSeek key 的 owner

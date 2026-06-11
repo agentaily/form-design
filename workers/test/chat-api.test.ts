@@ -6,8 +6,15 @@ import {
   testEnv,
   installUpstreamMock,
   DEEPSEEK_BASE_URL,
+  login,
+  authHeader,
   type UpstreamMock,
 } from "./helpers";
+
+// POST /api/chat is now owner-only (SPEC.md §17.1): it consumes the owner's
+// DeepSeek quota and is only used in the designer, so it sits behind requireAuth.
+// Every request (and the POST /api/config setup) carries `Authorization: Bearer
+// <jwt>` from login(); the §13 behaviour under test is unchanged.
 
 // Outer-loop acceptance specs for the LLM proxy `POST /api/chat`, driven through
 // the real Hono app in workerd via SELF.fetch, with the upstream DeepSeek call
@@ -59,13 +66,16 @@ const TOOLS = [
   },
 ];
 
+// Owner-only (§17.1): attach the session token obtained in beforeEach.
+let token: string;
+
 /** Configure the owner's DeepSeek (and Feishu) via the real, already-implemented POST /api/config. */
 async function configureOwner(opts: { apiKey: string; model?: string }): Promise<void> {
   const deepseek: Record<string, unknown> = { apiKey: opts.apiKey };
   if (opts.model !== undefined) deepseek.model = opts.model;
   const res = await SELF.fetch(`${BASE}/api/config`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeader(token) },
     body: JSON.stringify({ deepseek, feishu: FEISHU }),
   });
   if (res.status !== 200) {
@@ -76,7 +86,7 @@ async function configureOwner(opts: { apiKey: string; model?: string }): Promise
 function postChat(body: unknown): Promise<Response> {
   return SELF.fetch(`${BASE}/api/chat`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeader(token) },
     body: JSON.stringify(body),
   });
 }
@@ -90,6 +100,8 @@ describe("LLM proxy POST /api/chat (workers/features/llm-proxy.feature)", () => 
 
   beforeEach(async () => {
     await resetConfig();
+    // owner-only endpoint (POST /api/chat + POST /api/config setup) needs a token.
+    token = await login();
   });
 
   afterEach(() => {

@@ -7,6 +7,8 @@ Feature: 连接测试 POST /api/config/test 探一下已保存配置能否连通
   各自探一次轻量上游——DeepSeek 调 GET /models 看 key 是否有效，飞书调
   自建应用换 tenant_access_token 看 app_id+app_secret 是否有效。两条结果各自独立，
   HTTP 始终 200（连不通是正常结果，不是 HTTP 错误），凭据绝不出现在响应或 message 里。
+  鉴权前置（§17）：POST /api/config/test 现为 owner-only，需先带有效 session token；
+  下列场景的 owner 均已登录，§14 的连接测试行为不变，只多了这道鉴权门（缺/坏 token → 401，见 auth.feature）。
 
   Scenario: 两条都配且上游都 OK 时两个连接都通过
     Given 一个已保存 DeepSeek key 与完整飞书凭据的 owner

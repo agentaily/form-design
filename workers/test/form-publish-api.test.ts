@@ -1,8 +1,14 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { applySchema, resetConfig, resetForms, testEnv } from "./helpers";
+import { applySchema, resetConfig, resetForms, testEnv, login, authHeader } from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
+
+// Auth split (SPEC.md §17.1): POST /api/forms (publish) and the POST /api/config
+// setup are owner-only → they carry `Authorization: Bearer <jwt>` from login().
+// The PUBLIC reads/writes stay UNAUTHENTICATED and unchanged: GET /api/forms/:slug
+// (public form fetch) and POST /api/submit (answerer submit) send NO token —
+// proving the shared /api/forms prefix does not drag the public read behind auth.
 
 // Outer-loop acceptance specs for 表单发布 + 公开填写拉取, driven through the real
 // Hono app in workerd via SELF.fetch against a local miniflare D1. Realizes every
@@ -170,6 +176,9 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
  * (secrets encrypted at rest). Used by the leak-scan + submit scenarios so there
  * ARE credentials in D1 that the public form fetch could (must not) surface.
  */
+// Owner-only setup (§17.1): POST /api/config + POST /api/forms attach the token.
+let token: string;
+
 async function configureOwner(opts: { feishu: boolean }): Promise<void> {
   const body: Record<string, unknown> = {
     deepseek: { apiKey: OWNER_DEEPSEEK_KEY, model: "deepseek-chat" },
@@ -184,7 +193,7 @@ async function configureOwner(opts: { feishu: boolean }): Promise<void> {
   }
   const res = await SELF.fetch(`${BASE}/api/config`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeader(token) },
     body: JSON.stringify(body),
   });
   if (res.status !== 200) {
@@ -192,18 +201,21 @@ async function configureOwner(opts: { feishu: boolean }): Promise<void> {
   }
 }
 
+// POST /api/forms is owner-only (§17.1) → carries the token.
 function postForm(body: unknown): Promise<Response> {
   return SELF.fetch(`${BASE}/api/forms`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeader(token) },
     body: JSON.stringify(body),
   });
 }
 
+// GET /api/forms/:slug is PUBLIC (§17.1) → intentionally NO Authorization header.
 function getForm(slug: string): Promise<Response> {
   return SELF.fetch(`${BASE}/api/forms/${slug}`);
 }
 
+// POST /api/submit is PUBLIC (§17.1) → intentionally NO Authorization header.
 function postSubmit(body: unknown): Promise<Response> {
   return SELF.fetch(`${BASE}/api/submit`, {
     method: "POST",
@@ -246,6 +258,9 @@ describe("forms POST /api/forms + GET /api/forms/:slug (workers/features/form-pu
   beforeEach(async () => {
     await resetConfig();
     await resetForms();
+    // owner-only setup (POST /api/config + POST /api/forms) needs a token. The
+    // public reads (getForm / postSubmit) deliberately don't use it.
+    token = await login();
   });
 
   afterEach(() => {

@@ -1,6 +1,11 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import { applySchema, resetConfig, testEnv } from "./helpers";
+import { applySchema, resetConfig, testEnv, login, authHeader } from "./helpers";
+
+// GET/POST /api/config are now owner-only (SPEC.md §17.1): every request must
+// carry a `Authorization: Bearer <jwt>` obtained via login(). The §12 behaviour
+// under test is unchanged — auth is just the new front gate, so each helper now
+// attaches the token a beforeEach refreshes per scenario.
 
 // Outer-loop acceptance specs for the owner-config feature at the API layer,
 // driven through the real Hono app in workerd via SELF.fetch.
@@ -44,16 +49,19 @@ const fullPayload = (apiKey: string = DEEPSEEK_KEY) => ({
   },
 });
 
+// Owner-only (§17.1): attach the session token obtained in beforeEach.
+let token: string;
+
 function postConfig(body: unknown): Promise<Response> {
   return SELF.fetch(`${BASE}/api/config`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...authHeader(token) },
     body: JSON.stringify(body),
   });
 }
 
 function getConfig(): Promise<Response> {
-  return SELF.fetch(`${BASE}/api/config`);
+  return SELF.fetch(`${BASE}/api/config`, { headers: authHeader(token) });
 }
 
 /** Assert that no plaintext secret appears anywhere in a raw response body. */
@@ -70,6 +78,9 @@ describe("owner config API (workers/features/owner-config.feature)", () => {
 
   beforeEach(async () => {
     await resetConfig();
+    // owner-only endpoints need a valid session token (§17). resetConfig wipes
+    // owner_config, not the auth secrets (those are env bindings), so login works.
+    token = await login();
   });
 
   it("Scenario: 保存配置后读回得到掩码视图", async () => {

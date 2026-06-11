@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { MiddlewareHandler } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { importConfigKey } from "./crypto";
 import {
@@ -33,6 +34,8 @@ import {
   FormValidationError,
   type PublishFormInput,
 } from "./forms";
+import { signSession, requireAuth, type AuthVariables, type LoginRequest } from "./auth";
+import { listSubmissions, BitableReadError } from "./submissions";
 
 /** Worker bindings (see wrangler.toml + vitest.config.ts). */
 interface Env {
@@ -40,13 +43,68 @@ interface Env {
   DB: D1Database;
   /** base64 256-bit AES-GCM master key (Worker secret in prod). */
   CONFIG_KEY: string;
+  /** owner 登录密码（明文比对，§17.6）。Worker secret in prod. */
+  OWNER_PASSWORD: string;
+  /** session JWT 的 HMAC 签名密钥（§17.6）。Worker secret in prod. */
+  AUTH_SECRET: string;
 }
 
 // Agentaily Forms backend. Routes get added per feature (owner config, LLM
-// proxy, Feishu submit). For now: health + owner config (SPEC.md §12).
-const app = new Hono<{ Bindings: Env }>();
+// proxy, Feishu submit, owner auth, data backend). See SPEC.md §12–§18.
+const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 
 app.get("/health", (c) => c.json({ ok: true, service: "form-design-api" }));
+
+// --- owner auth (§17) ------------------------------------------------------
+//
+// Cross-cutting: owner-only endpoints sit behind requireAuth, mounted at the
+// method+path level so the shared /api/forms prefix never drags the PUBLIC
+// `GET /api/forms/:slug` (or POST /api/submit, GET /health, the login route
+// itself) behind the gate (§17.5 关键陷阱). Each guard below targets the exact
+// owner-only route — never a broad `/api/forms/*`. The guard reads AUTH_SECRET
+// from c.env at request time (bindings aren't available at module init).
+const guard: MiddlewareHandler<{ Bindings: Env; Variables: AuthVariables }> = (c, next) =>
+  requireAuth<{ Bindings: Env; Variables: AuthVariables }>(c.env.AUTH_SECRET)(c, next);
+
+// /api/config covers both GET (read masked) + POST (save) — method-agnostic.
+app.use("/api/config", guard);
+app.post("/api/config/test", guard);
+app.post("/api/chat", guard);
+// POST-only on /api/forms: the PUBLIC GET /api/forms/:slug must stay open (§17.5).
+app.post("/api/forms", guard);
+app.get("/api/forms/:slug/submissions", guard);
+
+// POST /api/auth/login (public) — verify the owner password against OWNER_PASSWORD
+// and issue a short-lived session JWT signed with AUTH_SECRET. Wrong/missing
+// password / non-JSON body → 401 (unified, no extra signal); a server misconfig
+// (OWNER_PASSWORD / AUTH_SECRET unset) → 500. The password / secret never appear
+// in the response (§17.2 / §17.7).
+app.post("/api/auth/login", async (c) => {
+  // Server misconfiguration is a deploy error, NOT an auth failure — it must not
+  // collapse into a 401 that would let everyone in or lock everyone out (§17.2).
+  if (!c.env.OWNER_PASSWORD || !c.env.AUTH_SECRET) {
+    return c.json({ error: "服务端未配置鉴权" }, 500);
+  }
+
+  // A non-JSON / missing-field body is treated as an auth failure → unified 401,
+  // nothing else leaked (§17.2).
+  let body: LoginRequest;
+  try {
+    body = (await c.req.json()) as LoginRequest;
+  } catch {
+    return c.json({ error: "未授权" }, 401);
+  }
+
+  const password = (body as { password?: unknown })?.password;
+  if (typeof password !== "string" || password !== c.env.OWNER_PASSWORD) {
+    return c.json({ error: "未授权" }, 401);
+  }
+
+  // Password matched → sign a session token. Login touches no D1 / Feishu /
+  // DeepSeek — pure secret compare + sign (§17.2).
+  const token = await signSession(c.env.AUTH_SECRET);
+  return c.json({ token }, 200);
+});
 
 // POST /api/config — validate + persist the owner config, echo the masked view.
 app.post("/api/config", async (c) => {
@@ -288,6 +346,61 @@ app.get("/api/forms/:slug", async (c) => {
     return c.json({ error: "form not found" }, 404);
   }
   return c.json(form, 200);
+});
+
+// GET /api/forms/:slug/submissions — 数据后台提交列表（owner-only，已挂 requireAuth）。
+// 命中流程（§18.1）：form 存在校验（404，不打上游）→ 读 + 解密 owner 配置 → 未配飞书
+// (409，不打上游) → 换 tenant_access_token（失败 502）→ GET 多维表格记录列表（失败 502）
+// → 200 { submissions, count }。owner 的 app_secret / tenant_access_token 全程留在
+// Worker 内，绝不进响应、头或日志；响应也不含 app_token / table_id / owner_id（§18.6）。
+app.get("/api/forms/:slug/submissions", async (c) => {
+  const slug = c.req.param("slug");
+
+  // 1) Form must exist BEFORE touching owner config / any Feishu upstream. An
+  //    unknown slug → 404, nothing forwarded (§18.1 step 1).
+  if (!(await formExists(c.env.DB, slug))) {
+    return c.json({ error: "form not found" }, 404);
+  }
+
+  // 2) Read + decrypt the owner config (plaintext, in-Worker view only).
+  const key = await importConfigKey(c.env.CONFIG_KEY);
+  const owner = await getOwnerConfig(c.env.DB, key);
+
+  // 3) No Feishu configured → 409, never touch upstream (§18.1 step 4).
+  if (owner.feishu === null) {
+    return c.json({ error: "owner 未配置飞书" }, 409);
+  }
+  const feishu = owner.feishu;
+
+  // 4) Exchange the owner's saved app_id/app_secret for a tenant_access_token.
+  //    The plaintext app_secret rides ONLY this request body (§18.6); any failure
+  //    surfaces as 502 with no credential in the error.
+  let token: string;
+  try {
+    token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
+  } catch (err) {
+    if (err instanceof FeishuTokenError) {
+      return c.json({ error: err.message }, 502);
+    }
+    throw err;
+  }
+
+  // 5) GET the Bitable record list with the token; map items → submissions. The
+  //    tenant_access_token rides ONLY the read Authorization header (§18.6); any
+  //    failure surfaces as 502 with neither token nor secret in the error.
+  let submissions;
+  try {
+    submissions = await listSubmissions(token, feishu.appToken, feishu.tableId);
+  } catch (err) {
+    if (err instanceof BitableReadError) {
+      return c.json({ error: err.message }, 502);
+    }
+    throw err;
+  }
+
+  // 6) Success → only the projected submissions + count; never owner creds,
+  //    tenant_access_token, app_token / table_id, or owner_id (§18.6).
+  return c.json({ submissions, count: submissions.length }, 200);
 });
 
 export default app;
