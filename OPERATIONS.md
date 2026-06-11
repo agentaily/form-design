@@ -41,7 +41,7 @@ npm run dev          # 开发服务器 http://localhost:5173
 | `preview`                 | 本地预览生产构建                                        |
 | `typecheck`               | `tsc --noEmit`（仅类型检查 `src/core`）                 |
 | `format` / `format:check` | Prettier 写入 / 校验                                    |
-| `test`                    | Vitest：单元（TDD）+ BDD（`.feature`），jsdom           |
+| `test`                    | Vitest：单元 + 集成（jsdom，集成层实现 `features/`）    |
 | `test:watch`              | Vitest watch                                            |
 | `test:e2e`                | Playwright 端到端（真实浏览器）                         |
 | `test:all`                | Vitest + Playwright                                     |
