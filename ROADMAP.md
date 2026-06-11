@@ -12,6 +12,9 @@
 - 对话式设计器：左 Agent 对话 + 右实时表单预览（MVP 走 `flow.jsx` 脚本）
 - 表单工具：`add` / `update` / `remove` / `duplicate` / `reorder` field + 校验
 - **markup 指向修改**：hover 高亮预览元素、点击带身份发消息到对话
+- **连续发送（缓冲区）**：处理中可继续输入，消息收进缓冲区、下一轮一次性合并处理（SPEC §4.1，`core/queue.ts` + 顶部 DS `Queue` 组件）
+- **表单校验走 DS `Form.useForm`**：按类型规则（必填 + 邮箱 + 11 位手机号）、提交即定位首个错误、实时纠错（依赖 `@agentaily/design-system` 0.2.0）
+- **响应式适配**：≤720px 单列 + 对话/预览分段切换器、头部压缩、分享收成图标；≤380px 仅留 logo
 - Cloudflare Pages + GitHub Actions 自动部署（push main → 自动上线；独立 yarnbcoder 账户）
 
 ### 后端（`workers/`，Hono on Cloudflare Workers + D1）

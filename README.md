@@ -3,9 +3,13 @@
 A conversational form designer — left pane is the Agent chat, right pane is the
 live form preview. Describe the form you want; the Agent reasons, streams in
 `add_field()` tool calls, and mounts each field into the preview in real time.
-The preview is fillable end-to-end (required-field validation → success state),
-with a Schema view and desktop/phone width toggles. Publish/Share opens a
-QR-code dialog.
+You can keep typing while a turn runs — extra messages collect in a **buffer**
+(shown above the composer) and flush together on the next turn. The preview is
+fillable end-to-end, with validation driven by the design system's
+`Form.useForm` hook (required + email + 11-digit phone format → focus-first
+error → success state), a Schema view, and desktop/phone width toggles. The
+layout is **responsive**: ≤720px collapses to a single column with a
+chat/preview segmented switcher. Publish/Share opens a QR-code dialog.
 
 Built on the **[`@agentaily/design-system`](https://github.com/agentaily/design-system)**
 npm package — every UI surface (chat, inputs, dialog, tabs, schema tree) is a
@@ -30,9 +34,11 @@ npm run test:e2e   # Playwright end-to-end (real browser)
 
 - `src/main.jsx` — entry; imports `@agentaily/design-system/styles.css` (tokens +
   fonts + motif utilities) once, then mounts the app.
-- `src/App.jsx` — header, resizable split, scripted runner, Schema view, share dialog.
+- `src/App.jsx` — header, resizable split (single-column ≤720px via the mobile
+  sub-bar), scripted runner driven through `core/queue` (continuous-send buffer +
+  `Queue` UI), Schema view, share dialog.
 - `src/chat.jsx` — chat side: `Message` / `Reasoning` / `ToolCall` / `Composer` / `Suggestions`.
-- `src/preview.jsx` — live form: `Field` / `Input` / `Textarea` / `Select` / `RadioGroup` / `Checkbox` / `Button`.
+- `src/preview.jsx` — live form: `Field` / `Input` / `Textarea` / `Select` / `RadioGroup` / `Checkbox` / `Button`, with validation via the DS `Form.useForm` hook.
 - `src/flow.jsx` — the scripted build sequence + keyword intent handling that drives the demo.
 - `src/app.css` — layout-only styles (page chrome, split, form-card shell); all values reference DS tokens.
 - `src/core/` — the **SPEC architecture's testable core** (TypeScript, strict),
