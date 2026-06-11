@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   parsePublishInput,
+  parseUpdateInput,
   generateSlug,
+  MAX_FIELD_DEPTH,
   FormValidationError,
   type PublishFormInput,
 } from "../src/forms";
@@ -129,5 +131,93 @@ describe("generateSlug (workers/features/form-publish.feature, §16.3)", () => {
     }
     // All distinct: a low-entropy / sequential generator would collide here.
     expect(slugs.size).toBe(n);
+  });
+});
+
+// --- §16.2 安全 nit：parseField 的嵌套深度上限 -------------------------------
+//
+// group 字段的 `children` 递归不得超过 MAX_FIELD_DEPTH 层。parseField 是模块私有，
+// 经由 parsePublishInput（顶层 fields.map → parseField，深度从 0 起算）间接驱动。
+// 一份深到超过上限的 group 链应被当成形状非法 → FormValidationError；恰好在上限内的
+// 仍应被接受。
+describe("parseField nesting depth limit (workers/features/form-publish.feature, §16.2)", () => {
+  // 构造一条 group → group → … 的嵌套链，最内层挂一个普通 text 字段。`depth` 个 group
+  // 嵌套意味着最内层那个 text 字段的递归 depth = 链上 group 的层数。
+  function nestedGroups(depth: number) {
+    let node: Record<string, unknown> = { id: "f_leaf", type: "text", label: "叶子" };
+    for (let i = depth; i > 0; i--) {
+      node = { id: `f_group_${i}`, type: "group", label: `组 ${i}`, children: [node] };
+    }
+    return node;
+  }
+
+  it("accepts nesting up to MAX_FIELD_DEPTH", () => {
+    // 顶层 fields[0] 处于 depth 0；其下 (MAX_FIELD_DEPTH) 层 group 把叶子推到
+    // depth = MAX_FIELD_DEPTH，正好踩在上限上（depth > MAX_FIELD_DEPTH 才拒）。
+    const parsed = parsePublishInput({
+      meta: { title: "深嵌套（界内）" },
+      fields: [nestedGroups(MAX_FIELD_DEPTH)],
+    });
+    expect(parsed.fields).toHaveLength(1);
+    expect(parsed.fields[0].type).toBe("group");
+  });
+
+  it("rejects nesting deeper than MAX_FIELD_DEPTH with FormValidationError", () => {
+    // 再多一层就把叶子推到 depth = MAX_FIELD_DEPTH + 1 → 形状非法（route → 400，不落库）。
+    expect(() =>
+      parsePublishInput({
+        meta: { title: "深嵌套（超限）" },
+        fields: [nestedGroups(MAX_FIELD_DEPTH + 1)],
+      }),
+    ).toThrow(FormValidationError);
+  });
+});
+
+// --- §21.3：parseUpdateInput（PATCH /api/forms/:slug 的部分更新形状校验）------
+//
+// 部分更新：所有键可选；空体 {} 合法（no-op）。status 只接受 'published' / 'closed'
+// （拒绝 'draft' 与任意乱值 → FormValidationError → route 400）。meta / fields 若给则
+// 复用 §16 的形状约定（title 非空 / parseField + 深度上限）。
+describe("parseUpdateInput (workers/features/form-management.feature, §21.3)", () => {
+  it("accepts an empty body as a no-op update", () => {
+    const parsed = parseUpdateInput({});
+    expect(parsed).toEqual({});
+  });
+
+  it("accepts status 'closed'", () => {
+    const parsed = parseUpdateInput({ status: "closed" });
+    expect(parsed.status).toBe("closed");
+  });
+
+  it("accepts status 'published'", () => {
+    const parsed = parseUpdateInput({ status: "published" });
+    expect(parsed.status).toBe("published");
+  });
+
+  it("rejects status 'draft' (PATCH 不允许回退草稿，§21.3)", () => {
+    expect(() => parseUpdateInput({ status: "draft" })).toThrow(FormValidationError);
+  });
+
+  it("rejects a bogus status value", () => {
+    expect(() => parseUpdateInput({ status: "open" })).toThrow(FormValidationError);
+    expect(() => parseUpdateInput({ status: 123 })).toThrow(FormValidationError);
+  });
+
+  it("rejects a non-object body", () => {
+    expect(() => parseUpdateInput(null)).toThrow(FormValidationError);
+    expect(() => parseUpdateInput("closed")).toThrow(FormValidationError);
+    expect(() => parseUpdateInput([])).toThrow(FormValidationError);
+  });
+
+  it("rejects a malformed meta (title 缺失/空) when provided", () => {
+    expect(() => parseUpdateInput({ meta: { description: "无标题" } })).toThrow(
+      FormValidationError,
+    );
+  });
+
+  it("rejects a malformed fields entry when provided", () => {
+    expect(() => parseUpdateInput({ fields: [{ type: "text", label: "无 id" }] })).toThrow(
+      FormValidationError,
+    );
   });
 });

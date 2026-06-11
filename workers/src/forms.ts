@@ -180,8 +180,11 @@ function isNonEmptyString(v: unknown): v is string {
  *   `options` / `validation` / `children` 形状若提供则做浅校验，否则 reject。
  * - 本期**不做**字段级业务校验（不校验 select 必须带 options、id 是否唯一等），
  *   只做形状级校验，把合法形状的定义透传落库（§16.5）。
+ * - **深度上限（§16.2 安全 nit）：** group 字段的 `children` 递归不得超过
+ *   {@link MAX_FIELD_DEPTH} 层；超限即视为形状非法 → 抛 {@link FormValidationError}（route
+ *   → 400，不落库），用以挡住深度爆栈 / 资源耗尽的畸形 payload。
  *
- * @throws {@link FormValidationError} when 形状校验失败（route → 400，不落库）。
+ * @throws {@link FormValidationError} when 形状校验失败 / 嵌套超 {@link MAX_FIELD_DEPTH}（route → 400，不落库）。
  */
 export function parsePublishInput(body: unknown): PublishFormInput {
   // 顶层必须是普通对象（数组 / null / 标量都拒绝）。
@@ -220,9 +223,19 @@ export function parsePublishInput(body: unknown): PublishFormInput {
  * 浅校验单个 field 的形状（id / type / label + 可选 options / validation / children）。
  * 只做形状级校验、原样透传合法值，不做字段级业务校验（§16.5）。
  *
- * @throws {@link FormValidationError} when 形状非法。
+ * **深度上限（§16.2 安全 nit）：** 通过 `depth` 参数跟踪当前嵌套层级，递归 `children` 时
+ * `depth + 1`；当 `depth` 超过 {@link MAX_FIELD_DEPTH} 即抛 {@link FormValidationError}，
+ * 挡住深度爆栈 / 资源耗尽的畸形 payload。`implementer` 须把 `depth` 沿 `children.map`
+ * 递归传下去（顶层从 0 起算）。
+ *
+ * @param field 待校验的原始值。
+ * @param depth 当前嵌套深度（顶层 0）；超 {@link MAX_FIELD_DEPTH} → 形状非法。
+ * @throws {@link FormValidationError} when 形状非法 / 嵌套超 {@link MAX_FIELD_DEPTH}。
  */
-function parseField(field: unknown): Field {
+function parseField(field: unknown, depth = 0): Field {
+  if (depth > MAX_FIELD_DEPTH) {
+    throw new FormValidationError(`field nesting exceeds max depth ${MAX_FIELD_DEPTH}`);
+  }
   if (typeof field !== "object" || field === null || Array.isArray(field)) {
     throw new FormValidationError("each field must be an object");
   }
@@ -263,7 +276,8 @@ function parseField(field: unknown): Field {
     if (!Array.isArray(f.children)) {
       throw new FormValidationError("field.children must be an array");
     }
-    parsed.children = f.children.map((child) => parseField(child));
+    // 递归下探一层：§16.2 深度上限靠 depth + 1 累积，超 MAX_FIELD_DEPTH 在子层即拒绝。
+    parsed.children = f.children.map((child) => parseField(child, depth + 1));
   }
 
   return parsed;
@@ -327,6 +341,13 @@ function parseValidation(validation: unknown): FieldValidation {
 const SLUG_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 /** slug 长度：12 个 base62 字符 ≈ 71 bit 熵，远超「不可枚举 / 不可猜」需求。 */
 const SLUG_LENGTH = 12;
+
+/**
+ * group 字段 `children` 的递归嵌套**深度上限**（§16.2 安全 nit，防深 payload）。
+ * `parseField` 递归到超过此深度即视为形状非法 → {@link FormValidationError} → route `400`。
+ * 一份正常表单的 group 嵌套远到不了这个量级；上限值为合约内固定常量，可按需微调，但**必须**存在。
+ */
+export const MAX_FIELD_DEPTH = 8;
 
 /**
  * 生成一个公开 `slug`：URL 安全、对外即标识、**不可枚举 / 不可猜**（§16.3）。
@@ -459,4 +480,314 @@ export async function formExists(db: D1Database, slug: string): Promise<boolean>
     .bind(slug)
     .first<{ one: number }>();
   return row !== null;
+}
+
+// ---------------------------------------------------------------------------
+// §20：提交校验所需的 status / fields 读取（实现留给 implementer）
+// ---------------------------------------------------------------------------
+
+/**
+ * 读取某 slug 对应 form 的 {@link FormStatus}（§20.2）。
+ *
+ * 供 `POST /api/submit` 在 {@link formExists} 之后做状态门：非 `'published'`
+ * （`'draft'` / `'closed'`）→ route 拒收（`409 { error }`），不读 owner 配置、不打飞书上游。
+ *
+ * - 命中：返回该行的 `status`（`'published' | 'draft' | 'closed'`）。
+ * - 未命中（slug 不存在）：返回 `null`（route 侧通常已先用 formExists 挡掉，本函数对
+ *   不存在保持 `null` 即可）。
+ *
+ * 实现可与 {@link getFormFields} 合并成一次 D1 读（`SELECT status, schema_json ...`），
+ * 也可独立查 `SELECT status ...`——由实现在合约内定。
+ *
+ * @param db D1 binding。
+ * @param slug 来自 submit 请求体的 `formSlug`。
+ * @returns 该 form 的 status，或 `null`（不存在）。
+ */
+export async function getFormStatus(db: D1Database, slug: string): Promise<FormStatus | null> {
+  const row = await db
+    .prepare(`SELECT status FROM forms WHERE slug = ?`)
+    .bind(slug)
+    .first<{ status: string }>();
+  if (row === null) {
+    return null;
+  }
+  return row.status as FormStatus;
+}
+
+/**
+ * 读取某 slug 对应 form 的字段定义（schema 真相，§20.3）。
+ *
+ * 供 `POST /api/submit` 在状态门通过后，把它交给 {@link validateAnswers}（submit.ts）
+ * 校验答案是否漏填必填项。这里读的是发布时存进 `schema_json` 的 `Field[]`（同公开拉取
+ * 的 fields，但本调用是 owner 侧 submit 流程内部使用，不对外投影）。
+ *
+ * - 命中：把 `schema_json` 反序列化成 `Field[]` 返回。
+ * - 未命中（slug 不存在）：返回 `null`。
+ *
+ * 实现可与 {@link getFormStatus} 合并成一次 D1 读。
+ *
+ * @param db D1 binding。
+ * @param slug 来自 submit 请求体的 `formSlug`。
+ * @returns 该 form 的 `Field[]`，或 `null`（不存在）。
+ */
+export async function getFormFields(db: D1Database, slug: string): Promise<Field[] | null> {
+  const row = await db
+    .prepare(`SELECT schema_json FROM forms WHERE slug = ?`)
+    .bind(slug)
+    .first<{ schema_json: string }>();
+  if (row === null) {
+    return null;
+  }
+  return JSON.parse(row.schema_json) as Field[];
+}
+
+// ---------------------------------------------------------------------------
+// §21：表单管理 CRUD（owner-only：列表 / 改状态 / 删除）（实现留给 implementer）
+// ---------------------------------------------------------------------------
+
+/**
+ * `GET /api/forms` 列表里的一项（§21.2）。**只**给概览：`slug` / `meta` / `status` /
+ * `createdAt`，**不**含 `fields` 全量（详情走 `GET /api/forms/:slug` / PATCH 回显）。
+ *
+ * 这是 owner-only 视图，故**可以**带 owner 私有维度 `status` / `createdAt`；但**绝不**含
+ * 任何 owner 凭据（凭据在 `owner_config`，不在 `forms` 表，§21.2）。`submissionCount` 为
+ * 可选——算它要打一次飞书，MVP 可省略（§21.2）。
+ */
+export interface FormListItem {
+  /** 公开 slug，同时是 owner 管理 / 编辑 / 删除的定位键。 */
+  slug: string;
+  meta: FormMeta;
+  /** 当前状态（`published` / `draft` / `closed`）。 */
+  status: FormStatus;
+  /** 发布时刻（ISO-8601），来自 forms.created_at。 */
+  createdAt: string;
+  /** 可选：该表单已收集的提交条数（需打飞书才能算，MVP 可省略，§21.2）。 */
+  submissionCount?: number;
+}
+
+/**
+ * `GET /api/forms` 的成功响应（§21.2）：该 owner 的所有表单 + 条数。空 → `forms: []`。
+ */
+export interface FormListResult {
+  forms: FormListItem[];
+  count: number;
+}
+
+/**
+ * `PATCH /api/forms/:slug` 的请求体（§21.3）——**部分更新**，所有字段可选。
+ *
+ * - `status`：只接受 `'published'` / `'closed'`（**不**允许 PATCH 成 `'draft'`，§21.3）。
+ * - `meta` / `fields`：若给则整块替换（编辑为合约内增强；给 `fields` 时须过 §16 的
+ *   `parseField` 形状校验 + §16.2 深度上限）。
+ * - 未出现的键保持原值；空体 `{}` 为 no-op（仍 `200`）。
+ */
+export interface UpdateFormInput {
+  /** 改状态：`published`（开放提交）↔ `closed`（停止收集）。 */
+  status?: Extract<FormStatus, "published" | "closed">;
+  /** 可选：整块替换展示 meta。 */
+  meta?: FormMeta;
+  /** 可选：整块替换字段定义（须过 parseField 形状校验 + 深度上限）。 */
+  fields?: Field[];
+}
+
+/**
+ * `PATCH /api/forms/:slug` 成功回的更新后视图（§21.3）。让 owner 确认改动已生效——
+ * 至少含 `slug` + `status`，建议带上 `meta` / `fields` / `createdAt` 的 owner 视图。
+ * 仍**不**含任何 owner 凭据。
+ */
+export interface UpdatedForm {
+  slug: string;
+  meta: FormMeta;
+  fields: Field[];
+  status: FormStatus;
+  createdAt: string;
+}
+
+/**
+ * `DELETE /api/forms/:slug` 的成功响应（§21.4）。MVP 硬删 → `{ ok:true, slug }`
+ * （或实现选 `204`；本类型对应 `200 { ok }` 形状）。
+ */
+export interface DeleteFormResult {
+  ok: true;
+  slug: string;
+}
+
+/**
+ * 列出某 owner 的所有表单（§21.2）——owner-only。
+ *
+ * - MVP 单 owner：`owner_id` 恒 `'default'`（{@link DEFAULT_OWNER_ID}），列表即该 owner 全部。
+ * - 只投影 `slug` / `meta_json` / `status` / `created_at`，组装成 {@link FormListItem}[]；
+ *   **不**读 `schema_json` 全量（列表不带 fields），更不碰 owner_config（§21.2）。
+ * - 排序（按 created_at 倒序 / 不约定）由实现定。空 → `[]`。
+ *
+ * @param db D1 binding。
+ * @param ownerId owner 维度键（MVP 恒 'default'，可由实现默认填）。
+ * @returns 该 owner 的表单概览数组（route 据此组 `{ forms, count }`）。
+ */
+export async function listForms(
+  db: D1Database,
+  ownerId: string = DEFAULT_OWNER_ID,
+): Promise<FormListItem[]> {
+  // 只投影列表字段：slug / meta_json / status / created_at。绝不 SELECT schema_json
+  // （列表不带 fields 全量），更不碰 owner_config —— 凭据 / owner_id 永不进列表（§21.2）。
+  const { results } = await db
+    .prepare(
+      `SELECT slug, meta_json, status, created_at FROM forms WHERE owner_id = ? ORDER BY created_at DESC`,
+    )
+    .bind(ownerId)
+    .all<{ slug: string; meta_json: string; status: string; created_at: string }>();
+
+  return (results ?? []).map((row) => ({
+    slug: row.slug,
+    meta: JSON.parse(row.meta_json) as FormMeta,
+    status: row.status as FormStatus,
+    createdAt: row.created_at,
+  }));
+}
+
+/**
+ * 部分更新一份表单（§21.3）——owner-only。
+ *
+ * - 只更新 `input` 里出现的键（`status` / `meta` / `fields`），未出现的保持原值；空 `input`
+ *   为 no-op。`status` 只允许 `published` / `closed`（非法值由 route 在解析时挡成 400）。
+ * - 命中并更新成功：返回更新后的 {@link UpdatedForm}。
+ * - slug 不存在：返回 `null`（route → `404 { error }`）。
+ *
+ * @param db D1 binding。
+ * @param slug 目标表单 slug。
+ * @param input 部分更新输入（已由 route 形状校验）。
+ * @returns 更新后的视图，或 `null`（不存在）。
+ */
+export async function updateForm(
+  db: D1Database,
+  slug: string,
+  input: UpdateFormInput,
+): Promise<UpdatedForm | null> {
+  // 只更新 input 里出现的键；未出现的保持原值。空 input → 跳过 UPDATE（no-op），直接读回。
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+  if (input.status !== undefined) {
+    sets.push("status = ?");
+    binds.push(input.status);
+  }
+  if (input.meta !== undefined) {
+    sets.push("meta_json = ?");
+    binds.push(JSON.stringify(input.meta));
+  }
+  if (input.fields !== undefined) {
+    sets.push("schema_json = ?");
+    binds.push(JSON.stringify(input.fields));
+  }
+
+  if (sets.length > 0) {
+    const result = await db
+      .prepare(`UPDATE forms SET ${sets.join(", ")} WHERE slug = ?`)
+      .bind(...binds, slug)
+      .run();
+    // 无行被更新 → slug 不存在 → null（route → 404）。
+    if (result.meta.changes === 0) {
+      return null;
+    }
+  }
+
+  // 读回更新后的 owner 视图（含 fields / status / createdAt）。空 input 的 no-op 也走这里，
+  // 若 slug 不存在则读不到 → null。绝不读 / 回 owner_config 或任何凭据。
+  const row = await db
+    .prepare(`SELECT meta_json, schema_json, status, created_at FROM forms WHERE slug = ?`)
+    .bind(slug)
+    .first<{ meta_json: string; schema_json: string; status: string; created_at: string }>();
+  if (row === null) {
+    return null;
+  }
+
+  return {
+    slug,
+    meta: JSON.parse(row.meta_json) as FormMeta,
+    fields: JSON.parse(row.schema_json) as Field[],
+    status: row.status as FormStatus,
+    createdAt: row.created_at,
+  };
+}
+
+/**
+ * 校验 + 规整 `PATCH /api/forms/:slug` 的 JSON body 成 {@link UpdateFormInput}（§21.3）。
+ *
+ * - 顶层须是普通对象；空对象 `{}` 合法（no-op 更新）。
+ * - `status` 若给：须是 `'published'` / `'closed'`（**拒绝** `'draft'` 与其它值 → 抛
+ *   {@link FormValidationError} → route `400`）。
+ * - `meta` 若给：复用 §16 的 meta 形状约定（title 非空）。
+ * - `fields` 若给：复用 §16 的 `parseField` 形状校验（含 §16.2 深度上限）。
+ *
+ * @throws {@link FormValidationError} when 形状 / status 非法（route → 400）。
+ */
+export function parseUpdateInput(body: unknown): UpdateFormInput {
+  // 顶层须是普通对象（数组 / null / 标量都拒绝）。空对象 {} 合法 → no-op 更新。
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new FormValidationError("body must be a JSON object");
+  }
+
+  const { status, meta, fields } = body as {
+    status?: unknown;
+    meta?: unknown;
+    fields?: unknown;
+  };
+
+  const input: UpdateFormInput = {};
+
+  // status：只接受 'published' / 'closed'（拒绝 'draft' 与任意乱值，§21.3）。
+  if (status !== undefined) {
+    if (status !== "published" && status !== "closed") {
+      throw new FormValidationError(
+        `status must be 'published' or 'closed', got: ${String(status)}`,
+      );
+    }
+    input.status = status;
+  }
+
+  // meta：若给则复用 §16 的 meta 形状约定（对象 + title 非空，description 可选字符串）。
+  if (meta !== undefined) {
+    if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
+      throw new FormValidationError("meta must be an object");
+    }
+    const { title, description } = meta as { title?: unknown; description?: unknown };
+    if (!isNonEmptyString(title)) {
+      throw new FormValidationError("meta.title is required");
+    }
+    if (description !== undefined && typeof description !== "string") {
+      throw new FormValidationError("meta.description must be a string");
+    }
+    const parsedMeta: FormMeta = { title };
+    if (description !== undefined) {
+      parsedMeta.description = description;
+    }
+    input.meta = parsedMeta;
+  }
+
+  // fields：若给则复用 §16 的 parseField 形状校验（含 §16.2 深度上限，从 depth 0 起算）。
+  if (fields !== undefined) {
+    if (!Array.isArray(fields)) {
+      throw new FormValidationError("fields must be an array");
+    }
+    input.fields = fields.map((field) => parseField(field));
+  }
+
+  return input;
+}
+
+/**
+ * 硬删一份表单（§21.4）——owner-only。从 `forms` 表删掉该 slug 行；删后公开拉取 / submit
+ * 该 slug 都变 404。**不**联动删 owner 飞书表里已收集的记录（§21.4）。
+ *
+ * - 命中并删除：返回 `true`。
+ * - slug 不存在：返回 `false`（route → `404 { error }`，MVP 取严格语义，§21.4）。
+ *
+ * @param db D1 binding。
+ * @param slug 目标表单 slug。
+ * @returns 是否删除了一行。
+ */
+export async function deleteForm(db: D1Database, slug: string): Promise<boolean> {
+  // 硬删（§21.4）：从 forms 表删掉该 slug 行。不联动删 owner 飞书表里已收集的记录。
+  const result = await db.prepare(`DELETE FROM forms WHERE slug = ?`).bind(slug).run();
+  // 删了一行 → true；slug 不存在（0 行受影响）→ false（route → 404，严格语义）。
+  return result.meta.changes > 0;
 }

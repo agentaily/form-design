@@ -17,6 +17,8 @@
 // map fields → write → 200 { ok, recordId }) sits on top in index.ts and is
 // exercised by the outer loop via SELF.fetch with a mocked open.feishu.cn.
 
+import type { Field } from "./forms";
+
 /** Feishu Bitable add-record endpoint template. SPEC.md §15.5. Fill {app_token}/{table_id}. */
 export const FEISHU_BITABLE_RECORDS_URL =
   "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records";
@@ -121,9 +123,10 @@ export class BitableWriteError extends Error {
  *   rejection to `400 { error: "answers is required" }`, nothing forwarded).
  * - Each answer must have a non-empty string `label` and a `value` that is a
  *   string or a string[]; otherwise reject (`400`, nothing forwarded).
- * - Does NOT validate answers against the form's schema (required-field /
- *   label-exists / 字段级一致性 checks are out of this slice — only shape-level
- *   validation). See SPEC.md §15.2、§16.5.
+ * - Does NOT validate answers against the form's schema here — that is now a
+ *   SEPARATE step done by the route AFTER `formExists` + the status gate, via
+ *   {@link validateAnswers} (§20.3). `parseSubmitRequest` stays shape-only;
+ *   required-field / 字段级 checks moved to `validateAnswers`. See §15.2、§16.5、§20.
  *
  * @throws if the body fails shape validation.
  */
@@ -235,4 +238,92 @@ export async function writeToBitable(
     return { recordId };
   }
   throw new BitableWriteError(`飞书新增记录失败：code ${body.code}`);
+}
+
+// ---------------------------------------------------------------------------
+// §20：提交前的状态门 + answers 对 schema 必填校验（实现留给 implementer）
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown when `POST /api/submit` targets a form whose status is NOT `'published'`
+ * (`'draft'` / `'closed'`) — the form exists but is not currently accepting
+ * submissions (§20.2). The route surfaces this as `409 { error }` and never reads
+ * owner config / touches any Feishu upstream.
+ *
+ * 注意与 {@link FeishuNotConfiguredError} 区分：两者都映射成 `409`，但语义不同
+ * （此为「表单未开放提交」，彼为「owner 未配飞书」），靠 `error` 文案区分（§20.4）。
+ */
+export class FormNotPublishedError extends Error {
+  constructor(message = "表单未开放提交") {
+    super(message);
+    this.name = "FormNotPublishedError";
+  }
+}
+
+/**
+ * Thrown when the submitted `answers` fail validation against the form's schema —
+ * MVP: a `required` field has no non-empty answer (§20.3). The route surfaces this
+ * as `400 { error }` and never touches any Feishu upstream.
+ *
+ * The `message` may name the offending field (non-sensitive, helps the answerer
+ * correct it) but MUST NOT contain any owner credential (§20.4).
+ */
+export class AnswersValidationError extends Error {
+  constructor(message = "answers 校验未通过") {
+    super(message);
+    this.name = "AnswersValidationError";
+  }
+}
+
+/**
+ * 按 form 的 `fields`（§3.2 Field 真相）校验提交的 `answers`（§20.3）。route 在
+ * `formExists` + 状态门通过后调用；校验失败 → route `400 { error }`，不打飞书上游。
+ *
+ * **MVP 必做——必填校验：** 对每个 `required === true` 的 field，要求 `answers` 里存在
+ * 一条 `label` 等于该 field `label`（§15.3 的 label 对位约定）、且 `value` 非空的作答；
+ * 缺失或空值 → 抛 {@link AnswersValidationError}。「空值」至少覆盖：空串 / 纯空白串 / 空数组
+ * （多选未选）。
+ *
+ * **可选增强（本期不强制，§20.3）：** 类型校验（number 是否数字串）、select/radio/checkbox
+ * 的 `value` 是否落在 `options` 内、`validation`（pattern/min/max）——若实现，失败同样抛
+ * {@link AnswersValidationError}（同一 `400` 出口）。group `children` 的递归必填校验亦为
+ * 可选增强；MVP 至少校验顶层 `fields`。
+ *
+ * @param fields 该 form 的字段定义（来自 forms.ts 的 getFormFields）。
+ * @param answers 已通过 {@link parseSubmitRequest} 形状校验的作答。
+ * @throws {@link AnswersValidationError} when 必填项缺失 / 空值（或可选的类型/选项校验失败）。
+ */
+export function validateAnswers(fields: Field[], answers: SubmitAnswer[]): void {
+  // label → 提交值的索引（§15.3 / §20.3 的 label 对位约定）。
+  const byLabel = new Map<string, SubmitAnswer["value"]>();
+  for (const { label, value } of answers) {
+    byLabel.set(label, value);
+  }
+
+  for (const field of fields) {
+    // MVP 只校验顶层 required 字段；非必填缺失 / 空值不拦（§20.3）。
+    if (field.required !== true) {
+      continue;
+    }
+    const value = byLabel.get(field.label);
+    if (isEmptyAnswer(value)) {
+      // 文案点名缺失字段（非敏感，帮答题者修正，§20.4）；绝不含任何 owner 凭据。
+      throw new AnswersValidationError(`必填字段「${field.label}」未填写`);
+    }
+  }
+}
+
+/**
+ * 「空值」判定（§20.3）：未作答（undefined）/ 空串 / 纯空白串 / 空数组（多选未选）均视为空。
+ * 字符串数组里若全是空白项也视为未选。
+ */
+function isEmptyAnswer(value: SubmitAnswer["value"] | undefined): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  if (typeof value === "string") {
+    return value.trim().length === 0;
+  }
+  // string[]：空数组、或所有项都是空白 → 视为未选。
+  return value.length === 0 || value.every((v) => v.trim().length === 0);
 }
