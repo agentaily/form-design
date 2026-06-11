@@ -547,6 +547,32 @@ body {
   margin: 0;
 }
 
+/* ───────────────────────── integration settings dialog ───────────────────────── */
+.d-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.d-settings__block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.d-settings__test {
+  padding-top: 12px;
+  border-top: 1px solid var(--border-default);
+}
+.d-settings__probe {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.d-settings__probe-msg {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
 /* ───────────────────────── responsive: phone (single column) ───────────────────────── */
 .d-mbar {
   display: none;

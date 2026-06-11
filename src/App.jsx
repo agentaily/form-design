@@ -17,6 +17,7 @@ import { Icon, ChatThread, ChatComposer } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
 import { MarkupLayer } from "./markup.jsx";
 import { LoginDialog } from "./auth.jsx";
+import { SettingsDialog } from "./settings.jsx";
 import { MessageQueue } from "./core/queue";
 import { createFormModel, applyDesignerTool, uid, DESIGNER_SYSTEM } from "./core/designerTools";
 import { runDesignerTurn } from "./core/designerLoop";
@@ -89,7 +90,18 @@ function schemaFor(meta, fields) {
   return out;
 }
 
-export default function App({ chat = streamDesignerChat, login, logout } = {}) {
+export default function App({
+  chat = streamDesignerChat,
+  login,
+  logout,
+  // Integration-settings client (SPEC §12/§14). Defaults to the real configClient
+  // functions inside SettingsDialog; injectable here so App-level tests can drive
+  // the 401 → close-settings + open-login wiring deterministically (same seam as
+  // chat/login/logout). Left undefined → SettingsDialog uses its own defaults.
+  getConfig,
+  saveConfig,
+  testConnections,
+} = {}) {
   const [t, setTweak] = useUiState(UI_DEFAULTS);
   const [messages, setMessages] = useState([]);
   const [meta, setMeta] = useState(null);
@@ -105,6 +117,8 @@ export default function App({ chat = streamDesignerChat, login, logout } = {}) {
   // owner session (SPEC §17): logged-in unlocks the owner-only /api/chat proxy.
   const [loggedIn, setLoggedIn] = useState(() => authIsLoggedIn());
   const [loginOpen, setLoginOpen] = useState(false);
+  // integration settings (SPEC §12 + §14): owner connects DeepSeek + 飞书 here.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // single-column mobile layout (≤720px): one pane at a time via the sub-bar.
   const isMobile = useMediaQuery("(max-width: 720px)");
   const [mobileView, setMobileView] = useState("chat");
@@ -329,6 +343,9 @@ export default function App({ chat = streamDesignerChat, login, logout } = {}) {
           >
             <Icon name={loggedIn ? "user" : "lock"} size={15} />
           </IconButton>
+          <IconButton label="集成设置" onClick={() => setSettingsOpen(true)}>
+            <Icon name="settings" size={15} />
+          </IconButton>
           <IconButton
             label="切换主题"
             onClick={() => setTweak("theme", t.theme === "dark" ? "light" : "dark")}
@@ -521,6 +538,22 @@ export default function App({ chat = streamDesignerChat, login, logout } = {}) {
         onClose={() => setLoginOpen(false)}
         onLoggedIn={() => setLoggedIn(true)}
         onLoggedOut={() => setLoggedIn(false)}
+      />
+
+      {/* Integration settings (§12/§14). A 401 from any config call means the owner
+          session is missing/expired — close settings and pop login (mirrors the
+          /api/chat 401 flow above) so the fix is one step away. */}
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onNeedLogin={() => {
+          setSettingsOpen(false);
+          setLoggedIn(false);
+          setLoginOpen(true);
+        }}
+        getConfig={getConfig}
+        saveConfig={saveConfig}
+        testConnections={testConnections}
       />
 
       <Dialog

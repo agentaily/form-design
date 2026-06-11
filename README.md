@@ -98,5 +98,9 @@ form tools in `designerTools` (`set_form_meta`, `add_field`, …), which mutate 
 live form model that `preview.jsx` renders; failed tool calls backfill as errors so
 the model self-heals. Tests inject a fake `chat` into `<App chat={…} />` for
 deterministic builds. `/api/chat` is owner-only — the owner-login/Bearer flow is
-wired (`core/auth` + `src/auth.jsx`; a 401 auto-opens the login dialog), while the
-config/publish/submit endpoints land in later phases (see `ROADMAP.md`).
+wired (`core/auth` + `src/auth.jsx`; a 401 auto-opens the login dialog). The owner
+also connects DeepSeek + 飞书 through the integration-settings dialog (`src/settings.jsx`
+
+- `core/configClient`, SPEC §12/§14): open → `GET /api/config` echoes the masked
+  config, save → `POST /api/config`, test → `POST /api/config/test`; a 401 routes back
+  into the login flow. The publish/submit endpoints land in later phases (see `ROADMAP.md`).
