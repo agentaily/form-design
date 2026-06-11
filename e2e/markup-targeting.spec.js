@@ -1,19 +1,24 @@
 import { test, expect } from "@playwright/test";
+import { mockChat } from "./chatMock.js";
 
 // End-to-end of the preview "指向修改 / element targeting" flow in a real browser,
 // where real layout + elementFromPoint hit-testing actually work (unlike jsdom).
-// Build a form → enter targeting mode → hover a field (highlight + identity tag) →
-// click → type → send → the tagged user message lands in the LEFT chat →
-// targeting mode auto-exits.
+// Build a form (via the mocked /api/chat agent) → enter targeting mode → hover a
+// field (highlight + identity tag) → click → type → send → the tagged user message
+// lands in the LEFT chat → targeting mode auto-exits.
 test.describe("Agentaily Forms · 指向修改", () => {
   test.beforeEach(async ({ page }) => {
+    await mockChat(page);
     await page.goto("/");
   });
 
   test("点击预览元素，描述修改并发送，带身份的消息进入左侧对话且退出模式", async ({ page }) => {
-    // build the seeded form (hero + 9 fields + submit)
+    // build the seeded form (hero + 9 fields + submit). Scope the hero to
+    // .pv-hero__title — the set_form_meta tool-call card also echoes the title.
     await page.getByText("做一个线下活动报名表").click();
-    await expect(page.getByText(/Agentaily 开发者沙龙/)).toBeVisible({ timeout: 40_000 });
+    await expect(page.locator(".pv-hero__title")).toHaveText("Agentaily 开发者沙龙 · 上海站", {
+      timeout: 40_000,
+    });
     await expect(page.locator(".pv-fields > div")).toHaveCount(9, { timeout: 40_000 });
     // The build streams a trailing assistant message after the 9th field, and
     // setBuilding(false) only fires once that finishes. Until then App.onSend drops
