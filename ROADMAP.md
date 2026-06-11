@@ -53,7 +53,7 @@
 ### 前端接入后端（`src/`，分阶段）
 
 - ✅ API client 层 + 对话接 `POST /api/chat`（真模型流式替换写死脚本）—— 已完成
-- 登录接 `POST /api/auth/login`：存 session token，owner-only 请求带 Bearer（解锁 `/api/chat`）
+- ✅ 登录接 `POST /api/auth/login`：`core/auth` 存 session token、owner-only 请求带 Bearer；登录 / 账户弹窗（DS），`401` 自动引导登录 —— **已完成（解锁 `/api/chat`）**
 - 集成设置 modal 接 `GET/POST /api/config` + `POST /api/config/test`
 - 发布 + 表单管理：`POST /api/forms` 发布；列表 / 改状态 / 删 用 `GET/PATCH/DELETE /api/forms`
 - 公开填写页 + 数据后台：`GET /api/forms/:slug` 渲染 + `POST /api/submit` 提交；`GET /api/forms/:slug/submissions` 看提交

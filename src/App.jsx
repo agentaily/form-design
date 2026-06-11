@@ -16,11 +16,13 @@ import {
 import { Icon, ChatThread, ChatComposer } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
 import { MarkupLayer } from "./markup.jsx";
+import { LoginDialog } from "./auth.jsx";
 import { MessageQueue } from "./core/queue";
 import { createFormModel, applyDesignerTool, uid, DESIGNER_SYSTEM } from "./core/designerTools";
 import { runDesignerTurn } from "./core/designerLoop";
 import { streamDesignerChat } from "./core/designerChat";
 import { ApiError } from "./core/apiClient";
+import { isLoggedIn as authIsLoggedIn } from "./core/auth";
 
 // Fixed follow-up prompt chips shown once a form exists (a product affordance,
 // not model output) — keeps "继续改" discoverable. Each routes through the agent.
@@ -87,7 +89,7 @@ function schemaFor(meta, fields) {
   return out;
 }
 
-export default function App({ chat = streamDesignerChat } = {}) {
+export default function App({ chat = streamDesignerChat, login, logout } = {}) {
   const [t, setTweak] = useUiState(UI_DEFAULTS);
   const [messages, setMessages] = useState([]);
   const [meta, setMeta] = useState(null);
@@ -100,6 +102,9 @@ export default function App({ chat = streamDesignerChat } = {}) {
   const [markupOn, setMarkupOn] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [published, setPublished] = useState(false);
+  // owner session (SPEC §17): logged-in unlocks the owner-only /api/chat proxy.
+  const [loggedIn, setLoggedIn] = useState(() => authIsLoggedIn());
+  const [loginOpen, setLoginOpen] = useState(false);
   // single-column mobile layout (≤720px): one pane at a time via the sub-bar.
   const isMobile = useMediaQuery("(max-width: 720px)");
   const [mobileView, setMobileView] = useState("chat");
@@ -151,7 +156,7 @@ export default function App({ chat = streamDesignerChat } = {}) {
   // Turn a backend/network failure into a human message for the thread.
   const errorMessage = (e) => {
     if (e instanceof ApiError) {
-      if (e.status === 401) return "请先在「集成设置」登录后再使用对话设计。";
+      if (e.status === 401) return "请先登录 owner 后再使用对话设计。";
       return e.message || `对话服务出错（${e.status}）。`;
     }
     return "无法连接到对话服务，请检查网络或后端地址（VITE_API_BASE）。";
@@ -217,6 +222,12 @@ export default function App({ chat = streamDesignerChat } = {}) {
       });
     } catch (e) {
       pushMsg({ role: "assistant", kind: "error", text: errorMessage(e) });
+      // 401 means no/expired owner session — pop the login dialog so the fix is
+      // one step away (§17). After logging in, the author re-sends the message.
+      if (e instanceof ApiError && e.status === 401) {
+        setLoggedIn(false);
+        setLoginOpen(true);
+      }
     }
     syncModel();
   };
@@ -311,6 +322,13 @@ export default function App({ chat = streamDesignerChat } = {}) {
           </Badge>
         </div>
         <div className="d-top__actions">
+          <IconButton
+            label={loggedIn ? "账户已登录" : "登录账户"}
+            variant={loggedIn ? "solid" : "ghost"}
+            onClick={() => setLoginOpen(true)}
+          >
+            <Icon name={loggedIn ? "user" : "lock"} size={15} />
+          </IconButton>
           <IconButton
             label="切换主题"
             onClick={() => setTweak("theme", t.theme === "dark" ? "light" : "dark")}
@@ -494,6 +512,16 @@ export default function App({ chat = streamDesignerChat } = {}) {
           ) : null}
         </section>
       </div>
+
+      <LoginDialog
+        open={loginOpen}
+        loggedIn={loggedIn}
+        login={login}
+        logout={logout}
+        onClose={() => setLoginOpen(false)}
+        onLoggedIn={() => setLoggedIn(true)}
+        onLoggedOut={() => setLoggedIn(false)}
+      />
 
       <Dialog
         open={shareOpen}
