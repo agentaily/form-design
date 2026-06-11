@@ -59,6 +59,19 @@ export async function resetConfig(): Promise<void> {
   await testEnv.DB.exec("DELETE FROM owner_config");
 }
 
+/**
+ * Empty the `forms` table between scenarios (symmetric to {@link resetConfig}).
+ * The form-publish outer-loop counts rows / re-publishes per scenario, so each
+ * one must start from a clean `forms` table.
+ *
+ * `applySchema` already builds this table: it runs every statement in
+ * schema.sql?raw, which now includes the `CREATE TABLE IF NOT EXISTS forms`
+ * block — so no change to `applySchema` is needed, only this reset.
+ */
+export async function resetForms(): Promise<void> {
+  await testEnv.DB.exec("DELETE FROM forms");
+}
+
 // --- Upstream (DeepSeek) fetch mock ----------------------------------------
 //
 // vitest-pool-workers 0.16.14 no longer exports `fetchMock` from `cloudflare:test`

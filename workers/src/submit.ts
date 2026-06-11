@@ -36,9 +36,16 @@ export interface SubmitAnswer {
 
 /**
  * Request body for `POST /api/submit`: one answerer's full set of field answers.
- * `answers` must be a non-empty array. See SPEC.md §15.2.
+ * `answers` must be a non-empty array. See SPEC.md §15.2、§16.5.
+ *
+ * `formSlug` 关联到一份已发布的表单（§16）：本期 route 先用它校验 form 是否存在
+ * （不存在 → 404、不打飞书上游），存在则继续走 §15 的飞书写入。`formSlug` 暂不参与
+ * answers ↔ fields 的字段级校验（从简，§16.5），但为将来多 owner「按 form 定位
+ * owner」预留了入口。
  */
 export interface SubmitRequest {
+  /** 关联的已发布表单 slug（§16.5）。必填、非空。 */
+  formSlug: string;
   answers: SubmitAnswer[];
 }
 
@@ -106,18 +113,27 @@ export class BitableWriteError extends Error {
 /**
  * Validate + normalize a parsed JSON body into a {@link SubmitRequest}.
  *
+ * - `formSlug` must be a non-empty string; otherwise reject (the route maps the
+ *   rejection to `400 { error: "formSlug is required" }`, nothing forwarded).
+ *   Existence of the form is NOT checked here — that是 route 在拿到合法形状后用
+ *   `formExists` 做的（不存在 → 404，§16.5）；本函数只做形状级校验。
  * - `answers` must be a non-empty array; otherwise reject (the route maps the
  *   rejection to `400 { error: "answers is required" }`, nothing forwarded).
  * - Each answer must have a non-empty string `label` and a `value` that is a
  *   string or a string[]; otherwise reject (`400`, nothing forwarded).
- * - Does NOT validate answers against any schema (required-field / label-exists
- *   checks are out of this slice — only shape-level validation). See SPEC.md §15.2.
+ * - Does NOT validate answers against the form's schema (required-field /
+ *   label-exists / 字段级一致性 checks are out of this slice — only shape-level
+ *   validation). See SPEC.md §15.2、§16.5.
  *
  * @throws if the body fails shape validation.
  */
 export function parseSubmitRequest(body: unknown): SubmitRequest {
   if (typeof body !== "object" || body === null) {
     throw new Error("answers is required");
+  }
+  const formSlug = (body as { formSlug?: unknown }).formSlug;
+  if (typeof formSlug !== "string" || formSlug.length === 0) {
+    throw new Error("formSlug is required");
   }
   const answers = (body as { answers?: unknown }).answers;
   if (!Array.isArray(answers) || answers.length === 0) {
@@ -137,7 +153,7 @@ export function parseSubmitRequest(body: unknown): SubmitRequest {
       throw new Error("answer.value must be a string or string[]");
     }
   }
-  return { answers: answers as SubmitAnswer[] };
+  return { formSlug, answers: answers as SubmitAnswer[] };
 }
 
 /**

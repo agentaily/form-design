@@ -820,3 +820,142 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 - **`tenant_access_token` 只进写记录请求的 Authorization 头**：换到后唯一去向是 `POST .../records` 的 `Authorization: Bearer`，绝不写进成功响应（`recordId` 之外）、错误体、HTTP 头回显、日志。
 - **即便上游回错也不拼凭据**：换 token / 写记录的 `code≠0` 或非 2xx 转成 `{ error }` 时，只保留「上游拒绝 / 出错」语义（可带飞书 `code` 或 HTTP 状态这类非敏感摘要供排障），绝不把 `app_secret` / `tenant_access_token` 或其片段拼进 `error`。
 - **沿用 §12 的加密边界：** secret 的解密只发生在 Worker 内（`CONFIG_KEY` + `getOwnerConfig`）；D1 里仍是密文，浏览器侧自始至终拿不到明文。
+
+---
+
+## 16. 后端 · 表单发布 + 公开填写拉取（打通设计 → 发布 → 公开填写闭环）
+
+> **与第 12/15 节的关系：** §12 持有 owner 凭据、§15 把一份作答写进 owner 的飞书多维表格。但 §15 之前缺一环：答题者填的那份表单**从哪来**。本节补上：owner 把设计好的表单定义（`meta` + `fields`）**发布**，后端生成一个公开 `slug` 存进 D1；答题者用 `slug` **无鉴权**拉取该表单的 `meta` + `fields` 渲染填写页；提交时带上 `formSlug` 关联回这份表单。至此 **设计 → 发布 → 公开填写 → 写飞书** 闭环在后端打通。
+>
+> **本节范围（仅 Worker 端）：** `POST /api/forms`（发布）、`GET /api/forms/:slug`（公开拉取）、以及 §15 `POST /api/submit` 增加 `formSlug` 的关联约定。
+>
+> **不在本节：** owner 鉴权 / 多租户、owner 的表单列表 / 编辑 / 删除、数据后台 / 统计、防刷 / 限流、`answers` 与 `fields` 的字段级一致性校验（本节从简，见 §16.5）、发布态前端渲染器。鉴权 / 多租户仍按 §12 的 MVP 单 owner 假设（固定 `owner_id`）。
+
+### 16.1 端点职责
+
+| 端点 | 谁调 | 鉴权 | 职责 |
+|---|---|---|---|
+| `POST /api/forms` | owner（设计器） | MVP 无（单 owner） | 提交表单定义 → 生成公开 `slug` → 存 D1 `forms` 表 → 返回 `{ slug }` |
+| `GET /api/forms/:slug` | 答题者（公开填写页） | **无鉴权（公开）** | 按 `slug` 返回该表单的 `meta` + `fields` 用于渲染；**绝不返回任何 owner 凭据 / 配置** |
+| `POST /api/submit` | 答题者 | 无 | （§15 基础上）body 增加 `formSlug`：先校验 form 存在再写飞书（见 §16.5） |
+
+> **公开拉取是闭环里唯一对陌生人开放、无凭据的读端点**，因此它的「不泄漏」保证是本节的安全核心（§16.4）。
+
+### 16.2 API 契约
+
+#### `POST /api/forms` — 发布表单
+
+请求体（`PublishFormInput`，JSON）：
+
+```jsonc
+{
+  "meta": {
+    "title": "活动报名表",          // 必填，非空
+    "description": "请填写你的报名信息" // 可选
+  },
+  "fields": [                       // 必填数组（可为空，见 §16.5）；对齐 §3.2 Field[]
+    { "id": "f_name", "type": "text", "label": "姓名", "required": true },
+    { "id": "f_hobby", "type": "checkbox", "label": "兴趣",
+      "options": [ { "label": "阅读", "value": "read" }, { "label": "运动", "value": "sport" } ] }
+  ]
+}
+```
+
+- 成功：`201`，`{ "slug": "f8Kq2pXa" }`（实现可附 `url` 字段给出可直接访问的公开填写页地址）。
+- 缺 `meta.title`（空 / 缺失）、或 `fields` 非数组、或某 field 缺 `id`/`type`/`label` / `type` 非法 → `400 { error }`，**不落库**（§16.5）。
+- owner_id **不在请求体里**：MVP 由后端恒填 `'default'`（§16.3）。
+
+#### `GET /api/forms/:slug` — 公开拉取（无鉴权）
+
+响应体（`PublicForm`，JSON）：
+
+```jsonc
+{
+  "slug": "f8Kq2pXa",
+  "meta": { "title": "活动报名表", "description": "请填写你的报名信息" },
+  "fields": [
+    { "id": "f_name", "type": "text", "label": "姓名", "required": true },
+    { "id": "f_hobby", "type": "checkbox", "label": "兴趣",
+      "options": [ { "label": "阅读", "value": "read" }, { "label": "运动", "value": "sport" } ] }
+  ]
+}
+```
+
+- 命中：`200`，**只**含 `slug` + `meta` + `fields`（发布时存的原样回，§16.4）。
+- `slug` 不存在：`404 { error }`（「没这张表」是正常态，不是 5xx）。
+- **响应里绝不含**：`owner_id`、`status`、`created_at`，以及**任何** owner 凭据（DeepSeek key / 飞书 app_secret / app_token / table_id）——后者根本不在 `forms` 表里，且 `PublicForm` 类型里没有承载它们的字段（§16.4）。
+
+### 16.3 `slug` 生成与唯一性约定
+
+- **公开标识 + 主键：** `slug` 既是公开访问标识，也是 `forms` 表主键。
+- **不可枚举 / 不可猜：** 用足够熵的随机串（如 crypto 随机字节编码成 URL 安全的 base32/base36），**不**用自增序号——否则答题者能枚举出别人的表单。
+- **唯一性：** 靠随机串的高熵 + `slug` 作主键的插入约束保证；插入冲突时的重试策略由 implementer 在合约内决定（重新生成再插）。
+- **单 owner：** MVP `forms.owner_id` 恒为 `'default'`；slug 全局唯一即可，无需 owner 维度去重。后续接鉴权时把 `owner_id` 换成真实租户键，slug 仍全局唯一。
+
+### 16.4 公开拉取不泄漏凭据的保证
+
+这是本节的安全核心——公开拉取对陌生人开放、无鉴权，必须从结构上杜绝凭据外泄：
+
+- **表分离：** 凭据全在 `owner_config`（§12，加密落库），表单定义在 `forms`（只有 `meta_json` / `schema_json` 等展示数据）。公开拉取的查询**只读 `forms`**，根本不碰 `owner_config`。
+- **类型级边界：** 公开拉取返回 `PublicForm`，其类型**只有** `slug` + `meta` + `fields` 三个字段，没有承载任何凭据（也没有 `owner_id` / `status` / `created_at`）的位置。即便将来 `forms` 行挂上更多 owner 私有信息，公开拉取也只能投影出这三样——「不泄漏」不是运行期过滤的产物，而是类型 + 查询路径的双重保证。
+- **不可反推：** `slug` 不暴露 owner 身份（随机串），`meta` / `fields` 是 owner 主动要公开给答题者看的内容，本就该公开。
+
+### 16.5 submit 关联约定与从简校验
+
+§15 的 `POST /api/submit` 在本节**增加 `formSlug`** 字段，把作答关联回一份已发布表单：
+
+请求体（`SubmitRequest`，在 §15.2 基础上）：
+
+```jsonc
+{
+  "formSlug": "f8Kq2pXa",          // 必填，非空；关联的已发布表单
+  "answers": [
+    { "label": "姓名", "value": "张三" },
+    { "label": "兴趣", "value": ["阅读", "运动"] }
+  ]
+}
+```
+
+Worker 内部流程（在 §15.1 的步骤前插入校验）：
+
+```
+0) parseSubmitRequest(body)        ← 形状校验：formSlug 非空 + answers 非空数组（否则 400，不打上游）
+0.5) formExists(db, formSlug)      ← 查 forms 表：不存在 → 404 { error }，不打任何飞书上游
+1)..8) 同 §15.1（换 token → 映射 fields → 写记录 → 200 { ok, recordId }）
+```
+
+- **`formSlug` 缺失 / 空：** `400 { "error": "formSlug is required" }`，不打上游（与 §15.2 的形状级校验同级）。
+- **`formSlug` 对应 form 不存在：** `404 { error }`，**不换 token、不写记录**（提前拒绝，避免把陌生 slug 的作答写进 owner 的表）。
+- **字段级一致性从简：** 本期**不**校验 `answers` 的 `label` 是否对得上该 form 的 `fields`、是否漏填必填项、value 是否满足 `validation`——只校验「form 存在」。`answers` 仍按 §15.3 原样映射成飞书 `fields`。字段级一致性校验留后续 feature。
+- **多 owner 预留：** MVP 飞书凭据仍取自单 owner 的 `getOwnerConfig`；`formSlug` 此期主要用于「校验 form 存在」，并为将来「按 form 的 `owner_id` 定位该写哪个 owner 的飞书表」预留接口（届时用 `forms.owner_id` 去查对应 owner 的配置）。
+
+### 16.6 错误响应（状态码 + `{ error }`）
+
+| 端点 | 情况 | 状态码 | 响应体 |
+|---|---|---|---|
+| `POST /api/forms` | 请求体非合法 JSON | `400` | `{ "error": "invalid JSON body" }` |
+| `POST /api/forms` | 缺 `meta.title` / `fields` 非数组 / field 形状非法 | `400` | `{ "error": "..." }`（不落库） |
+| `GET /api/forms/:slug` | slug 不存在 | `404` | `{ "error": "..." }` |
+| `POST /api/submit` | 缺 `formSlug` / 为空 | `400` | `{ "error": "formSlug is required" }`（不打上游） |
+| `POST /api/submit` | `formSlug` 对应 form 不存在 | `404` | `{ "error": "..." }`（不打飞书上游） |
+
+- 错误体一律 `application/json` 的 `{ error }`，与成功体（`201 { slug }` / `200 PublicForm` / §15 的 `200 { ok, recordId }`）区分。
+
+### 16.7 D1 表结构（`workers/schema.sql`）
+
+单 owner 设计：与 `owner_config` 同约定，`owner_id` 恒为 `'default'`。
+
+```sql
+CREATE TABLE IF NOT EXISTS forms (
+  slug          TEXT PRIMARY KEY,   -- 公开 slug：对外标识 + 主键。不可枚举 / 不可猜（§16.3）
+  owner_id      TEXT NOT NULL,      -- MVP 恒为 'default'（单 owner）
+  meta_json     TEXT NOT NULL,      -- 序列化的 FormMeta（title / description），展示用
+  schema_json   TEXT NOT NULL,      -- 序列化的 Field[]（数据真相），公开拉取原样回
+  status        TEXT NOT NULL,      -- 'published' | 'draft' | 'closed'；MVP 发布即 'published'
+  created_at    TEXT NOT NULL       -- ISO-8601，发布时刻
+);
+```
+
+- 表只存表单的展示 `meta` 与字段定义，**绝不**存任何凭据（凭据全在 `owner_config`，§16.4）。
+- 公开拉取只投影 `meta_json` + `schema_json` + `slug`；`owner_id` / `status` / `created_at` 不回给答题者。
+- 单 owner 约束靠 `owner_id` 恒 `'default'`；后续接鉴权时换成真实租户键即可平滑扩成多行，公开拉取的投影不变。

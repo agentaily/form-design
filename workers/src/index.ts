@@ -25,6 +25,14 @@ import {
   FeishuNotConfiguredError,
   type SubmitRequest,
 } from "./submit";
+import {
+  parsePublishInput,
+  saveForm,
+  getPublicForm,
+  formExists,
+  FormValidationError,
+  type PublishFormInput,
+} from "./forms";
 
 /** Worker bindings (see wrangler.toml + vitest.config.ts). */
 interface Env {
@@ -191,6 +199,14 @@ app.post("/api/submit", async (c) => {
     return c.json({ error }, 400);
   }
 
+  // 1.5) Associate the submission to a published form (§16.5): the form must
+  //      exist BEFORE we read owner config or touch any Feishu upstream. An
+  //      unknown slug → 404, nothing forwarded (no token exchange, no record
+  //      write) — never write a stranger's slug into the owner's table.
+  if (!(await formExists(c.env.DB, request.formSlug))) {
+    return c.json({ error: "form not found" }, 404);
+  }
+
   // 2) Read + decrypt the owner config (plaintext, in-Worker view only).
   const key = await importConfigKey(c.env.CONFIG_KEY);
   const owner = await getOwnerConfig(c.env.DB, key);
@@ -237,6 +253,41 @@ app.post("/api/submit", async (c) => {
 
   // 6) Success → only ok + recordId; never the written fields, token, or creds.
   return c.json({ ok: true, recordId }, 200);
+});
+
+// POST /api/forms — 发布表单：校验形状 → 生成 slug + 存 D1 → 201 { slug }。
+// 形状非法（缺 meta.title / fields 非数组 / field 形状非法）→ 400，不落库（§16.2、§16.5）。
+app.post("/api/forms", async (c) => {
+  // 1) Parse + shape-validate the publish body. Non-JSON → 400, nothing written.
+  let input: PublishFormInput;
+  try {
+    const raw = await c.req.json();
+    input = parsePublishInput(raw);
+  } catch (err) {
+    // FormValidationError → the spec's shape-error message; a JSON parse failure
+    // (SyntaxError) → "invalid JSON body". Either way nothing is persisted.
+    if (err instanceof FormValidationError) {
+      return c.json({ error: err.message }, 400);
+    }
+    const error = err instanceof SyntaxError ? "invalid JSON body" : "invalid request";
+    return c.json({ error }, 400);
+  }
+
+  // 2) Persist one forms row (owner_id 恒 'default', status 'published') → { slug }.
+  const { slug } = await saveForm(c.env.DB, input);
+  return c.json({ slug }, 201);
+});
+
+// GET /api/forms/:slug — 公开拉取（无鉴权）：命中 → 200 PublicForm（只含 slug + meta
+// + fields）；未命中 → 404 { error }。响应绝不含 owner_id / status / created_at 或任何
+// owner 凭据（凭据根本不在 forms 表里，PublicForm 类型也没有承载它们的字段，§16.4）。
+app.get("/api/forms/:slug", async (c) => {
+  const slug = c.req.param("slug");
+  const form = await getPublicForm(c.env.DB, slug);
+  if (form === null) {
+    return c.json({ error: "form not found" }, 404);
+  }
+  return c.json(form, 200);
 });
 
 export default app;
