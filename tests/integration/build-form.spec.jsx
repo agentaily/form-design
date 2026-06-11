@@ -91,8 +91,14 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   });
 
   Scenario("搭好后发布表单", ({ Given, When, Then, And }) => {
+    // Real publish (§16): clicking 发布 opens <PublishFeedback>, which calls the
+    // injected publishForm(meta, fields) → { slug } and renders the public fill link
+    // /f/:slug for that slug. We inject publishForm + publicFormUrl as the App-level
+    // seam (same pattern as chat/login) so the flow is deterministic without a backend.
+    const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
+    const publicFormUrl = vi.fn((slug) => `/f/${slug}`);
     Given("设计器处于空状态", () => {
-      render(<App chat={makeFakeChat()} />);
+      render(<App chat={makeFakeChat()} publishForm={publishForm} publicFormUrl={publicFormUrl} />);
       expect(screen.getByText("描述你想要的表单")).toBeInTheDocument();
     });
     When("作者选择「做一个线下活动报名表」起步提示", async () => {
@@ -104,11 +110,13 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await waitFor(() => expect(publish).toBeEnabled());
       fireEvent.click(publish);
     });
-    Then("表单状态变为 LIVE", () => {
-      expect(screen.getByText("LIVE")).toBeInTheDocument();
+    Then("调用发布接口把当前表单发布出去", async () => {
+      await waitFor(() => expect(publishForm).toHaveBeenCalled());
     });
-    And("弹出带公开链接的分享弹窗", () => {
-      expect(screen.getByText("forms.agentaily.dev/agentaily-salon-sh")).toBeInTheDocument();
+    And("展示该表单的公开填写链接", async () => {
+      // The real publish surface renders the /f/:slug public fill link for the
+      // returned slug — not the old static forms.agentaily.dev placeholder.
+      await screen.findByText("/f/f8Kq2pXa", { exact: false });
     });
   });
 });
