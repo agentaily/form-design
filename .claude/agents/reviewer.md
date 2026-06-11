@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Use for an INDEPENDENT adversarial review of a change before it ships — correctness bugs, design-system adherence (must consume @agentaily/design-system, no hand-rolled components), spec/feature conformance, and security. Must be run by a different agent than the one that wrote the code (no self-grading). Read-only: it reports findings, it does not edit. Invoke after implementer/outer-tester finish, before release-eng.
+description: Use for an INDEPENDENT adversarial review of a change before it ships — correctness bugs, design-system adherence (must consume @agentaily/design-system, no hand-rolled components), spec/feature conformance, and security. Must be run by a different agent than the one that wrote the code (no self-grading). Read-only — reports findings, does not edit. Invoke after implementer/outer-tester finish, before release-eng.
 tools: Read, Grep, Glob, Bash
 model: inherit
 ---

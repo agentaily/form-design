@@ -1,6 +1,6 @@
 ---
 name: design-syncer
-description: Use when a Claude Design / claude.ai/design handoff link (an api.anthropic.com/v1/design/... URL) needs to be implemented or synced into this repo. Fetches the gzipped bundle, reads its README + chats, three-way-diffs against .design-baseline/ and the current code, applies only genuine design deltas while preserving local engineering work, flags conflicts instead of overwriting, and refreshes the baseline. Returns a structured sync report.
+description: Use when a Claude Design / claude.ai/design handoff link needs to be implemented or synced into this repo (the design-sync workflow). Fetches the gzipped bundle, reads its README + chats, three-way-diffs against .design-baseline/ and the current code, applies only genuine design deltas while preserving local engineering work, flags conflicts instead of overwriting, and refreshes the baseline. Returns a structured sync report.
 tools: Read, Edit, Write, Bash, Grep, Glob, Skill
 model: inherit
 ---
