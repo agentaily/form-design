@@ -6,6 +6,7 @@ import { Badge, IconButton, Button, Tabs, Dialog, SchemaDisplay } from "@agentai
 import { buildScript, intentReply, uid, INITIAL_META } from "./flow.jsx";
 import { Icon, ChatThread, ChatComposer } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
+import { MarkupLayer } from "./markup.jsx";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -63,6 +64,7 @@ export default function App() {
   const [building, setBuilding] = useState(false);
   const [tab, setTab] = useState("preview");
   const [device, setDevice] = useState("full");
+  const [markupOn, setMarkupOn] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [published, setPublished] = useState(false);
   const draggingRef = useRef(false);
@@ -234,7 +236,13 @@ export default function App() {
     <div className="d-app">
       <header className="d-top">
         <div className="d-top__brand">
-          <span className="d-top__mark">◆</span>
+          <span className="d-top__mark" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 32 32" fill="none">
+              <path d="M2 10 V2 H10" stroke="currentColor" strokeWidth="2" />
+              <path d="M22 30 H30 V22" stroke="currentColor" strokeWidth="2" />
+              <rect x="12" y="9" width="8" height="14" fill="currentColor" />
+            </svg>
+          </span>
           <span className="d-top__word">agentaily</span>
           <span className="d-top__div">/</span>
           <span className="d-top__crumb">forms</span>
@@ -322,6 +330,16 @@ export default function App() {
             {tab === "preview" ? (
               <div className="d-seg">
                 <IconButton
+                  label="指向修改"
+                  size="sm"
+                  variant={markupOn ? "solid" : "outline"}
+                  disabled={building || fieldCount === 0}
+                  onClick={() => setMarkupOn((on) => !on)}
+                >
+                  <Icon name="markup" size={13} />
+                </IconButton>
+                <span className="d-seg__sep" />
+                <IconButton
                   label="桌面宽度"
                   size="sm"
                   variant={device === "full" ? "solid" : "outline"}
@@ -341,7 +359,7 @@ export default function App() {
             ) : null}
           </div>
 
-          <div className="d-pvbody ax-dotgrid">
+          <div className={"d-pvbody ax-dotgrid" + (markupOn ? " is-markup" : "")}>
             {tab === "preview" ? (
               <div className={"d-pvscroll" + (device === "phone" ? " is-phone" : "")}>
                 <FormPreview
@@ -359,6 +377,16 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {tab === "preview" && markupOn ? (
+            <MarkupLayer
+              onClose={() => setMarkupOn(false)}
+              onSend={(txt) => {
+                setMarkupOn(false);
+                onSend(txt);
+              }}
+            />
+          ) : null}
         </section>
       </div>
 

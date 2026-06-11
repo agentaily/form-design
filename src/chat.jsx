@@ -52,6 +52,21 @@ const ICON_PATHS = {
       <path d="M14 14h3v3M21 14v.01M14 21h.01M21 17v4" />
     </g>
   ),
+  x: <path d="M18 6 6 18M6 6l12 12" />,
+  arrow: <path d="M5 12h14M12 5l7 7-7 7" />,
+  markup: (
+    <g>
+      <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z" />
+    </g>
+  ),
+  target: (
+    <g>
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="3.5" />
+      <path d="M12 1v3M12 20v3M1 12h3M20 12h3" />
+    </g>
+  ),
 };
 
 export function Icon({ name, size = 16, ...rest }) {

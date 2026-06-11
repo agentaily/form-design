@@ -10,6 +10,7 @@ import {
   Checkbox,
   Button,
 } from "@agentaily/design-system";
+import { fieldKindLabel, mkLabel } from "./core/markup";
 
 function FieldView({ field, value, onChange, error }) {
   const { type, label, placeholder, required, options, _new } = field;
@@ -91,7 +92,15 @@ function FieldView({ field, value, onChange, error }) {
     );
   }
 
-  return <div className={cls}>{control}</div>;
+  return (
+    <div
+      className={"pv-fieldwrap" + (cls ? " " + cls : "")}
+      data-mk-label={mkLabel(label)}
+      data-mk-kind={fieldKindLabel(type)}
+    >
+      {control}
+    </div>
+  );
 }
 
 export function FormPreview({ meta, fields, values, setValue, style, building }) {
@@ -145,7 +154,7 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
   return (
     <div className={"pv-card pv-card--" + style}>
       {meta ? (
-        <header className="pv-hero pv-in">
+        <header className="pv-hero pv-in" data-mk-label="表单标题与介绍" data-mk-kind="标题">
           <div className="pv-hero__kicker ax-label">{meta.kicker}</div>
           <h2 className="pv-hero__title">{meta.title}</h2>
           <p className="pv-hero__desc">{meta.desc}</p>
@@ -194,7 +203,7 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
       </div>
 
       {fields.length > 0 ? (
-        <div className="pv-footer">
+        <div className="pv-footer" data-mk-label="提交按钮" data-mk-kind="按钮">
           <Button variant="primary" size="lg" full disabled={building} onClick={submit}>
             提交报名
           </Button>
