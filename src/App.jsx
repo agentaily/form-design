@@ -15,8 +15,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const UI_DEFAULTS = {
   theme: "dark",
   split: 46,
-  density: "comfortable",
-  formStyle: "card",
+  density: "compact",
+  formStyle: "minimal",
 };
 
 function useUiState(defaults) {
