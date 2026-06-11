@@ -1,0 +1,37 @@
+name: Deploy to Cloudflare Pages
+
+on:
+  workflow_dispatch:
+  # TODO: enable auto-deploy on main once the CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
+  # secrets are set and the first manual run succeeds:
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+# One concurrent deploy; newer runs cancel in-flight ones.
+concurrency:
+  group: cloudflare-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Cloudflare Pages serves from the root domain, so build with base "/".
+      - run: npm run build
+        env:
+          DEPLOY_BASE: "/"
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=form-design --branch=main
