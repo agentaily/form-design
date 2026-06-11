@@ -192,6 +192,9 @@ body {
 .d-foot__queue {
   margin-bottom: 10px;
 }
+.d-foot__suggest {
+  margin-bottom: 10px;
+}
 .d-foot__note {
   text-align: center;
   font-family: var(--font-mono);

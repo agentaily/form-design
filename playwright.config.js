@@ -1,7 +1,12 @@
 import { defineConfig, devices } from "@playwright/test";
 
 // E2E against the real dev server in a real browser. Playwright auto-starts
-// `npm run dev` (reusing an already-running one) before the suite.
+// `npm run dev` before the suite. The port is overridable via PW_PORT so a run
+// can avoid clashing with a dev server already on 5173 (e.g. a sibling worktree);
+// in CI we never reuse a foreign server, so the suite always hits this checkout.
+const PORT = process.env.PW_PORT ? Number(process.env.PW_PORT) : 5173;
+const BASE_URL = `http://localhost:${PORT}`;
+
 export default defineConfig({
   testDir: "./e2e",
   timeout: 90_000,
@@ -10,11 +15,10 @@ export default defineConfig({
   retries: 0,
   reporter: "list",
   use: {
-    baseURL: "http://localhost:5173",
+    baseURL: BASE_URL,
     trace: "on-first-retry",
-    // The scripted build runs on chained setTimeout; Chromium throttles timers in
-    // backgrounded/occluded renderers, which stalls the build under headless e2e and
-    // makes 发布/指向修改 take far longer than ~12s to enable. Disable that throttling.
+    // The designer settles via promises + a short timer; Chromium throttles timers
+    // in backgrounded/occluded renderers under headless e2e. Disable that throttling.
     launchOptions: {
       args: [
         "--disable-background-timer-throttling",
@@ -35,9 +39,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run dev",
-    url: "http://localhost:5173",
-    reuseExistingServer: true,
+    command: `npm run dev -- --port ${PORT} --strictPort`,
+    url: BASE_URL,
+    reuseExistingServer: !process.env.CI,
     timeout: 60_000,
   },
 });

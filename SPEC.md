@@ -584,7 +584,9 @@ CREATE TABLE IF NOT EXISTS owner_config (
 >
 > **本节范围（第一刀，仅 Worker 端）：** `POST /api/chat` 的请求形状、SSE 流式响应、用 owner key 直连、model 默认、未配置/上游错误的状态码与体、安全约束。
 >
-> **不在本节：** 前端 `flow.jsx` 接入真代理（替换浏览器直连）是单独一期；多轮 Agent loop / 工具执行编排仍在客户端（§4），本代理只负责「一次 LLM 调用的转发」。鉴权 / 多租户仍按 §12 的 MVP 单 owner 假设（固定 `owner_id`）。
+> **不在本节：** 多轮 Agent loop / 工具执行编排仍在客户端（§4），本代理只负责「一次 LLM 调用的转发」。鉴权 / 多租户仍按 §12 的 MVP 单 owner 假设（固定 `owner_id`）。
+>
+> **前端接入（已完成）：** 前端已接入本代理替换写死脚本——`src/core/designerChat` 用 `POST /api/chat` 流式拉 DeepSeek（OpenAI 协议透传），`src/core/designerLoop` 在客户端跑单回合 ReAct（§4）并就地执行 `src/core/designerTools` 里的 UI 字段模型工具，结果实时渲染到预览。对话引擎对测试可注入（`<App chat={…} />`）。
 
 ### 13.1 端点职责
 
