@@ -458,3 +458,118 @@ fetch('https://api.anthropic.com/v1/messages', {
 | Agent | LLM 原生 tool use | 不自己解析模型文本，结构化更可靠 |
 | 通信 | postMessage | iframe 隔离下的标准做法 |
 | 后端 | 无（BYOK 直连）+ 收集用托管 BaaS | 不自建/运维服务器；BaaS 承担答题数据持久化 |
+
+---
+
+## 12. 后端 · owner 集成配置存取（发布型 BYOK）
+
+> **与第 0/8 节的关系：** 第 8 节描述的是「纯设计器」形态——设计态浏览器直连 LLM、答题数据写托管 BaaS。本节面向**发布型表单**形态（见项目记忆 `form-design-byok-feishu-architecture`）：owner（表单作者）把自己的 DeepSeek key 与飞书多维表格凭据**一次性配置好**，由 Cloudflare Workers + D1 代为持有，后续的 LLM 代理、答题落库都用 owner 自己的额度与租户。本节只定义**第一刀：配置的保存与读取**——`POST /api/config` 与 `GET /api/config`。
+>
+> **不在本节：** DeepSeek/飞书的「测试连接」（真实外呼）、LLM 代理转发、提交写飞书多维表格——都是后续 feature。
+>
+> **MVP 单 owner：** 不做登录鉴权、不做多租户。D1 里固定单行配置（单 owner id），后续接入鉴权时再扩成多行。
+
+### 12.1 owner 配置的两块凭据
+
+owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安全**：
+
+| 块 | 字段 | 性质 | 落库方式 |
+|---|---|---|---|
+| DeepSeek | `apiKey`（必填） | **密钥** | AES-GCM 密文 + iv |
+| DeepSeek | `model`（可选，默认留空） | 非密 | 明文 |
+| 飞书多维表格 | `appId` | 非密 | 明文 |
+| 飞书多维表格 | `appSecret` | **密钥** | AES-GCM 密文 + iv |
+| 飞书多维表格 | `appToken`（多维表格 app token） | 非密 | 明文 |
+| 飞书多维表格 | `tableId` | 非密 | 明文 |
+
+> **为什么 DeepSeek key 必填、飞书整块可选：** 没有 DeepSeek key 连设计器都跑不起来；飞书是「答题落库」目的地，配置阶段可以先留空，发布前再补。本刀只校验 DeepSeek `apiKey` 必填；飞书字段要么整块给齐、要么整块留空（半填留给后续 feature 决定）。
+
+### 12.2 加密方案（AES-GCM + `CONFIG_KEY` + 每字段独立 iv）
+
+- **主密钥：** 从 Worker 环境变量 `CONFIG_KEY`（`wrangler secret put CONFIG_KEY`）读取，**绝不入库、绝不进 git**。约定为 base64 编码的 256-bit 原始密钥，经 Web Crypto `importKey` 导入成 `AES-GCM` `CryptoKey`。
+- **算法：** Web Crypto `crypto.subtle` 的 `AES-GCM`，96-bit（12 字节）随机 iv。
+- **每字段独立 iv：** 每个密钥字段（DeepSeek `apiKey`、飞书 `appSecret`）各自加密、各自生成一个**新的随机 iv**，密文与 iv 成对落库。**绝不复用 iv**——GCM 下 iv 复用会泄露明文。
+- **存储编码：** 密文与 iv 均以 **base64 字符串**落库（D1 列为 `TEXT`）。
+- **读取时解密再掩码：** `GET /api/config`（及 `POST` 的回显）在 Worker 内用 `CONFIG_KEY` 解密后，经 `maskSecret` 只返回**掩码串**（保留首尾、隐藏中间），**绝不返回完整明文**（见 §12.4）。这样 owner 认得出配的是哪把 key、且掩码对同一 key 稳定一致。完整明文仅服务后续 feature（LLM 代理、写飞书）在 Worker 内部使用，永不出网。
+
+### 12.3 API 契约
+
+#### `POST /api/config` — 保存配置
+
+请求体（`OwnerConfigInput`，JSON）：
+
+```jsonc
+{
+  "deepseek": {
+    "apiKey": "sk-xxxxxxxxxxxxxxxx",   // 必填，非空
+    "model": "deepseek-chat"            // 可选；缺省/空串表示未指定
+  },
+  "feishu": {                           // 可选整块；留空表示「暂不配置飞书」
+    "appId": "cli_xxx",
+    "appSecret": "yyyy",                // 密钥
+    "appToken": "bascnXXXX",
+    "tableId": "tblXXXX"
+  }
+}
+```
+
+- 成功：`200`，响应体直接返回保存后的掩码视图（与 `GET /api/config` 同形状的 `MaskedConfig`），让前端无需二次拉取即可回显。
+- 缺必填（DeepSeek `apiKey` 为空/缺失）：`400`，`{ "error": "deepseek.apiKey is required" }`，**不落库**。
+- 保存是**整行覆盖（upsert 单行）**：每次 `POST` 写完整配置，已存在则更新、不存在则插入；`updated_at` 刷新为当前时间。
+
+#### `GET /api/config` — 读取配置（密钥一律掩码）
+
+响应体（`MaskedConfig`，JSON）：
+
+```jsonc
+{
+  "deepseek": {
+    "apiKey": "sk-…wxyz",   // 掩码串；从未配置时为 null
+    "model": "deepseek-chat" // 明文回显；未指定为 null
+  },
+  "feishu": {
+    "appId": "cli_xxx",      // 明文回显；未配置为 null
+    "appSecret": "yy…yy",    // 掩码串；未配置为 null
+    "appToken": "bascnXXXX", // 明文回显
+    "tableId": "tblXXXX"     // 明文回显
+  },
+  "updatedAt": "2026-06-11T08:00:00.000Z" // 从未配置时为 null
+}
+```
+
+- **密钥字段一律掩码，绝不返回完整明文。** `apiKey` / `appSecret` 在 Worker 内解密后经 `maskSecret` 脱敏（保留首尾、隐藏中间）再返回（见 §12.4），调用方拿不到完整原值。
+- **未配置时返回空骨架：** D1 里没有那一行时，返回上面的结构但所有值为 `null`，HTTP 仍为 `200`（「没配过」是正常态，不是错误）。
+- 非密字段（`model` / `appId` / `appToken` / `tableId`）明文回显，方便前端展示当前连的是哪张表。
+
+### 12.4 掩码规则（`maskSecret`）
+
+把密钥转成「看得出配过、但还原不出原值」的展示串：
+
+- 保留首尾少量字符、中间用省略号 `…`（U+2026）连接，例如 `sk-…wxyz`。
+- 输入太短（不足以安全保留首尾）时，整体打码、不暴露任何原文字符（如全 `•` 或固定占位），**绝不**因为短就回退成明文。
+- 空串 / 未配置的密钥字段映射为 `null`，而非掩码串——`null` 表示「没配过」，掩码串表示「配过、这是脱敏预览」。
+- 掩码作用于**解密后的明文**（首尾可见、中间隐藏），所以 owner 认得出配的是哪把 key，且同一 key 多次保存的掩码稳定一致；它只服务 UI 回显，从掩码无法还原完整原值。
+
+### 12.5 D1 表结构（`workers/schema.sql`）
+
+单行单 owner 设计：固定主键 `owner_id`（MVP 恒为 `'default'`），整行 upsert。
+
+```sql
+CREATE TABLE IF NOT EXISTS owner_config (
+  owner_id              TEXT PRIMARY KEY,   -- MVP 恒为 'default'（单 owner）
+  -- DeepSeek
+  deepseek_key_cipher   TEXT,               -- AES-GCM 密文 (base64)
+  deepseek_key_iv       TEXT,               -- 该密文的 iv (base64)，与 cipher 成对
+  deepseek_model        TEXT,               -- 明文，可空
+  -- 飞书多维表格
+  feishu_app_id         TEXT,               -- 明文，可空
+  feishu_secret_cipher  TEXT,               -- AES-GCM 密文 (base64)
+  feishu_secret_iv      TEXT,               -- 该密文的 iv (base64)，与 cipher 成对
+  feishu_app_token      TEXT,               -- 明文，可空
+  feishu_table_id       TEXT,               -- 明文，可空
+  updated_at            TEXT NOT NULL       -- ISO-8601，每次写入刷新
+);
+```
+
+- 密文/iv 成对：`*_cipher` 与对应 `*_iv` 要么同时有值、要么同时为 `NULL`。
+- 单行约束靠固定主键实现；后续接鉴权时把 `owner_id` 换成真实租户键即可平滑扩成多行。
