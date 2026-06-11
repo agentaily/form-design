@@ -45,20 +45,26 @@ npm run test:e2e   # Playwright end-to-end (real browser)
 
 ## Testing
 
-BDD + TDD, runnable today:
+**BDD is the methodology, not a layer.** `features/` holds the Gherkin behavior
+specs (living documentation); the test levels below each _realize_ those
+behaviors at the right altitude (double-loop TDD: BDD/acceptance outer loop +
+unit TDD inner loop). Behavior and level are orthogonal axes.
 
-- **TDD unit** (`tests/unit/`) — Vitest specs for every `src/core/` module
-  (VFS CRUD, schema field ops, tool dispatch, queue batching, srcdoc assembly,
-  agent loop stop/self-heal/max-iters) plus the prototype's pure logic.
-- **BDD** (`tests/bdd/`) — Gherkin `.feature` files run by
-  `@amiceli/vitest-cucumber` + Testing Library: building a form, fill &
-  validate & submit, and the agent self-healing a failed edit.
-- **E2E** (`e2e/`) — Playwright drives the real designer in a real browser
-  (build → validate → publish). Uses system Chrome via `channel: "chrome"`;
-  set `PW_USE_BUNDLED=1` to use Playwright's bundled chromium instead.
+- **`features/`** — global behavior spec (`*.feature`, Given/When/Then). The
+  single source of truth for what the system does; referenced by every level.
+- **`tests/unit/`** — inner-loop unit tests for every `src/core/` module (VFS
+  CRUD, schema ops, tool dispatch, queue batching, srcdoc, agent loop) + the
+  prototype's pure logic. Behavior-styled `describe/it`, no Gherkin (Gherkin per
+  micro-assertion is high-ceremony / low-value).
+- **`tests/integration/`** — component & cross-module tests that realize the
+  features via `@amiceli/vitest-cucumber` + Testing Library (build a form, fill
+  & validate & submit, agent self-heal).
+- **`e2e/`** — Playwright realizes feature scenarios in a real browser
+  (build → validate → publish). Uses system Chrome via `channel: "chrome"`; set
+  `PW_USE_BUNDLED=1` for Playwright's bundled chromium.
 
 ```bash
-npm test          # unit + BDD
+npm test          # Vitest: unit + integration (jsdom)
 npm run test:e2e  # Playwright
 npm run test:all  # both
 ```

@@ -8,7 +8,7 @@ import { createVfs, readFile } from "../../src/core/vfs";
 import { createSchema } from "../../src/core/schema";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const feature = await loadFeature(path.join(here, "features/agent-self-heal.feature"));
+const feature = await loadFeature(path.join(here, "../../features/agent-self-heal.feature"));
 
 const text = (t) => ({ type: "text", text: t });
 const toolUse = (id, name, input) => ({ type: "tool_use", id, name, input });

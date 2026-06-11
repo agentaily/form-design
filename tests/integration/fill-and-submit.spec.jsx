@@ -8,7 +8,7 @@ import { render, screen, fireEvent, cleanup } from "@testing-library/react/pure"
 import { FormPreview } from "../../src/preview.jsx";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const feature = await loadFeature(path.join(here, "features/fill-and-submit.feature"));
+const feature = await loadFeature(path.join(here, "../../features/fill-and-submit.feature"));
 
 const FIELDS = [
   { id: "name", type: "text", label: "姓名", required: true, placeholder: "你的姓名" },

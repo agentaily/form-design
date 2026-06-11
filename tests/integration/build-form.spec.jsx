@@ -9,7 +9,7 @@ import { render, screen, fireEvent, act, cleanup } from "@testing-library/react/
 import App from "../../src/App.jsx";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const feature = await loadFeature(path.join(here, "features/build-form.feature"));
+const feature = await loadFeature(path.join(here, "../../features/build-form.feature"));
 
 // Drive the scripted runner's setTimeout-based timeline to completion in virtual time.
 async function runScript() {

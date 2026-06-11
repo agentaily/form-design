@@ -65,11 +65,16 @@ npm run dev          # 开发服务器 http://localhost:5173
 
 ## 4. 测试
 
-- **单元（TDD）** `tests/unit/`：覆盖每个 `src/core` 模块 + 原型纯逻辑。
-- **BDD** `tests/bdd/`：Gherkin `.feature` + `@amiceli/vitest-cucumber` + Testing Library。
-- **E2E** `e2e/`：Playwright 跑真实设计器（搭表单 → 校验 → 发布）。
+**BDD 是方法论，不是一个分层。** `features/` 是全局行为规格（Gherkin 活文档），各测试层级只是在不同高度去*实现*这些行为(双环 TDD:BDD/验收外环 + 单元 TDD 内环)。「行为」和「层级」是两条正交的轴。
+
+- **`features/`**：全局行为规格（`*.feature`，Given/When/Then）。系统该做什么的唯一真相,各层引用它。
+- **`tests/unit/`**：内环单元测试,覆盖每个 `src/core` 模块 + 原型纯逻辑。行为风格 `describe/it`,**不套 Gherkin**(给微观断言套 feature 高仪式低收益)。
+- **`tests/integration/`**：组件 & 跨模块测试,用 `@amiceli/vitest-cucumber` + Testing Library _实现_ features(搭表单、填写校验提交、Agent 自愈)。
+- **`e2e/`**：Playwright 在真实浏览器实现 feature 场景(搭表单 → 校验 → 发布)。
   - 本地默认用系统 Chrome（`channel: "chrome"`，无需下载）。
   - 没有系统 Chrome（如 CI）：`PW_USE_BUNDLED=1` + `npx playwright install --with-deps chromium`。
+
+> 写新测试的顺序:先在 `features/` 写/找到对应行为 → 再在合适的层级(unit / integration / e2e)实现它。单元测试保持行为命名即可,不必每条都配 `.feature`。
 
 ---
 
