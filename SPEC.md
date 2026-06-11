@@ -691,7 +691,7 @@ Worker 内部流程：
 | 飞书 | `POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal` | body `{ app_id, app_secret }`（JSON） | 上游 `200` 且响应体 `code === 0`（拿到 `tenant_access_token`，自建应用凭据有效）|
 
 - **DeepSeek：** 用 owner 明文 key 调一个最便宜的校验端点（`GET /models`，不消耗推理额度），上游 `2xx` 即认为 key 有效 → `ok:true`；`401`/其它非 2xx → `ok:false`（key 失效 / 被拒）。
-- **飞书：** 用 owner 的 `app_id` + `app_secret` 走自建应用换 `tenant_access_token` 的标准端点；飞书的约定是 HTTP `200` 也可能带业务错误码，所以**必须看 body 的 `code`**：`code === 0` 才算连通（凭据有效），`code !== 0`（如 `99991663` app secret 错）→ `ok:false`。
+- **飞书：** 用 owner 的 `app_id` + `app_secret` 走自建应用换 `tenant_access_token` 的标准端点；飞书的约定是 HTTP `200` 也可能带业务错误码，所以判定 `ok:true` 须**同时**满足两条 gate：**(a) 上游 HTTP `res.ok`（2xx）** 且 **(b) 响应体 `code === 0`**。任一不满足（HTTP 非 2xx、或 `200` 但 `code !== 0`，如 `99991663` app secret 错）→ `ok:false`。**不能只看 `code` 而忽略 HTTP 状态**：非 2xx 的响应体未必能解析出可信的 `code`，必须先过 `res.ok` 这道闸（与 §15.5 写记录、§18.3 读记录的双 gate 判定一致）。`testFeishu` 复用 §15 的 `getFeishuTenantToken`（已含 `res.ok && code === 0` 双 gate），把其抛出的（已脱敏的）错误映射成 `ok:false` 的 `message`，自身永不抛。
 - **`appToken` / `tableId` 不在本刀校验**：本节只验自建应用凭据本身能否换 token，不验它对某张多维表格的读写权限（留给 `/api/submit`）。
 
 ### 14.3 响应契约（`ConnTestResult`）
@@ -864,6 +864,7 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 - 成功：`201`，`{ "slug": "f8Kq2pXa" }`（实现可附 `url` 字段给出可直接访问的公开填写页地址）。
 - 缺 `meta.title`（空 / 缺失）、或 `fields` 非数组、或某 field 缺 `id`/`type`/`label` / `type` 非法 → `400 { error }`，**不落库**（§16.5）。
 - owner_id **不在请求体里**：MVP 由后端恒填 `'default'`（§16.3）。
+- **字段嵌套深度上限（防深 payload，安全 nit）：** `fields` 支持 `group` 字段的 `children` 递归嵌套。`parsePublishInput` / `parseField` 必须给递归**设一个深度上限**（实现在合约内定一个合理常量，建议 ≤ 8 层），超过上限即视为形状非法 → `400 { error }`，**不落库**。这是为了挡住「深度爆栈 / 资源耗尽」的恶意或畸形 payload——一份正常表单的 group 嵌套远到不了这个量级。上限值由 implementer 在合约内固定，但**必须**存在且对超限输入返回 `400`（而非栈溢出 / 5xx）。
 
 #### `GET /api/forms/:slug` — 公开拉取（无鉴权）
 
@@ -1001,6 +1002,7 @@ CREATE TABLE IF NOT EXISTS forms (
 - 密码错 / 缺 `password` / body 非合法 JSON：`401`，`{ "error": "..." }`（**统一 401**，不区分「密码错」与「缺字段」，避免给爆破者额外信号；body 非 JSON 也按鉴权失败处理）。
 - 服务端未配置 `OWNER_PASSWORD` / `AUTH_SECRET`（部署疏漏）：`500`，`{ "error": "..." }`（这是部署错误，不是鉴权失败，不能误判成 401 把所有人放进来或全部锁死的歧义态）。
 - 校验只比对 owner 密码本身，**不**触碰 D1 / 飞书 / DeepSeek——登录是纯 secret 比对 + 签名。
+- **密码比对走常量时间（安全 nit）：** 提交的密码与 `OWNER_PASSWORD` 的比对**不**用朴素的 `===` / `!==`（朴素短路比较会因「第几位开始不匹配」泄漏时序信号，给计时攻击逐位猜密码的可乘之机）。用一个**常量时间等长比较**（见 §17.7）：先把两侧编码成等长字节再逐字节累积异或，比较耗时只与长度有关、与「哪一位不同」无关。长度不同时仍判失败，但同样不短路。无论匹配与否，可观察行为不变（匹配 → `200 { token }`，不匹配 → 统一 `401`）。
 
 ### 17.3 session JWT 约定
 
@@ -1038,7 +1040,7 @@ owner-only 端点统一挂一道 auth 中间件，校验 `Authorization: Bearer 
 
 | secret | 用途 | 来源 |
 |---|---|---|
-| `OWNER_PASSWORD` | owner 登录密码（明文比对） | 生产 `wrangler secret put OWNER_PASSWORD`；测试由 `vitest.config.ts` 注入固定值 |
+| `OWNER_PASSWORD` | owner 登录密码（与提交密码做**常量时间**比对，§17.8） | 生产 `wrangler secret put OWNER_PASSWORD`；测试由 `vitest.config.ts` 注入固定值 |
 | `AUTH_SECRET` | session JWT 的 HMAC 签名密钥 | 生产 `wrangler secret put AUTH_SECRET`；测试由 `vitest.config.ts` 注入固定值 |
 
 - 二者均为 Worker secret，**绝不**入 git、不进任何响应 / 日志。与 §12 的 `CONFIG_KEY` 同等对待。
@@ -1049,7 +1051,17 @@ owner-only 端点统一挂一道 auth 中间件，校验 `Authorization: Bearer 
 - **统一 401：** 登录失败与中间件拒绝都回 `401`，文案只表「未授权」，不泄漏「密码长度 / 是否存在 / 验签为何失败」等可被利用的信号。
 - **secret 不出网：** `OWNER_PASSWORD` / `AUTH_SECRET` 只在 Worker 内用于比对 / 签名验签，绝不进 token payload、响应体、HTTP 头、日志。
 - **token 非加密：** JWT payload 可被任何持有者解码，故 payload 里只放 `sub='default'` + `exp` 这类非敏感物。
+- **密码比对常量时间（防计时攻击）：** owner 密码与 `OWNER_PASSWORD` 的比对用一个**常量时间等长比较** helper（`auth.ts` 的 `timingSafeEqualStr`，§17.8），而非 `===`。这样比对耗时不随「第几位开始不同」变化，攻击者无法靠测响应时延逐位还原密码。这是一个就近的安全 nit，不改变任何可观察 HTTP 行为。
 - **保护半径：** 加上鉴权后，owner 的配置、表单发布、连接测试、LLM 代理、数据后台都需 token；这道门也是后续多 owner（把 `sub` 换成真实租户键，按 `sub` 过滤数据）的接入点。
+
+### 17.8 常量时间密码比较（`timingSafeEqualStr`）
+
+Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以在 `auth.ts` 里提供一个纯函数 helper 做常量时间字符串比较：
+
+- **签名：** `timingSafeEqualStr(a: string, b: string): boolean`——两个字符串「内容是否相等」，比对耗时只与输入长度有关、与首个不同位的位置无关。
+- **实现思路（合约内）：** 用 `TextEncoder` 把两侧编码成字节；逐字节做异或累积（`acc |= ai ^ bi`），**全程不短路**（不在第一个不同字节就 `return false`）；最后用 `acc === 0` 且长度相等判等。长度不同时返回 `false`，但仍跑完固定步数、不提前 return。绝不使用朴素 `a === b` / 提前短路的逐字符比较。
+- **用途：** 仅供 `POST /api/auth/login` 比对提交密码与 `OWNER_PASSWORD`（§17.2）。`AUTH_SECRET` 的验签由 `hono/jwt` 的 HMAC 负责（HMAC 验签本身已抗时序），不走本 helper。
+- **安全：** 入参与返回都不含也不回显任何 secret；本 helper 只返回布尔，绝不把密码 / secret 写进日志或响应。
 
 ---
 
@@ -1132,3 +1144,199 @@ owner-only 端点统一挂一道 auth 中间件，校验 `Authorization: Bearer 
 - 与 §15.7 同源的边界：明文 `app_secret` 只进换 token 请求体；`tenant_access_token` 只进读记录请求的 `Authorization` 头；二者绝不进响应、HTTP 头回显、日志。
 - 数据后台只投影**提交数据**（`recordId` / `fields` / `createdTime`），不回 owner 的任何凭据 / 配置，也不回 `app_token` / `table_id`（它们是「数据存在哪」的私有信息）。
 - 这是 owner-only 端点（§17 保护），陌生人无 token 拿不到任何提交数据。
+
+---
+
+## 19. 后端 · CORS（跨源访问控制，覆盖所有 `/api/*`）
+
+> **与第 12–18 节的关系：** §12–§18 落地了发布型 BYOK 的完整后端 API + owner 鉴权。但前端（`form-design.agentaily.com`，CF Pages）与后端 API（Workers）是**不同源**：浏览器对带凭据 / 自定义头的跨源请求会先发 `OPTIONS` 预检，缺正确的 `Access-Control-*` 响应头会被浏览器拦在发出之前。本节补上这一横切层：用 Hono 内置 `cors` 中间件，对所有 `/api/*` 端点统一加 CORS 响应头并正确应答预检。
+>
+> **本节范围（仅 Worker 端）：** 允许的来源（origins）、允许的方法 / 头、`OPTIONS` 预检应答、挂载范围。
+>
+> **不在本节：** 限流 / 防刷、`Access-Control-Allow-Credentials`（本架构用 `Authorization: Bearer` 头携带 token，**不**用 cookie，故不需要也不应开启 credentials 模式）、CSRF（无 cookie 即无 CSRF 面）。
+
+### 19.1 端点职责
+
+用 Hono 内置中间件 `import { cors } from "hono/cors"`，作为**横切中间件**挂在所有 `/api/*` 路径上（在鉴权 guard 之前生效，使预检的 `OPTIONS` 也能在不带 token 时被正确应答）。它只负责附加 `Access-Control-*` 响应头与应答预检，不改变任何业务 route 的行为。
+
+- **挂载范围：** 覆盖所有 `/api/*`（含公开端点 `GET /api/forms/:slug`、`POST /api/submit`、`POST /api/auth/login` 与 owner-only 端点）。`GET /health` 是否纳入由实现自定（纳入无害）。
+- **挂载次序：** CORS 中间件须在 owner-only 的 `requireAuth` guard **之前**注册/生效——浏览器的 `OPTIONS` 预检不带 `Authorization` 头，若先被 guard 拦成 401，预检失败、真实请求根本发不出来。Hono 的 `cors()` 自身会短路应答 `OPTIONS`（返回带 CORS 头的 204/200），不会把预检透到业务 handler。
+
+### 19.2 允许的来源（origins）
+
+允许的前端来源用一个**常量数组**集中声明（实现放在 `index.ts` 或一个 `cors.ts` 常量里，单一真相）：
+
+| 环境 | origin |
+|---|---|
+| 生产前端 | `https://form-design.agentaily.com` |
+| 本地 dev | `http://localhost:5173`（Vite 默认端口）|
+
+- **白名单回显式：** `cors` 的 `origin` 用上面这个**允许列表**（数组）；命中列表的请求 `Origin` 才回显进 `Access-Control-Allow-Origin`，不命中则不回该头（浏览器据此拦截）。**不**用 `*` 通配——既因为将来可能需要带凭据，也为收窄可调用面。
+- 允许列表为常量（非 env）即可满足 MVP；若实现愿意从 env 读取额外 origin（如 PR 预览域名）可在合约内扩展，但**必须**默认包含上面两个、且不退化成 `*`。
+
+### 19.3 允许的方法与头
+
+- **`Access-Control-Allow-Methods`：** `GET`、`POST`、`PATCH`、`DELETE`、`OPTIONS`（覆盖现有 + §21 新增的 CRUD 方法）。
+- **`Access-Control-Allow-Headers`：** 至少 `Authorization`（owner-only 端点的 Bearer token）、`Content-Type`（JSON body）。
+- **`Access-Control-Max-Age`：** 可选，给预检结果设一个缓存时长（如 86400）以减少预检次数；具体值由实现在合约内定。
+- **不开启 credentials：** 不设置 `Access-Control-Allow-Credentials: true`——本架构 token 走 `Authorization` 头而非 cookie，无需 credentials 模式。
+
+### 19.4 预检（`OPTIONS`）行为
+
+- 浏览器对跨源的带 `Authorization` / 非简单 `Content-Type` 的请求先发 `OPTIONS` 预检；`cors` 中间件须以一个 `2xx`（`204` 或 `200`）短路应答，并带上 §19.2 / §19.3 的 `Access-Control-*` 头。
+- 预检**不**进入业务 handler、**不**被 `requireAuth` 拦（§19.1 次序保证）——即对 owner-only 端点的 `OPTIONS` 预检也应返回带 CORS 头的 `2xx`，而非 `401`。
+
+### 19.5 安全
+
+- CORS 是**浏览器侧**的访问控制，不是服务端鉴权——它不替代 §17 的 token 鉴权。owner-only 端点仍由 `requireAuth` 守护；CORS 只决定「哪个网页源的脚本能读到响应」。
+- 收窄 origin 白名单（不退化 `*`）+ 不开 credentials，缩小可被任意网站脚本调用 / 读取的面。
+
+---
+
+## 20. 后端 · 提交校验：状态门 + answers 对 schema 必填校验（`POST /api/submit`）
+
+> **与第 15/16 节的关系：** §15 把作答写进 owner 飞书表，§16 给 submit 加了 `formSlug` + `formExists`（form 不存在 → 404）。但 §16.5 明确「从简」：**不查表单状态、不校验 answers 是否符合 schema**。本节补上这两道在写飞书**之前**的校验门，挡住「往已关闭 / 草稿表单提交」与「漏填必填项」这两类脏数据。
+>
+> **本节范围（仅 Worker 端）：** 在 §16.5 的 `formExists` 之后、§15 飞书写入之前，新增 ①表单状态门（非 `published` → 拒收）②answers 对 schema 的**必填校验**。
+>
+> **不在本节：** 字段类型 / 选项 / `validation`（pattern / min / max）的完整语义校验（本期至少做必填；类型/选项校验列为**可选增强**，见 §20.3）、防刷 / 限流、答案去重 / 幂等。
+
+### 20.1 校验在流程里的位置
+
+在 §16.5 的 submit 流程上插入两步（都在「读 owner 配置 / 打任何飞书上游」之前）：
+
+```
+0)   parseSubmitRequest(body)          ← 形状校验：formSlug 非空 + answers 非空数组（否则 400，不打上游）
+0.5) formExists(db, formSlug)          ← form 不存在 → 404，不打上游（§16.5，不变）
+0.6) getFormStatus(db, formSlug)       ← 【新】读该 form 的 status；非 'published'（draft/closed）→ 409，不打上游
+0.7) getFormFields(db, formSlug)       ← 【新】读该 form 的 fields（schema 真相）
+0.8) validateAnswers(fields, answers)  ← 【新】按 fields 校验 answers：必填项缺失/空值 → 400，不打上游
+1)..  同 §15.1（读+解密 owner 配置 → 未配飞书 409 → 换 token → 映射 fields → 写记录 → 200 { ok, recordId }）
+```
+
+> 0.6 / 0.7 可合并成一次 D1 读（一条 `SELECT status, schema_json ...`），是否合并由实现定；对外契约只看「状态非 published 拒收」与「必填缺失拒收」两个可观察行为。两步都在飞书上游之前，确保脏提交**绝不**写进 owner 的表。
+
+### 20.2 表单状态门
+
+- `getFormStatus(db, slug)` 读该 slug 行的 `status`（`'published' | 'draft' | 'closed'`，见 schema.sql / §16.7 / §21）。form 不存在时返回 `null`（但流程里 0.5 的 `formExists` 已先挡掉不存在的 slug，0.6 主要区分 published vs 其它状态）。
+- **判定：** `status === 'published'` → 放行进入后续校验 / 写入；`status` 为 `'draft'` 或 `'closed'`（或任何非 `published` 值）→ **拒收**：`409 { "error": "..." }`（如「表单未开放提交」），**不**读 owner 配置、**不**打任何飞书上游、**不**写记录。
+- **为什么 409：** 「表单存在但当前不接受提交」是一个与请求体无关的**状态冲突**（conflict），用 `409` 表达，与「form 不存在」的 `404`、「请求体非法」的 `400` 区分开。错误体仍是 `application/json` 的 `{ error }`。
+
+### 20.3 answers 对 schema 的校验（MVP：必填校验）
+
+`validateAnswers(fields, answers)` 按该 form 的 `fields`（§3.2 Field 真相）校验提交的 `answers`：
+
+- **必填校验（本期必做）：** 对每个 `required === true` 的 field，要求 `answers` 里存在与之对应、且**值非空**的作答；缺失或空值 → 校验失败。本节**校验失败 → `400 { "error": "..." }`**（如「缺少必填字段：姓名」），不打任何飞书上游。
+  - **「对应」的匹配键（MVP）：** 沿用 §15.3 的约定——`answer.label` 对位 `field.label`（MVP 用 label 做列名；field id ↔ label 的精确映射留后续）。即「该 field 的 `label` 在 `answers` 里有一条 `label` 相等、且 `value` 非空的作答」。
+  - **「空值」判定：** `value` 为空字符串、纯空白字符串，或空数组（`[]`，多选未选）均视为「未填」。具体空值规则由实现在合约内定，但**必须**覆盖：空串 + 空数组 = 未填。
+  - **嵌套（group）：** group 字段的子字段（`children`）的必填校验是否递归由实现在合约内定；MVP 至少校验顶层 `fields` 的必填即可（递归列为可选增强，与 §16.2 的深度上限一致地受限）。
+- **类型 / 选项 / validation 校验（本期可选增强）：** 校验 `value` 是否匹配 `field.type`（number 是否数字串）、select/radio/checkbox 的 `value` 是否落在 `options` 内、是否满足 `validation`（pattern/min/max）——这些列为**可选**。若实现做了，失败同样走 `400 { error }`；不做则只跑必填校验。本节**不**要求实现它们，但要求 `validateAnswers` 的契约为它们留好位置（同一函数、同一 `400` 出口）。
+
+### 20.4 错误响应（状态码 + `{ error }`）
+
+| 情况 | 状态码 | 响应体 | 说明 |
+|---|---|---|---|
+| `formSlug` 缺失 / 空 | `400` | `{ "error": "formSlug is required" }` | §16.5，不变 |
+| `answers` 缺失 / 非数组 / 空 / 单条形状非法 | `400` | `{ "error": "..." }` | §15.2 / §16.5，不变 |
+| `formSlug` 对应 form 不存在 | `404` | `{ "error": "..." }` | §16.5，不变 |
+| **form 状态非 `published`（draft/closed）** | `409` | `{ "error": "..." }` | 【新】不读 owner 配置、不打飞书上游 |
+| **answers 漏填必填字段（或可选的类型/选项校验失败）** | `400` | `{ "error": "..." }` | 【新】不打飞书上游 |
+| owner 未配飞书 | `409` | `{ "error": "owner 未配置飞书" }` | §15.6，不变（注意与「状态门 409」语义不同，error 文案区分）|
+| 换 token / 写记录失败 | `502` | `{ "error": "..." }` | §15.6，不变 |
+
+- 两个 `409`（状态门 vs 未配飞书）语义不同，靠 `error` 文案区分；前端据文案 / 上下文决定提示。
+- 校验失败的 `{ error }` 可携带「哪个字段缺失」这类**非敏感**信息供答题者修正，但**绝不**含 owner 凭据。
+
+### 20.5 对既有 submit 行为的影响（向后兼容）
+
+- 既有「正常提交」用例：表单是 §16 `POST /api/forms` 发布出来的（发布即 `published`，§16.7），故天然过状态门；只要这些用例的 `answers` 满足表单的必填字段，行为不变（仍 `200 { ok, recordId }`）。
+- 既有用例若用了「带必填字段但 answers 不含该字段」的构造，会因新必填校验从 `200` 变 `400`——这是**预期的连锁**，需在 outer-tester 侧对齐（见交付里的「现有测试连锁清单」）。
+
+---
+
+## 21. 后端 · 表单管理 CRUD（owner-only：列表 / 改状态 / 删除）
+
+> **与第 16/17 节的关系：** §16 让 owner 发布表单（`POST /api/forms`）、答题者公开拉取（`GET /api/forms/:slug`），§17 给 owner-only 端点加了鉴权。但 owner 发布后**无法管理**自己的表单：看不到列表、改不了状态（开放 / 关闭提交）、删不掉。本节补上 owner 视角的管理 CRUD，全部 **owner-only**（挂 §17 的 `requireAuth`）。
+>
+> **本节范围（仅 Worker 端）：** `GET /api/forms`（列表）、`PATCH /api/forms/:slug`（改 status，至少；可选编辑 meta/fields）、`DELETE /api/forms/:slug`（删除）。
+>
+> **不在本节：** 多租户隔离（MVP 单 owner，`owner_id='default'`，列表即该 owner 全部）、分页 / 搜索 / 排序、批量操作、版本历史 / 回滚、表单复制（已有 `duplicate_field` 是字段级、与本节无关）。
+
+### 21.1 端点职责与鉴权矩阵（在 §17.1 基础上新增）
+
+| 端点 | 谁调 | 鉴权 | 职责 |
+|---|---|---|---|
+| `GET /api/forms` | owner（管理台） | **owner-only** | 列出该 owner 的所有表单（slug / meta / status / created_at），不含 fields 全量 |
+| `PATCH /api/forms/:slug` | owner | **owner-only** | 改 `status`（`published` ↔ `closed`）和/或编辑 `meta` / `fields`（至少支持改 status）|
+| `DELETE /api/forms/:slug` | owner | **owner-only** | 删除该表单 |
+
+> **关键路由共存陷阱（与 §17.5 同源、本节加剧）：** `/api/forms` 前缀下现在有四条路由，鉴权与公开**交错**：
+> - `GET  /api/forms`            → **owner-only**（列表，本节新增）
+> - `POST /api/forms`            → owner-only（发布，§16）
+> - `GET  /api/forms/:slug`      → **公开**（公开拉取，§16）——**绝不能被误伤**
+> - `PATCH/DELETE /api/forms/:slug` → owner-only（本节新增）
+> - `GET  /api/forms/:slug/submissions` → owner-only（§18）
+>
+> guard 必须按**精确 method + path** 挂（沿用 §17.5 既有做法），逐条点名 owner-only 路由，**绝不**用宽匹配 `app.use('/api/forms/*', guard)`（会把公开的 `GET /api/forms/:slug` 也罩进去）。`GET /api/forms`（无 `:slug` 段）与 `GET /api/forms/:slug`（带段）是**两条不同路由**：前者 owner-only、后者公开——挂载时务必区分，别让列表的 guard 漏到、或公开拉取的开放被收。
+
+### 21.2 `GET /api/forms` — owner 列出自己的表单
+
+成功（`200`，`application/json`）：
+
+```jsonc
+{
+  "forms": [
+    {
+      "slug": "f8Kq2pXa",
+      "meta": { "title": "活动报名表", "description": "请填写你的报名信息" },
+      "status": "published",
+      "createdAt": "2026-06-11T08:00:00.000Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+- 项形状（`FormListItem`）：`{ slug, meta, status, createdAt }`。**不**含 `fields` 全量（列表只给概览，详情走 `GET /api/forms/:slug` 或 PATCH 回显）；`submissionCount`（该表单已收集条数）列为**可选**字段——拉一次飞书才能算，实现可省略或异步补，MVP 不强求。
+- `forms`：该 owner（`owner_id='default'`）的所有表单，按 `created_at` 倒序（最新在前）或不约定顺序，由实现定。空 → `[]`（正常态）。
+- **与公开拉取的区别：** 这是 owner-only 列表，**可以**回 `status` / `createdAt`（owner 自己的私有维度）；而公开 `GET /api/forms/:slug` 仍只投影 `slug + meta + fields`（§16.4 不变）。但本列表项**仍不含**任何 owner 凭据（凭据在 `owner_config`，不在 `forms` 表）。
+
+### 21.3 `PATCH /api/forms/:slug` — 编辑表单（至少改 status）
+
+请求体（`UpdateFormInput`，JSON，**所有字段可选 / 部分更新**）：
+
+```jsonc
+{
+  "status": "closed",                  // 可选：'published' | 'closed'（开放/关闭提交）
+  "meta":   { "title": "新标题" },      // 可选：整块替换 meta（若给）
+  "fields": [ /* Field[] */ ]          // 可选：整块替换 fields（若给）
+}
+```
+
+- **至少支持改 `status`**（`published` ↔ `closed`，配合 §20 的状态门：closed → 不再接受提交）。`meta` / `fields` 的编辑为**可在合约内一并支持**的增强；若实现支持，`fields` 须复用 §16 `parseField` 的形状校验（含 §16.2 的深度上限）。
+- **部分更新语义：** 只更新请求体里出现的键，未出现的键保持原值；空请求体 `{}` 是 no-op（仍 `200`）。`status` 只接受 `'published'` / `'closed'`（**不**允许 PATCH 成 `'draft'`——草稿是发布前态，MVP 发布即 published，无回退草稿的入口）；非法 status 值 → `400 { error }`。
+- 成功（`200`，`application/json`）：回更新后的该表单视图（含 `slug` / `meta` / `status` / `fields` / `createdAt` 的 owner 视图，或至少回 `{ slug, status }` —— 由实现定，但**必须**让 owner 能确认改动已生效）。
+- `slug` 不存在 → `404 { error }`。请求体非法 JSON / 非法 status → `400 { error }`。
+
+### 21.4 `DELETE /api/forms/:slug` — 删除表单
+
+- **删除语义（硬删）：** MVP 采用**硬删**——从 `forms` 表里删掉该行。删除后该 slug 的公开拉取 / submit 都变 `404`（form 不存在）。选硬删而非软删（置 `closed`）的理由：①「关闭提交」已由 §21.3 的 `status='closed'` 覆盖，软删会与之语义重叠；②MVP 不需要回收站 / 审计留痕。`DELETE` 与「PATCH 成 closed」是**两个不同动作**：closed = 表单还在、只是停止收集；delete = 表单整个移除。
+- 成功（`200`，`application/json`）：`{ "ok": true, "slug": "f8Kq2pXa" }`（或 `204 No Content`，由实现择一；选 `200 { ok }` 便于前端确认）。
+- `slug` 不存在 → `404 { error }`（删一个不存在的 form 是错误，不是幂等成功——MVP 取严格语义；若实现想做幂等 `200` 可在合约内定，但需在 feature 里有据）。
+- **不联动删提交：** 删 `forms` 行**不**触碰 owner 飞书表里已收集的记录（数据在 owner 的飞书租户里，归 owner 自管）；本端点只删后端的表单定义行。
+
+### 21.5 错误响应（状态码 + `{ error }`）
+
+| 端点 | 情况 | 状态码 | 响应体 |
+|---|---|---|---|
+| 三者皆 | 缺 / 坏 / 过期 token | `401` | `{ "error": "未授权" }`（§17.4，guard 拦截，不进 handler）|
+| `PATCH` / `DELETE` | `slug` 不存在 | `404` | `{ "error": "..." }` |
+| `PATCH` | 请求体非法 JSON / status 非法值 | `400` | `{ "error": "..." }` |
+
+- 错误体一律 `application/json` 的 `{ error }`。
+- 三个端点都不回任何 owner 凭据（凭据在 `owner_config`，§16.4 / §18.6 同源边界）。
+
+### 21.6 D1 影响
+
+- 复用现有 `forms` 表（schema.sql / §16.7），**无需新增列**：列表读 `slug` / `meta_json` / `status` / `created_at`；PATCH 改 `status`（及可选 `meta_json` / `schema_json`）；DELETE 删行。
+- `status` 列已存在且取值 `'published' | 'draft' | 'closed'`；本节让 `'closed'` 第一次有了写入入口（PATCH），`'draft'` 仍只是预留态（MVP 无写入入口）。

@@ -3,6 +3,7 @@ import { sign as honoSign } from "hono/jwt";
 import {
   signSession,
   verifySession,
+  timingSafeEqualStr,
   DEFAULT_OWNER_SUB,
   DEFAULT_SESSION_TTL_SECONDS,
 } from "../src/auth";
@@ -110,5 +111,36 @@ describe("verifySession rejection paths return null (SPEC.md §17.4 / §17.7)", 
     // Preferred contract:收敛 to null, no throw.
     expect(threw).toBeUndefined();
     expect(result).toBeNull();
+  });
+});
+
+// --- §17.8 安全 nit：常量时间密码比较 ----------------------------------------
+//
+// timingSafeEqualStr 替代朴素 `===`：相等 → true、不等 → false、不同长 → false。
+// 这里只断言它的功能正确性（布尔值）；时序属性（不短路）无法在功能测里可靠观测，
+// 由实现保证。「不同长」与「同长但内容不同」两支足以钉死功能契约。
+describe("timingSafeEqualStr (SPEC.md §17.8 常量时间比较)", () => {
+  it("returns true for two equal strings", () => {
+    expect(timingSafeEqualStr("correct-horse-battery-staple", "correct-horse-battery-staple")).toBe(
+      true,
+    );
+  });
+
+  it("returns false for two same-length but differing strings", () => {
+    // 同长（都 5）但内容不同 → false（功能上等同 !==，但内部走常量时间）。
+    expect(timingSafeEqualStr("abcde", "abcdX")).toBe(false);
+    // 首位即不同的同长串 → 仍 false（不因「第一位就不同」而有别的结果）。
+    expect(timingSafeEqualStr("Xbcde", "abcde")).toBe(false);
+  });
+
+  it("returns false for strings of different lengths", () => {
+    expect(timingSafeEqualStr("abc", "abcdef")).toBe(false);
+    expect(timingSafeEqualStr("abcdef", "abc")).toBe(false);
+  });
+
+  it("returns true for two empty strings and false when only one is empty", () => {
+    expect(timingSafeEqualStr("", "")).toBe(true);
+    expect(timingSafeEqualStr("", "x")).toBe(false);
+    expect(timingSafeEqualStr("x", "")).toBe(false);
   });
 });

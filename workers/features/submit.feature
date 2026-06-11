@@ -10,6 +10,10 @@ Feature: 提交写飞书多维表格 POST /api/submit 答题落库
   自 §16.5 起，/api/submit 的 body 增加必填的 formSlug：route 先校验 form 存在
   （形状级校验过后），再走以下飞书写入流程；本节 §15 的写入 / 错误 / 不泄漏行为不变，
   只是每个场景多了「已发布表单 + 带合法 slug 提交」这一前置门。
+  自 §20 起，formExists 之后、飞书写入之前又多了两道门（详见 submit-validation.feature）：
+  状态门（非 published → 409）与 answers 对 schema 的必填校验（required 缺失/空值 → 400）。
+  本节这些「正常写入 / 飞书错误 / 不泄漏」场景的前置表单均为 published（发布即 published），
+  且提交的 answers 须填齐该表单的必填字段，方能走到飞书写入这一步——否则会先被 §20 拦下。
 
   Scenario: 飞书已配且上游都 OK 时写入成功并返回 recordId
     Given 一个已保存完整飞书凭据的 owner

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
+import { cors } from "hono/cors";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { importConfigKey } from "./crypto";
 import {
@@ -21,20 +22,36 @@ import { getFeishuTenantToken, FeishuTokenError } from "./feishu";
 import {
   answersToFields,
   parseSubmitRequest,
+  validateAnswers,
   writeToBitable,
   BitableWriteError,
   FeishuNotConfiguredError,
+  FormNotPublishedError,
+  AnswersValidationError,
   type SubmitRequest,
 } from "./submit";
 import {
   parsePublishInput,
+  parseUpdateInput,
   saveForm,
   getPublicForm,
   formExists,
+  getFormStatus,
+  getFormFields,
+  listForms,
+  updateForm,
+  deleteForm,
   FormValidationError,
   type PublishFormInput,
+  type UpdateFormInput,
 } from "./forms";
-import { signSession, requireAuth, type AuthVariables, type LoginRequest } from "./auth";
+import {
+  signSession,
+  timingSafeEqualStr,
+  requireAuth,
+  type AuthVariables,
+  type LoginRequest,
+} from "./auth";
 import { listSubmissions, BitableReadError } from "./submissions";
 
 /** Worker bindings (see wrangler.toml + vitest.config.ts). */
@@ -43,15 +60,38 @@ interface Env {
   DB: D1Database;
   /** base64 256-bit AES-GCM master key (Worker secret in prod). */
   CONFIG_KEY: string;
-  /** owner 登录密码（明文比对，§17.6）。Worker secret in prod. */
+  /** owner 登录密码（与提交密码做常量时间比对，§17.6 / §17.8）。Worker secret in prod. */
   OWNER_PASSWORD: string;
   /** session JWT 的 HMAC 签名密钥（§17.6）。Worker secret in prod. */
   AUTH_SECRET: string;
 }
 
 // Agentaily Forms backend. Routes get added per feature (owner config, LLM
-// proxy, Feishu submit, owner auth, data backend). See SPEC.md §12–§18.
+// proxy, Feishu submit, owner auth, data backend, form management). See SPEC.md §12–§21.
 const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
+
+// --- CORS (§19) ------------------------------------------------------------
+//
+// 允许的前端来源白名单（§19.2，单一真相）：生产 CF Pages + 本地 Vite dev。命中列表才回显
+// Access-Control-Allow-Origin；不退化成 `*`，不开 credentials（token 走 Authorization 头、
+// 非 cookie，§19.5）。如需从 env 读额外 origin（PR 预览域名）可在合约内扩展，但默认须含这两个。
+const ALLOWED_ORIGINS = [
+  "https://form-design.agentaily.com", // 生产前端（CF Pages）
+  "http://localhost:5173", // 本地 dev（Vite 默认端口）
+] as const;
+
+// CORS 横切中间件挂在所有 /api/* 之上，且必须在 owner-only guard 之前生效（§19.1）——
+// 浏览器 OPTIONS 预检不带 Authorization，若先被 guard 拦成 401 预检就失败、真实请求发不出来。
+// hono/cors 自身会短路应答 OPTIONS（带 Access-Control-* 头的 2xx），不透到业务 handler（§19.4）。
+app.use(
+  "/api/*",
+  cors({
+    origin: [...ALLOWED_ORIGINS],
+    allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"], // §19.3（含 §21 CRUD 方法）
+    allowHeaders: ["Authorization", "Content-Type"], // §19.3
+    maxAge: 86400, // 预检缓存一天，减少预检次数（§19.3，值可调）
+  }),
+);
 
 app.get("/health", (c) => c.json({ ok: true, service: "form-design-api" }));
 
@@ -70,8 +110,18 @@ const guard: MiddlewareHandler<{ Bindings: Env; Variables: AuthVariables }> = (c
 app.use("/api/config", guard);
 app.post("/api/config/test", guard);
 app.post("/api/chat", guard);
-// POST-only on /api/forms: the PUBLIC GET /api/forms/:slug must stay open (§17.5).
+// /api/forms 前缀下鉴权与公开交错（§21.1 路由共存陷阱）——逐条点名 owner-only 的
+// method+path，绝不用宽匹配 `app.use("/api/forms/*", guard)`（会误伤公开拉取）：
+//   - GET  /api/forms              → owner-only 列表（§21.2）。注意它与 GET /api/forms/:slug
+//     是两条不同路由（无 :slug 段 vs 有），guard 只挂前者；Hono 用精确路径区分二者。
+//   - POST /api/forms              → owner-only 发布（§16）。
+//   - PATCH/DELETE /api/forms/:slug → owner-only 编辑 / 删除（§21.3 / §21.4）。
+//   - GET  /api/forms/:slug/submissions → owner-only 提交列表（§18）。
+//   - GET  /api/forms/:slug        → PUBLIC 公开拉取（§16），**不挂 guard**，必须不受影响（§17.5）。
+app.get("/api/forms", guard);
 app.post("/api/forms", guard);
+app.patch("/api/forms/:slug", guard);
+app.delete("/api/forms/:slug", guard);
 app.get("/api/forms/:slug/submissions", guard);
 
 // POST /api/auth/login (public) — verify the owner password against OWNER_PASSWORD
@@ -95,8 +145,9 @@ app.post("/api/auth/login", async (c) => {
     return c.json({ error: "未授权" }, 401);
   }
 
+  // 常量时间比对（§17.8）：不用朴素 `!==`，避免泄漏「第几位开始不同」的时序信号。
   const password = (body as { password?: unknown })?.password;
-  if (typeof password !== "string" || password !== c.env.OWNER_PASSWORD) {
+  if (typeof password !== "string" || !timingSafeEqualStr(password, c.env.OWNER_PASSWORD)) {
     return c.json({ error: "未授权" }, 401);
   }
 
@@ -265,6 +316,31 @@ app.post("/api/submit", async (c) => {
     return c.json({ error: "form not found" }, 404);
   }
 
+  // 1.6) Status gate (§20.2): the form must be 'published' to accept submissions.
+  //      'draft' / 'closed' → 409, BEFORE reading owner config / any Feishu upstream.
+  //      (getFormStatus + getFormFields MAY be one D1 read; see §20.1.)
+  const status = await getFormStatus(c.env.DB, request.formSlug);
+  if (status !== "published") {
+    return c.json({ error: new FormNotPublishedError().message }, 409);
+  }
+
+  // 1.7) answers ↔ schema validation (§20.3): required fields must have non-empty
+  //      answers. Failure → 400, nothing forwarded. Reads the form's fields, then
+  //      validateAnswers throws AnswersValidationError on a missing/empty required.
+  const fieldsDef = await getFormFields(c.env.DB, request.formSlug);
+  if (fieldsDef === null) {
+    // 与 1.5 一致地兜底：状态门通过后 fields 仍取不到属异常态 → 404。
+    return c.json({ error: "form not found" }, 404);
+  }
+  try {
+    validateAnswers(fieldsDef, request.answers);
+  } catch (err) {
+    if (err instanceof AnswersValidationError) {
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
+
   // 2) Read + decrypt the owner config (plaintext, in-Worker view only).
   const key = await importConfigKey(c.env.CONFIG_KEY);
   const owner = await getOwnerConfig(c.env.DB, key);
@@ -334,6 +410,50 @@ app.post("/api/forms", async (c) => {
   // 2) Persist one forms row (owner_id 恒 'default', status 'published') → { slug }.
   const { slug } = await saveForm(c.env.DB, input);
   return c.json({ slug }, 201);
+});
+
+// GET /api/forms — owner 列出自己的表单（owner-only，已挂 guard）。返回 { forms, count }，
+// 每项 { slug, meta, status, createdAt }（不含 fields 全量；submissionCount 可选）。owner-only
+// 列表可回 status / createdAt 这类私有维度，但仍不含任何 owner 凭据（§21.2）。**注意**：这条
+// 路由与公开的 GET /api/forms/:slug 是两条不同路由（无 :slug 段 vs 有），guard 只挂这条列表。
+app.get("/api/forms", async (c) => {
+  const forms = await listForms(c.env.DB);
+  return c.json({ forms, count: forms.length }, 200);
+});
+
+// PATCH /api/forms/:slug — 编辑表单（owner-only，已挂 guard，§21.3）。部分更新：至少支持改
+// status（published ↔ closed），可选编辑 meta / fields。非法 JSON / 非法 status → 400；slug
+// 不存在 → 404；成功 → 200 更新后视图。
+app.patch("/api/forms/:slug", async (c) => {
+  const slug = c.req.param("slug");
+  let input: UpdateFormInput;
+  try {
+    const raw = await c.req.json();
+    input = parseUpdateInput(raw);
+  } catch (err) {
+    if (err instanceof FormValidationError) {
+      return c.json({ error: err.message }, 400);
+    }
+    const error = err instanceof SyntaxError ? "invalid JSON body" : "invalid request";
+    return c.json({ error }, 400);
+  }
+  const updated = await updateForm(c.env.DB, slug, input);
+  if (updated === null) {
+    return c.json({ error: "form not found" }, 404);
+  }
+  return c.json(updated, 200);
+});
+
+// DELETE /api/forms/:slug — 硬删表单（owner-only，已挂 guard，§21.4）。删后该 slug 的公开
+// 拉取 / submit 都变 404；不联动删 owner 飞书表里已收集的记录。slug 不存在 → 404（严格语义）；
+// 成功 → 200 { ok:true, slug }。
+app.delete("/api/forms/:slug", async (c) => {
+  const slug = c.req.param("slug");
+  const deleted = await deleteForm(c.env.DB, slug);
+  if (!deleted) {
+    return c.json({ error: "form not found" }, 404);
+  }
+  return c.json({ ok: true, slug }, 200);
 });
 
 // GET /api/forms/:slug — 公开拉取（无鉴权）：命中 → 200 PublicForm（只含 slug + meta

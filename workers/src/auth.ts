@@ -56,7 +56,7 @@ export interface Session {
 
 /** `POST /api/auth/login` 的请求体（§17.2）。 */
 export interface LoginRequest {
-  /** owner 登录密码（与 OWNER_PASSWORD 明文比对）。 */
+  /** owner 登录密码（与 OWNER_PASSWORD 做常量时间比对，见 timingSafeEqualStr / §17.8）。 */
   password: string;
 }
 
@@ -80,6 +80,51 @@ export interface AuthErrorBody {
  */
 export interface AuthVariables {
   session: Session;
+}
+
+// ---------------------------------------------------------------------------
+// 常量时间密码比较（§17.8，安全 nit）（实现留给 implementer）
+// ---------------------------------------------------------------------------
+
+/**
+ * 常量时间字符串比较（§17.8）。供 `POST /api/auth/login` 比对提交密码与 `OWNER_PASSWORD`，
+ * 替代朴素的 `===`/`!==`（短路比较会泄漏「第几位开始不同」的时序信号，给计时攻击逐位猜
+ * 密码的可乘之机）。
+ *
+ * 契约（实现在合约内）：
+ * - 比对耗时只与输入长度有关、与首个不同位的位置无关——**全程不短路**（不在第一个不同字节
+ *   就提前 return）。
+ * - 实现思路：`TextEncoder` 把两侧编码成字节，逐字节异或累积（`acc |= ai ^ bi`），最后用
+ *   `acc === 0` 且长度相等判等。长度不同 → 返回 `false`，但仍跑完固定步数、不提前 return。
+ * - 入参与返回都不含也不回显任何 secret；只返回布尔，绝不把密码 / secret 写进日志或响应（§17.7）。
+ *
+ * `AUTH_SECRET` 的验签由 `hono/jwt` 的 HMAC 负责（已抗时序），不走本 helper。
+ *
+ * @param a 一侧字符串（如提交的密码）。
+ * @param b 另一侧字符串（如 OWNER_PASSWORD）。
+ * @returns 两串内容是否相等（常量时间）。
+ */
+export function timingSafeEqualStr(a: string, b: string): boolean {
+  // Encode both sides to bytes; comparison cost tracks input length, not the
+  // position of the first differing byte (§17.8). We never early-return on a
+  // mismatch — the loop always runs the full width of the longer operand.
+  const enc = new TextEncoder();
+  const aBytes = enc.encode(a);
+  const bBytes = enc.encode(b);
+
+  // A length mismatch is a definite non-match, but we still walk a fixed number
+  // of steps (the longer length) and fold the length delta into the accumulator
+  // so we don't short-circuit on the cheap `length` signal.
+  const len = Math.max(aBytes.length, bBytes.length);
+  let acc = aBytes.length ^ bBytes.length;
+  for (let i = 0; i < len; i++) {
+    // Out-of-range indices read as 0 from a typed array; XOR them in regardless
+    // so a shorter operand can never short-circuit the walk.
+    const ai = i < aBytes.length ? aBytes[i] : 0;
+    const bi = i < bBytes.length ? bBytes[i] : 0;
+    acc |= ai ^ bi;
+  }
+  return acc === 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -3,11 +3,14 @@ import { vi } from "vitest";
 import {
   parseSubmitRequest,
   answersToFields,
+  validateAnswers,
   writeToBitable,
+  AnswersValidationError,
   BitableWriteError,
   FEISHU_BITABLE_RECORDS_URL,
   type SubmitAnswer,
 } from "../src/submit";
+import type { Field } from "../src/forms";
 import { getFeishuTenantToken, FeishuTokenError, FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Inner-loop unit specs for the pure / single-upstream-call seams behind
@@ -132,6 +135,75 @@ describe("answersToFields (SPEC.md §15.3 answers → fields mapping)", () => {
 
     // key = label, value = value (string as-is, string[] as-is — no conversion).
     expect(fields).toEqual({ 姓名: "张三", 兴趣: ["阅读", "运动"] });
+  });
+});
+
+describe("validateAnswers (SPEC.md §20.3 必填校验)", () => {
+  // 一个必填文本字段 + 一个非必填文本字段。匹配键是 label（§15.3 / §20.3 约定）。
+  const FIELDS: Field[] = [
+    { id: "f_name", type: "text", label: "姓名", required: true },
+    { id: "f_age", type: "number", label: "年龄" },
+  ];
+  // 一个必填多选字段，用于「空数组视为未填」一支。
+  const MULTI_FIELDS: Field[] = [
+    { id: "f_hobby", type: "checkbox", label: "兴趣", required: true },
+  ];
+
+  it("does not throw when every required field has a non-empty answer", () => {
+    expect(() => validateAnswers(FIELDS, [{ label: "姓名", value: "张三" }])).not.toThrow();
+  });
+
+  it("does not throw when an OPTIONAL field is omitted (only required is enforced)", () => {
+    // 年龄非必填、整条缺失 → 仍通过（只校验 required）。
+    expect(() => validateAnswers(FIELDS, [{ label: "姓名", value: "张三" }])).not.toThrow();
+  });
+
+  it("throws AnswersValidationError when a required field's answer is missing", () => {
+    // answers 里没有「姓名」这条 → 漏填必填 → 抛错。
+    expect(() => validateAnswers(FIELDS, [{ label: "年龄", value: "30" }])).toThrow(
+      AnswersValidationError,
+    );
+  });
+
+  it("throws AnswersValidationError when a required field's value is an empty string", () => {
+    expect(() => validateAnswers(FIELDS, [{ label: "姓名", value: "" }])).toThrow(
+      AnswersValidationError,
+    );
+  });
+
+  it("treats a whitespace-only value as empty for a required field", () => {
+    expect(() => validateAnswers(FIELDS, [{ label: "姓名", value: "   " }])).toThrow(
+      AnswersValidationError,
+    );
+  });
+
+  it("throws AnswersValidationError when a required multi-select value is an empty array", () => {
+    expect(() => validateAnswers(MULTI_FIELDS, [{ label: "兴趣", value: [] }])).toThrow(
+      AnswersValidationError,
+    );
+  });
+
+  it("does not throw when a required multi-select has at least one selection", () => {
+    expect(() => validateAnswers(MULTI_FIELDS, [{ label: "兴趣", value: ["阅读"] }])).not.toThrow();
+  });
+
+  it("does not throw on a form with no required fields even when answers are sparse", () => {
+    const noRequired: Field[] = [{ id: "f_age", type: "number", label: "年龄" }];
+    expect(() => validateAnswers(noRequired, [{ label: "年龄", value: "30" }])).not.toThrow();
+  });
+
+  it("the thrown message names the offending field but carries no owner credential", () => {
+    const err = (() => {
+      try {
+        validateAnswers(FIELDS, [{ label: "年龄", value: "30" }]);
+      } catch (e) {
+        return e;
+      }
+      return undefined;
+    })();
+    expect(err).toBeInstanceOf(AnswersValidationError);
+    // 非敏感的字段名可入文案（帮答题者修正，§20.4）。
+    expect((err as Error).message).toContain("姓名");
   });
 });
 
