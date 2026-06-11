@@ -267,6 +267,66 @@ export async function getMaskedConfig(db: D1Database, key: CryptoKey): Promise<M
   };
 }
 
+/**
+ * Read the single config row and decrypt it into the in-Worker {@link OwnerConfig}
+ * view — the **plaintext** form, for later features that actually call upstream
+ * (the LLM proxy `POST /api/chat`, write-to-Feishu). See SPEC.md §13.1.
+ *
+ * - Secret fields (DeepSeek key, Feishu secret) are **decrypted** with `key` to
+ *   their full plaintext (NOT masked — the proxy needs the real key for the
+ *   upstream `Authorization` header). Unlike {@link getMaskedConfig}, this view
+ *   is internal-only and must NEVER be returned to clients.
+ * - A block is `null` when its secret was never configured (no cipher/iv): an
+ *   unconfigured DeepSeek block → `deepseek: null` (the proxy turns this into a
+ *   `409`); an unconfigured Feishu block → `feishu: null`.
+ * - When the row does not exist at all, every block is `null` and `updatedAt` is
+ *   `null` (the never-configured state).
+ *
+ * @throws if a stored cipher/iv fails to authenticate under `key`
+ *   (tampering / wrong CONFIG_KEY) — surfaced by {@link decryptSecret}.
+ */
+export async function getOwnerConfig(db: D1Database, key: CryptoKey): Promise<OwnerConfig> {
+  const row = await db
+    .prepare(
+      `SELECT
+         deepseek_key_cipher, deepseek_key_iv, deepseek_model,
+         feishu_app_id, feishu_secret_cipher, feishu_secret_iv, feishu_app_token, feishu_table_id,
+         updated_at
+       FROM owner_config WHERE owner_id = ?`,
+    )
+    .bind(DEFAULT_OWNER_ID)
+    .first<ConfigRow>();
+
+  // Never configured at all → every block null (the never-configured state).
+  if (row === null) {
+    return { deepseek: null, feishu: null, updatedAt: null };
+  }
+
+  // DeepSeek block is present only when its secret was actually sealed (cipher+iv).
+  // A missing cipher means "never configured" → deepseek: null (the proxy → 409).
+  let deepseek: OwnerConfig["deepseek"] = null;
+  if (row.deepseek_key_cipher !== null && row.deepseek_key_iv !== null) {
+    deepseek = {
+      apiKey: await decryptSecret(row.deepseek_key_cipher, row.deepseek_key_iv, key),
+      model: row.deepseek_model,
+    };
+  }
+
+  // Feishu block is present only when its secret was sealed (cipher+iv); the
+  // non-secret fields ride along as plaintext.
+  let feishu: OwnerConfig["feishu"] = null;
+  if (row.feishu_secret_cipher !== null && row.feishu_secret_iv !== null) {
+    feishu = {
+      appId: row.feishu_app_id ?? "",
+      appSecret: await decryptSecret(row.feishu_secret_cipher, row.feishu_secret_iv, key),
+      appToken: row.feishu_app_token ?? "",
+      tableId: row.feishu_table_id ?? "",
+    };
+  }
+
+  return { deepseek, feishu, updatedAt: row.updated_at };
+}
+
 /** Decrypt a stored secret and mask its plaintext; `null`/empty cipher stays `null` ("never set"). */
 async function maskStored(
   cipher: string | null,

@@ -573,3 +573,80 @@ CREATE TABLE IF NOT EXISTS owner_config (
 
 - 密文/iv 成对：`*_cipher` 与对应 `*_iv` 要么同时有值、要么同时为 `NULL`。
 - 单行约束靠固定主键实现；后续接鉴权时把 `owner_id` 换成真实租户键即可平滑扩成多行。
+
+---
+
+## 13. 后端 · LLM 代理 `POST /api/chat`（用 owner key 直连 DeepSeek，流式透传）
+
+> **与第 8/12 节的关系：** 第 8 节描述「纯设计器」形态——设计态浏览器**直连** LLM（BYOK，key 在浏览器）。本节面向**发布型表单**形态：owner 的 DeepSeek key 已由 §12 加密存进 D1，浏览器**不再持有 key**；对话式设计走一个 Worker 代理 `POST /api/chat`，由 Worker 用 owner 的明文 key 直连上游 DeepSeek，把上游的流式响应**原样透传**回前端。这样 key 永不出现在浏览器侧。
+>
+> **直连上游：** Worker 直接打 `https://api.deepseek.com/chat/completions`（DeepSeek 的 OpenAI 兼容端点），**不**经 OpenRouter 或其它中转。
+>
+> **本节范围（第一刀，仅 Worker 端）：** `POST /api/chat` 的请求形状、SSE 流式响应、用 owner key 直连、model 默认、未配置/上游错误的状态码与体、安全约束。
+>
+> **不在本节：** 前端 `flow.jsx` 接入真代理（替换浏览器直连）是单独一期；多轮 Agent loop / 工具执行编排仍在客户端（§4），本代理只负责「一次 LLM 调用的转发」。鉴权 / 多租户仍按 §12 的 MVP 单 owner 假设（固定 `owner_id`）。
+
+### 13.1 端点职责
+
+`POST /api/chat` 是一个**薄转发层**：吃 OpenAI 风格的 chat 请求，用 owner 自己的 DeepSeek key 向上游发起**流式** `chat/completions`，把上游 SSE 字节流原样回写给前端。Worker 不解析、不重组、不缓冲上游的流，只透传。
+
+Worker 内部流程：
+
+```
+1) importConfigKey(env.CONFIG_KEY)                  ← 拿到 AES-GCM 主密钥（§12.2）
+2) getOwnerConfig(env.DB, key)                       ← 读单行 + 解密 → OwnerConfig 内部视图
+3) 若 owner.deepseek === null（未配 DeepSeek key）  → 409 { error }，不打上游
+4) fetch https://api.deepseek.com/chat/completions   ← 用 owner 明文 key
+     headers: Authorization: Bearer <ownerKey>, content-type: application/json
+     body: { model, messages, tools?, stream: true }
+       - model = owner.deepseek.model || "deepseek-chat"
+       - messages / tools 透传自请求体
+5) 上游 2xx          → 把上游响应体（SSE）原样透传，Content-Type: text/event-stream
+   上游 4xx/5xx       → 包装成可辨识错误响应（见 §13.4），绝不回显 owner key
+```
+
+> **解密后的明文 key 只进 Authorization 头**：它从 `getOwnerConfig` 出来后，唯一用途是拼 `Authorization: Bearer <ownerKey>` 发往上游，绝不写进返回给前端的任何字段、日志、或错误体（§13.5）。
+
+### 13.2 请求契约（`ChatRequest`）
+
+请求体（JSON）：
+
+```jsonc
+{
+  "messages": [                       // 必填，非空数组；OpenAI 风格的对话消息
+    { "role": "user", "content": "帮我加一个邮箱字段" }
+  ],
+  "tools": [                          // 可选；function-calling 工具数组，原样透传给上游
+    { "type": "function", "function": { "name": "add_field", "parameters": { } } }
+  ]
+}
+```
+
+- 本刀只接 `messages`（必填）与 `tools`（可选）；`model`、温度等参数**由后端补默认**，前端不传。`messages` / `tools` 的具体内部形状对代理是不透明的（opaque）——Worker 不校验其内部结构，只整体透传给上游。
+- `messages` 缺失 / 非数组 / 空数组 → `400 { error }`，不打上游。
+- `stream` 始终由 Worker 强制为 `true`（前端不能关流）；即便请求体里带了 `stream`，以 Worker 的 `true` 为准。
+
+### 13.3 成功响应（流式 SSE 透传）
+
+- 上游返回 2xx 时，Worker 以 `200`、`Content-Type: text/event-stream` 把**上游响应体原样**流回前端（不缓冲、不改写 SSE 事件）。
+- 前端按标准 SSE / OpenAI 流式协议消费（`data:` 行、`[DONE]` 终止符由上游产生，Worker 不合成）。
+- 流的内容形状（`delta`、`tool_calls` 分片等）是上游 DeepSeek 的协议，本代理不定义、不转译。
+
+### 13.4 错误响应（状态码 + `{ error }`）
+
+| 情况 | 状态码 | 响应体 | 说明 |
+|---|---|---|---|
+| owner 未配 DeepSeek key | `409` | `{ "error": "owner 未配置 DeepSeek" }` | 不打上游；前端据此引导去「集成设置」（§12）|
+| `messages` 缺失 / 非数组 / 空 | `400` | `{ "error": "messages is required" }` | 不打上游 |
+| 请求体非合法 JSON | `400` | `{ "error": "invalid JSON body" }` | 不打上游 |
+| 上游 4xx（如 key 失效、参数错） | 透传上游状态码（或归一为 `502`，见下） | `{ "error": "..." }` | 错误体里**不含 owner key**；可携带上游的错误摘要供排障 |
+| 上游 5xx / 不可达（额度耗尽、超时等） | `502` | `{ "error": "..." }` | 同上，不泄漏 key |
+
+- **错误体一律 `application/json` 的 `{ error }`**（非流式），与成功的 SSE 流区分开——前端先看状态码与 `Content-Type` 决定走流式消费还是错误分支。
+- 上游错误的状态码归一策略（透传上游码 vs 统一 `502`）由 implementer 在合约内自行决定，但**必须**满足：(a) 可辨识为「上游出错」而非代理自身 bug；(b) 错误体绝不包含 owner 的明文 key。
+
+### 13.5 安全
+
+- **明文 key 只进 Authorization、不出网（除上游）：** owner 的 DeepSeek 明文 key 仅在 Worker 内由 `getOwnerConfig` 解密得到，唯一去向是发往 `api.deepseek.com` 的 `Authorization: Bearer` 头。它**绝不**出现在：返回给前端的任何响应（成功流或错误体）、HTTP 头回显、日志。
+- **不回显上游凭据相关信息：** 上游 4xx（如 401 invalid key）转成给前端的错误时，只保留「上游拒绝/出错」语义，不把 owner key 或可反推 key 的内容带回。
+- **沿用 §12 的加密边界：** key 的解密只发生在 Worker 内（`CONFIG_KEY` + `getOwnerConfig`）；D1 里仍是密文，浏览器侧自始至终拿不到明文。
