@@ -62,3 +62,24 @@ export async function mockChat(page, { meta = META, fields = FIELDS } = {}) {
     await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body });
   });
 }
+
+/**
+ * Install the canned POST /api/forms route (SPEC §16.2 publish) on a Playwright page.
+ * Returns 200 with a PublishResult `{ slug }` so PublishFeedback succeeds without a
+ * backend: it renders the public fill link /f/:slug and fires onPublished → header LIVE.
+ * Only intercepts the POST; other methods (the §21 list/patch/delete) fall through.
+ * Call before navigation (or at least before clicking 发布).
+ */
+export async function mockPublish(page, { slug = "f8Kq2pXa" } = {}) {
+  await page.route("**/api/forms", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ slug }),
+    });
+  });
+}
