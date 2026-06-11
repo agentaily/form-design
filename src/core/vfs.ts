@@ -1,26 +1,39 @@
-// vfs.js — Virtual File System (SPEC §2).
+// vfs.ts — Virtual File System (SPEC §2).
 // An in-memory map that the Agent edits and the renderer reads from.
 // Operations mutate the vfs object in place (matches "改写 VFS" in the spec).
 
-/** @typedef {{ path: string, content: string, type: 'html'|'jsx'|'json', updatedAt: number }} VFile */
-/** @typedef {Record<string, VFile>} VFS */
+export type VFileType = "html" | "jsx" | "json";
 
-const EXT_TYPE = { html: "html", htm: "html", jsx: "jsx", js: "jsx", json: "json" };
+export interface VFile {
+  path: string;
+  content: string;
+  type: VFileType;
+  updatedAt: number;
+}
+
+export type VFS = Record<string, VFile>;
+
+const EXT_TYPE: Record<string, VFileType> = {
+  html: "html",
+  htm: "html",
+  jsx: "jsx",
+  js: "jsx",
+  json: "json",
+};
 
 /** Infer a VFile.type from its path extension. Unknown → 'jsx'. */
-export function inferType(path) {
-  const ext = String(path).split(".").pop().toLowerCase();
+export function inferType(path: string): VFileType {
+  const ext = (String(path).split(".").pop() || "").toLowerCase();
   return EXT_TYPE[ext] || "jsx";
 }
 
-function makeFile(path, content, type) {
+function makeFile(path: string, content: string, type?: VFileType): VFile {
   return { path, content, type: type || inferType(path), updatedAt: Date.now() };
 }
 
 /** Create a VFS from a `{ path: content }` map. */
-export function createVfs(files = {}) {
-  /** @type {VFS} */
-  const vfs = {};
+export function createVfs(files: Record<string, string> = {}): VFS {
+  const vfs: VFS = {};
   for (const [path, content] of Object.entries(files)) {
     vfs[path] = makeFile(path, content);
   }
@@ -28,19 +41,19 @@ export function createVfs(files = {}) {
 }
 
 /** Sorted list of file paths (the "file tree"). */
-export function listFiles(vfs) {
+export function listFiles(vfs: VFS): string[] {
   return Object.keys(vfs).sort();
 }
 
 /** Read a file's content. Throws if missing. */
-export function readFile(vfs, path) {
+export function readFile(vfs: VFS, path: string): string {
   const f = vfs[path];
   if (!f) throw new Error(`File not found: ${path}`);
   return f.content;
 }
 
 /** Create or fully overwrite a file. */
-export function writeFile(vfs, path, content, type) {
+export function writeFile(vfs: VFS, path: string, content: string, type?: VFileType): VFile {
   vfs[path] = makeFile(path, content, type);
   return vfs[path];
 }
@@ -49,7 +62,7 @@ export function writeFile(vfs, path, content, type) {
  * Replace the single unique occurrence of `oldStr` with `newStr`.
  * Throws if the file is missing, `oldStr` is empty, or it does not match exactly once.
  */
-export function strReplace(vfs, path, oldStr, newStr) {
+export function strReplace(vfs: VFS, path: string, oldStr: string, newStr: string): VFile {
   const f = vfs[path];
   if (!f) throw new Error(`File not found: ${path}`);
   if (oldStr === "") throw new Error("old_str must not be empty");
@@ -62,7 +75,7 @@ export function strReplace(vfs, path, oldStr, newStr) {
 }
 
 /** Delete a file. Throws if missing. */
-export function deleteFile(vfs, path) {
+export function deleteFile(vfs: VFS, path: string): boolean {
   if (!vfs[path]) throw new Error(`File not found: ${path}`);
   delete vfs[path];
   return true;

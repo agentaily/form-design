@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { createToolExecutor, ALL_TOOLS, FILE_TOOLS, FORM_TOOLS } from "../../src/core/tools.js";
-import { createVfs, readFile } from "../../src/core/vfs.js";
-import { createSchema } from "../../src/core/schema.js";
+import { createToolExecutor, ALL_TOOLS, FILE_TOOLS, FORM_TOOLS } from "../../src/core/tools";
+import { createVfs, readFile } from "../../src/core/vfs";
+import { createSchema } from "../../src/core/schema";
 
 function setup() {
   const vfs = createVfs({ "/form.jsx": "const Form = () => null;" });

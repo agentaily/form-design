@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { mergeBatch, MessageQueue } from "../../src/core/queue.js";
+import { mergeBatch, MessageQueue } from "../../src/core/queue";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 function deferred() {

@@ -8,7 +8,7 @@ import {
   setValidation,
   validateValue,
   FIELD_TYPES,
-} from "../../src/core/schema.js";
+} from "../../src/core/schema";
 
 const txt = (id, label = "L") => ({ id, type: "text", label });
 

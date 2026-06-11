@@ -7,7 +7,7 @@ import {
   writeFile,
   strReplace,
   deleteFile,
-} from "../../src/core/vfs.js";
+} from "../../src/core/vfs";
 
 describe("vfs · type inference", () => {
   it("maps extensions to VFile types", () => {

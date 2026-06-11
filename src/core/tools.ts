@@ -1,8 +1,9 @@
-// tools.js — Tool definitions (Anthropic tool-use schema) + client-side Tool
+// tools.ts — Tool definitions (Anthropic tool-use schema) + client-side Tool
 // Executor (SPEC §3). Our program executes the tools; the model only returns
 // structured tool_use blocks. The executor dispatches to VFS / schema ops.
 
-import { listFiles, readFile, writeFile, strReplace, deleteFile } from "./vfs.js";
+import { listFiles, readFile, writeFile, strReplace, deleteFile } from "./vfs";
+import type { VFS } from "./vfs";
 import {
   getFormSchema,
   addField,
@@ -10,12 +11,30 @@ import {
   removeField,
   reorderFields,
   setValidation,
-} from "./schema.js";
+} from "./schema";
+import type { Schema } from "./schema";
 
-const str = { type: "string" };
+export interface ToolDef {
+  name: string;
+  description: string;
+  input_schema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
+export type ExecuteTool = (name: string, input?: Record<string, any>) => Promise<unknown>;
+
+export interface ToolContext {
+  vfs: VFS;
+  schema: Schema;
+}
+
+const str = { type: "string" } as const;
 
 /** File-operation tools (SPEC §3.1) — the baseline. */
-export const FILE_TOOLS = [
+export const FILE_TOOLS: ToolDef[] = [
   { name: "list_files", description: "返回文件树。", input_schema: { type: "object", properties: {} } },
   {
     name: "read_file",
@@ -44,7 +63,7 @@ export const FILE_TOOLS = [
 ];
 
 /** Form-operation tools (SPEC §3.2) — the form-collection backbone. */
-export const FORM_TOOLS = [
+export const FORM_TOOLS: ToolDef[] = [
   { name: "get_form_schema", description: "返回当前 schema。", input_schema: { type: "object", properties: {} } },
   {
     name: "add_field",
@@ -77,7 +96,7 @@ export const FORM_TOOLS = [
   },
 ];
 
-export const ALL_TOOLS = [...FILE_TOOLS, ...FORM_TOOLS];
+export const ALL_TOOLS: ToolDef[] = [...FILE_TOOLS, ...FORM_TOOLS];
 
 /**
  * Build a Tool Executor bound to a VFS + schema.
@@ -85,8 +104,8 @@ export const ALL_TOOLS = [...FILE_TOOLS, ...FORM_TOOLS];
  * with the tool's output. Throws on unknown tool or operation failure — the
  * agent loop wraps the throw into an `is_error` tool_result (self-healing).
  */
-export function createToolExecutor({ vfs, schema }) {
-  const handlers = {
+export function createToolExecutor({ vfs, schema }: ToolContext): ExecuteTool {
+  const handlers: Record<string, (input: any) => unknown> = {
     list_files: () => listFiles(vfs),
     read_file: ({ path }) => readFile(vfs, path),
     write_file: ({ path, content }) => {
@@ -109,7 +128,7 @@ export function createToolExecutor({ vfs, schema }) {
     set_validation: ({ id, rules }) => setValidation(schema, id, rules),
   };
 
-  return async function executeTool(name, input) {
+  return async function executeTool(name: string, input?: Record<string, any>): Promise<unknown> {
     const handler = handlers[name];
     if (!handler) throw new Error(`Unknown tool: ${name}`);
     return handler(input || {});

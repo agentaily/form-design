@@ -2,10 +2,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, vi } from "vitest";
 import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
-import { runAgentTurn } from "../../src/core/agentLoop.js";
-import { createToolExecutor } from "../../src/core/tools.js";
-import { createVfs, readFile } from "../../src/core/vfs.js";
-import { createSchema } from "../../src/core/schema.js";
+import { runAgentTurn } from "../../src/core/agentLoop";
+import { createToolExecutor } from "../../src/core/tools";
+import { createVfs, readFile } from "../../src/core/vfs";
+import { createSchema } from "../../src/core/schema";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "features/agent-self-heal.feature"));

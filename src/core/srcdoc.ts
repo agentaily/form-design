@@ -1,8 +1,15 @@
-// srcdoc.js — Render pipeline (SPEC §5). Assemble the VFS into a self-contained
+// srcdoc.ts — Render pipeline (SPEC §5). Assemble the VFS into a self-contained
 // HTML string for iframe `srcdoc`. Design-state only (iframe + Babel standalone).
 
+import type { VFS } from "./vfs";
+
+export interface CdnScript {
+  src: string;
+  integrity: string;
+}
+
 // React 18 UMD + Babel standalone from CDN, with SRI (matches the prototype shell).
-export const CDN_SCRIPTS = [
+export const CDN_SCRIPTS: CdnScript[] = [
   {
     src: "https://unpkg.com/react@18.3.1/umd/react.development.js",
     integrity: "sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L",
@@ -17,7 +24,7 @@ export const CDN_SCRIPTS = [
   },
 ];
 
-function cdnTags() {
+function cdnTags(): string {
   return CDN_SCRIPTS.map(
     (s) => `<script src="${s.src}" integrity="${s.integrity}" crossorigin="anonymous"></script>`,
   ).join("\n");
@@ -25,10 +32,10 @@ function cdnTags() {
 
 /**
  * Compose a complete standalone HTML document.
- * @param {string} head  extra <head> content (title, meta, custom CDNs) — typically /index.html
- * @param {string} jsxBlocks  pre-wrapped <script type="text/babel"> blocks
+ * @param head       extra <head> content (title, meta, custom CDNs) — typically /index.html
+ * @param jsxBlocks  pre-wrapped <script type="text/babel"> blocks
  */
-export function assembleHtml(head, jsxBlocks) {
+export function assembleHtml(head: string, jsxBlocks: string): string {
   return `<!doctype html>
 <html>
 <head>
@@ -44,7 +51,7 @@ ${jsxBlocks}
 }
 
 /** Build the iframe srcdoc string from a VFS (SPEC §5). */
-export function buildSrcDoc(vfs) {
+export function buildSrcDoc(vfs: VFS): string {
   const index = vfs["/index.html"];
   const head = index ? index.content : "";
   const jsxBlocks = Object.values(vfs)

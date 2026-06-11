@@ -18,10 +18,11 @@ rendering, BYOK, publish/collect) lives in **[`SPEC.md`](./SPEC.md)**.
 
 ```bash
 npm install
-npm run dev       # http://localhost:5173
-npm run build     # production bundle to dist/
-npm test          # Vitest: unit (TDD) + BDD (.feature) — jsdom
-npm run test:e2e  # Playwright end-to-end (real browser)
+npm run dev        # http://localhost:5173
+npm run build      # production bundle to dist/
+npm run typecheck  # tsc --noEmit (src/core is TypeScript)
+npm test           # Vitest: unit (TDD) + BDD (.feature) — jsdom
+npm run test:e2e   # Playwright end-to-end (real browser)
 ```
 
 ## How it's wired
@@ -33,13 +34,13 @@ npm run test:e2e  # Playwright end-to-end (real browser)
 - `src/preview.jsx` — live form: `Field` / `Input` / `Textarea` / `Select` / `RadioGroup` / `Checkbox` / `Button`.
 - `src/flow.jsx` — the scripted build sequence + keyword intent handling that drives the demo.
 - `src/app.css` — layout-only styles (page chrome, split, form-card shell); all values reference DS tokens.
-- `src/core/` — the **SPEC architecture's testable core**, implemented test-first
-  (TDD) and framework-agnostic: `vfs.js` (virtual file system), `schema.js`
-  (form schema ops + validation), `tools.js` (Anthropic tool defs + executor),
-  `queue.js` (single-consumer message queue + batch merge), `srcdoc.js`
-  (VFS → iframe srcdoc), `agentLoop.js` (ReAct turn with self-healing). These
-  are the building blocks for the live-LLM product described in `SPEC.md`; the
-  current app UI is still the scripted prototype.
+- `src/core/` — the **SPEC architecture's testable core** (TypeScript, strict),
+  implemented test-first (TDD) and framework-agnostic: `vfs.ts` (virtual file
+  system), `schema.ts` (form schema ops + validation), `tools.ts` (Anthropic
+  tool defs + executor), `queue.ts` (single-consumer message queue + batch
+  merge), `srcdoc.ts` (VFS → iframe srcdoc), `agentLoop.ts` (ReAct turn with
+  self-healing). These are the typed building blocks for the live-LLM product
+  described in `SPEC.md`; the current app UI is still the scripted prototype.
 
 ## Testing
 

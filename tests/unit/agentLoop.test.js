@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { runAgentTurn } from "../../src/core/agentLoop.js";
-import { createToolExecutor } from "../../src/core/tools.js";
-import { createVfs, readFile } from "../../src/core/vfs.js";
-import { createSchema } from "../../src/core/schema.js";
+import { runAgentTurn } from "../../src/core/agentLoop";
+import { createToolExecutor } from "../../src/core/tools";
+import { createVfs, readFile } from "../../src/core/vfs";
+import { createSchema } from "../../src/core/schema";
 
 const text = (t) => ({ type: "text", text: t });
 const toolUse = (id, name, input) => ({ type: "tool_use", id, name, input });

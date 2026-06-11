@@ -1,4 +1,4 @@
-// queue.js — Continuous send: FIFO message queue + single-consumer pump +
+// queue.ts — Continuous send: FIFO message queue + single-consumer pump +
 // batch merge (SPEC §4.1). Decouples user input from agent execution so the
 // user can keep typing while a turn is running.
 
@@ -6,7 +6,20 @@ const MIDWORK_NOTE =
   "以下消息是你处理上一轮时陆续输入的，请按顺序一并处理，而不是当作对上一条输出的回应";
 
 let _uid = 0;
-const uid = () => `q_${(++_uid).toString(36)}`;
+const uid = (): string => `q_${(++_uid).toString(36)}`;
+
+export type QueueStatus = "pending" | "running";
+
+export interface QueueItem {
+  id: string;
+  text: string;
+  ts: number;
+  status: QueueStatus;
+  typedWhileBusy: boolean;
+}
+
+/** A turn runner: takes the merged user input and resolves when the turn ends. */
+export type RunTurn = (merged: string) => Promise<unknown>;
 
 /**
  * Merge a batch of queued messages into a single agent input.
@@ -15,7 +28,7 @@ const uid = () => `q_${(++_uid).toString(36)}`;
  * - If any were typed while the consumer was busy, wrap in a <context> tag so
  *   the model treats them as mid-work input, not a reply to its last output.
  */
-export function mergeBatch(batch) {
+export function mergeBatch(batch: Pick<QueueItem, "text" | "typedWhileBusy">[]): string {
   const typedWhileBusy = batch.some((m) => m.typedWhileBusy);
   const body =
     batch.length === 1
@@ -31,54 +44,61 @@ export function mergeBatch(batch) {
  * consumer loop; extras queue and are atomically batched at the flush point.
  */
 export class MessageQueue {
-  /** @param {(merged: string) => Promise<any>} runTurn */
-  constructor(runTurn) {
-    this.queue = [];
-    this.running = false;
+  queue: QueueItem[] = [];
+  running = false;
+  runTurn: RunTurn;
+  onChange: ((items: QueueItem[]) => void) | null = null; // optional UI hook (renderQueue)
+
+  constructor(runTurn: RunTurn) {
     this.runTurn = runTurn;
-    this.onChange = null; // optional UI hook (renderQueue)
   }
 
-  _emit() {
+  private emit(): void {
     if (this.onChange) this.onChange(this.queue.slice());
   }
 
   /** Enqueue a user message and kick the pump. Returns the queue item. */
-  enqueue(text) {
-    const item = { id: uid(), text, ts: Date.now(), status: "pending", typedWhileBusy: this.running };
+  enqueue(text: string): QueueItem {
+    const item: QueueItem = {
+      id: uid(),
+      text,
+      ts: Date.now(),
+      status: "pending",
+      typedWhileBusy: this.running,
+    };
     this.queue.push(item);
-    this._emit();
-    this.pump();
+    this.emit();
+    void this.pump();
     return item;
   }
 
   /** Cancel a still-pending (not yet consumed) message. */
-  cancel(id) {
+  cancel(id: string): boolean {
     const i = this.queue.findIndex((m) => m.id === id && m.status === "pending");
     if (i < 0) return false;
     this.queue.splice(i, 1);
-    this._emit();
+    this.emit();
     return true;
   }
 
-  pending() {
+  pending(): QueueItem[] {
     return this.queue.filter((m) => m.status === "pending");
   }
 
   /** Idempotent: if a consumer loop is already running, returns immediately. */
-  async pump() {
+  async pump(): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
       while (this.queue.length > 0) {
         const batch = this.queue.splice(0, this.queue.length); // atomic flush
         batch.forEach((m) => (m.status = "running"));
-        this._emit();
+        this.emit();
         await this.runTurn(mergeBatch(batch));
       }
     } finally {
       this.running = false;
-      this._emit();
+      this.emit();
     }
   }
 }

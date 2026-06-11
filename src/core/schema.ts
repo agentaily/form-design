@@ -1,29 +1,64 @@
-// schema.js — Form schema operations (SPEC §3.2).
+// schema.ts — Form schema operations (SPEC §3.2).
 // Schema is the data source of truth: fields / types / validation / field id.
 // Operations mutate the schema object in place.
 
-/**
- * @typedef {{
- *   id: string,
- *   type: 'text'|'number'|'select'|'date'|'checkbox'|'radio'|'file'|'group',
- *   label: string,
- *   required?: boolean,
- *   options?: { label: string, value: string }[],
- *   validation?: { pattern?: string, min?: number, max?: number, message?: string },
- *   children?: Field[],
- * }} Field
- * @typedef {{ fields: Field[] }} Schema
- */
+export type FieldType =
+  | "text"
+  | "number"
+  | "select"
+  | "date"
+  | "checkbox"
+  | "radio"
+  | "file"
+  | "group";
 
-export const FIELD_TYPES = ["text", "number", "select", "date", "checkbox", "radio", "file", "group"];
+export interface FieldOption {
+  label: string;
+  value: string;
+}
+
+export interface ValidationRules {
+  pattern?: string;
+  min?: number;
+  max?: number;
+  message?: string;
+}
+
+export interface Field {
+  id: string;
+  type: FieldType;
+  label: string;
+  required?: boolean;
+  options?: FieldOption[];
+  validation?: ValidationRules;
+  children?: Field[];
+}
+
+/** A field as supplied to add/create — `id` is optional and auto-generated if absent. */
+export type FieldInput = Omit<Field, "id"> & { id?: string };
+
+export interface Schema {
+  fields: Field[];
+}
+
+export const FIELD_TYPES: FieldType[] = [
+  "text",
+  "number",
+  "select",
+  "date",
+  "checkbox",
+  "radio",
+  "file",
+  "group",
+];
 
 let _idCounter = 0;
 /** Deterministic-ish id generator; pass an explicit `field.id` when you need a stable value. */
-export function genFieldId() {
+export function genFieldId(): string {
   return `field_${(++_idCounter).toString(36)}`;
 }
 
-function normalizeField(f) {
+function normalizeField(f: FieldInput): Field {
   if (!f || typeof f !== "object") throw new Error("field must be an object");
   if (!FIELD_TYPES.includes(f.type)) throw new Error(`Unknown field type: ${f.type}`);
   if (!f.label) throw new Error("field.label is required");
@@ -31,26 +66,26 @@ function normalizeField(f) {
 }
 
 /** Create a schema, optionally seeded with fields. */
-export function createSchema(fields = []) {
+export function createSchema(fields: FieldInput[] = []): Schema {
   return { fields: fields.map(normalizeField) };
 }
 
 /** Return the current schema (the source of truth). */
-export function getFormSchema(schema) {
+export function getFormSchema(schema: Schema): Schema {
   return schema;
 }
 
-function indexOf(schema, id) {
+function indexOf(schema: Schema, id: string): number {
   return schema.fields.findIndex((f) => f.id === id);
 }
-function mustFind(schema, id) {
+function mustFind(schema: Schema, id: string): Field {
   const i = indexOf(schema, id);
   if (i < 0) throw new Error(`Field not found: ${id}`);
   return schema.fields[i];
 }
 
 /** Add a field. Optional `index` inserts at a position (default: append). */
-export function addField(schema, field, index) {
+export function addField(schema: Schema, field: FieldInput, index?: number): Field {
   const f = normalizeField(field);
   if (indexOf(schema, f.id) >= 0) throw new Error(`Duplicate field id: ${f.id}`);
   if (index == null) schema.fields.push(f);
@@ -59,7 +94,7 @@ export function addField(schema, field, index) {
 }
 
 /** Patch a field's properties. */
-export function updateField(schema, id, patch) {
+export function updateField(schema: Schema, id: string, patch: Partial<Field>): Field {
   const f = mustFind(schema, id);
   if (patch && patch.type && !FIELD_TYPES.includes(patch.type)) {
     throw new Error(`Unknown field type: ${patch.type}`);
@@ -69,14 +104,14 @@ export function updateField(schema, id, patch) {
 }
 
 /** Remove a field by id. Returns the removed field. */
-export function removeField(schema, id) {
+export function removeField(schema: Schema, id: string): Field {
   const i = indexOf(schema, id);
   if (i < 0) throw new Error(`Field not found: ${id}`);
   return schema.fields.splice(i, 1)[0];
 }
 
 /** Reorder fields. `ids` must be a permutation of the existing field ids. */
-export function reorderFields(schema, ids) {
+export function reorderFields(schema: Schema, ids: string[]): string[] {
   const existing = schema.fields.map((f) => f.id);
   const sameSize = ids.length === existing.length;
   const sameSet = sameSize && ids.every((id) => existing.includes(id));
@@ -86,7 +121,7 @@ export function reorderFields(schema, ids) {
 }
 
 /** Merge validation rules onto a field. */
-export function setValidation(schema, id, rules) {
+export function setValidation(schema: Schema, id: string, rules: ValidationRules): ValidationRules {
   const f = mustFind(schema, id);
   f.validation = { ...(f.validation || {}), ...rules };
   return f.validation;
@@ -96,8 +131,9 @@ export function setValidation(schema, id, rules) {
  * Validate a value against a field's rules. Returns null when valid, else a message.
  * Used by both the live preview and the published renderer.
  */
-export function validateValue(field, value) {
-  const empty = value == null || value === "" || (Array.isArray(value) && value.length === 0);
+export function validateValue(field: Field, value: unknown): string | null {
+  const empty =
+    value == null || value === "" || (Array.isArray(value) && value.length === 0);
   if (field.required && empty) return field.validation?.message || "此项必填";
   if (empty) return null;
   const v = field.validation || {};

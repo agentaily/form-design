@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildSrcDoc, assembleHtml, CDN_SCRIPTS } from "../../src/core/srcdoc.js";
-import { createVfs } from "../../src/core/vfs.js";
+import { buildSrcDoc, assembleHtml, CDN_SCRIPTS } from "../../src/core/srcdoc";
+import { createVfs } from "../../src/core/vfs";
 
 describe("srcdoc · assembleHtml", () => {
   it("produces a standalone doc with #root, React/Babel CDN, and the jsx blocks", () => {
