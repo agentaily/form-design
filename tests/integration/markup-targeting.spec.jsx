@@ -5,7 +5,7 @@ import { expect, vi } from "vitest";
 import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 // /pure → no auto afterEach(cleanup); @amiceli runs each Gherkin step as its own
 // test, so we must clean up per scenario (AfterEachScenario), not per step.
-import { render, screen, fireEvent, act, cleanup } from "@testing-library/react/pure";
+import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { FormPreview } from "../../src/preview.jsx";
 import { MarkupLayer } from "../../src/markup.jsx";
@@ -27,19 +27,43 @@ const FIELDS = [
   { id: "email", type: "email", label: "邮箱", required: true, placeholder: "you@co.com" },
 ];
 
-// Drive the scripted runner's setTimeout-based timeline to completion.
-async function runScript() {
-  await act(async () => {
-    await vi.runAllTimersAsync();
+// The designer now streams from POST /api/chat; inject a fake chat so seeding the
+// Background form is deterministic: turn 1 sets the cover + adds 姓名/邮箱 via tool
+// calls, turn 2 (and any later send) closes with prose so the loop stops.
+function fakeBuildChat() {
+  let call = 0;
+  return vi.fn(async ({ onText }) => {
+    call += 1;
+    if (call === 1) {
+      return {
+        text: "",
+        toolCalls: [
+          { id: "m", name: "set_form_meta", argsRaw: JSON.stringify(META) },
+          {
+            id: "a",
+            name: "add_field",
+            argsRaw: JSON.stringify({ type: "text", label: "姓名", required: true }),
+          },
+          {
+            id: "b",
+            name: "add_field",
+            argsRaw: JSON.stringify({ type: "email", label: "邮箱", required: true }),
+          },
+        ],
+      };
+    }
+    onText?.("好了");
+    return { text: "好了", toolCalls: [] };
   });
 }
 
 // Build the seeded form in the App via the starter prompt, leaving the app on
-// the 预览 tab with fields present (the feature Background).
+// the 预览 tab with fields present (the feature Background). Resolves once the
+// agent turn settles (指向修改 enabled ⇒ building false + fields present).
 async function buildSeededApp() {
-  render(<App />);
+  render(<App chat={fakeBuildChat()} />);
   fireEvent.click(screen.getByText("做一个线下活动报名表"));
-  await runScript();
+  await waitFor(() => expect(screen.getByRole("button", { name: "指向修改" })).toBeEnabled());
 }
 
 // jsdom has no real layout, so `document.elementFromPoint` (used by MarkupLayer to
@@ -72,15 +96,11 @@ function renderLayerWithSelection(target) {
 describeFeature(
   feature,
   ({ Scenario, ScenarioOutline, Background, BeforeEachScenario, AfterEachScenario }) => {
-    BeforeEachScenario(() => {
-      vi.useFakeTimers();
-    });
     AfterEachScenario(() => {
       cleanup();
       vi.restoreAllMocks();
       // elementFromPoint is assigned (not spied) by stubTarget; remove it.
       delete document.elementFromPoint;
-      vi.useRealTimers();
     });
 
     // Background steps are declared but the real seeding happens inside the Given
@@ -198,7 +218,8 @@ describeFeature(
         const ta = document.querySelector(".d-markup__ta");
         fireEvent.change(ta, { target: { value: "改成『立即报名』" } });
         fireEvent.click(screen.getByRole("button", { name: /发送到对话/ }));
-        await runScript();
+        // the tagged text is enqueued as a user turn (then the agent picks it up).
+        await screen.findByText("〔提交按钮 · 按钮〕改成『立即报名』");
       });
       Then("左侧对话新增一条用户消息「〔提交按钮 · 按钮〕改成『立即报名』」", () => {
         // user-role turns render inside .d-turn--user; the tagged text is the message.

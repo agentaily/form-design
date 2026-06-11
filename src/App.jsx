@@ -1,4 +1,5 @@
-// App.jsx — App shell: header, split layout, scripted runner, schema, share dialog.
+// App.jsx — App shell: header, split layout, live agent loop (streamed prose +
+// tool-call cards over POST /api/chat), schema view, share dialog.
 // All chrome composed from @agentaily/design-system.
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -9,15 +10,21 @@ import {
   Dialog,
   SchemaDisplay,
   Queue,
+  Suggestions,
 } from "@agentaily/design-system";
 
-import { buildScript, intentReply, uid, INITIAL_META } from "./flow.jsx";
 import { Icon, ChatThread, ChatComposer } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
 import { MarkupLayer } from "./markup.jsx";
 import { MessageQueue } from "./core/queue";
+import { createFormModel, applyDesignerTool, uid, DESIGNER_SYSTEM } from "./core/designerTools";
+import { runDesignerTurn } from "./core/designerLoop";
+import { streamDesignerChat } from "./core/designerChat";
+import { ApiError } from "./core/apiClient";
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Fixed follow-up prompt chips shown once a form exists (a product affordance,
+// not model output) — keeps "继续改" discoverable. Each routes through the agent.
+const FOLLOWUPS = ["加一个备注字段", "把手机号设为必填", "换个封面文案"];
 
 // reactive media query — drives the single-column mobile layout.
 // Defensive: in non-browser/test environments without matchMedia, default to
@@ -80,7 +87,7 @@ function schemaFor(meta, fields) {
   return out;
 }
 
-export default function App() {
+export default function App({ chat = streamDesignerChat } = {}) {
   const [t, setTweak] = useUiState(UI_DEFAULTS);
   const [messages, setMessages] = useState([]);
   const [meta, setMeta] = useState(null);
@@ -99,21 +106,18 @@ export default function App() {
   // continuous-send buffer (SPEC §4.1): pending messages shown above the composer.
   const [queueItems, setQueueItems] = useState([]);
   const draggingRef = useRef(false);
-  // Latest fields, read inside async turns so a buffered batch sees current state.
-  const fieldsRef = useRef(fields);
-  // Whether the first message has bootstrapped the form (single scripted build).
-  const initRef = useRef(false);
-  // Always points at the latest onSend. The scripted runner stores suggestion
-  // handlers in message state at build time; routing them through this ref keeps
-  // them from capturing a stale onSend (one that still sees fields=[]/meta=null).
-  const onSendRef = useRef(null);
+  // Canonical form model the agent tools mutate; React `meta`/`fields` mirror it
+  // for rendering (synced after each tool batch via syncModel).
+  const modelRef = useRef(null);
+  if (!modelRef.current) modelRef.current = createFormModel();
+  // LLM message history for the whole session (OpenAI shape), seeded with the
+  // designer system prompt; user/assistant/tool turns accumulate across sends.
+  const historyRef = useRef(null);
+  if (!historyRef.current) historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", t.theme === "light" ? "light" : "dark");
   }, [t.theme]);
-  useEffect(() => {
-    fieldsRef.current = fields;
-  }, [fields]);
 
   const setValue = useCallback((id, v) => setValuesState((s) => ({ ...s, [id]: v })), []);
   const pushMsg = (m) => {
@@ -123,147 +127,116 @@ export default function App() {
   };
   const patchMsg = (id, patch) =>
     setMessages((ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  const removeMsg = (id) => setMessages((ms) => ms.filter((m) => m.id !== id));
+  // Clear the entrance-animation flag ~600ms after a field appears — on the model
+  // (source of truth) AND the rendered mirror, so a later sync won't re-trigger it.
   const clearNew = (fid) =>
-    setTimeout(
-      () => setFields((fs) => fs.map((f) => (f.id === fid ? { ...f, _new: false } : f))),
-      600,
-    );
+    setTimeout(() => {
+      const f = modelRef.current.fields.find((x) => x.id === fid);
+      if (f) f._new = false;
+      setFields(modelRef.current.fields.map((x) => ({ ...x })));
+    }, 600);
 
-  const runBuild = async (brief) => {
-    for (const step of buildScript(brief)) {
-      if (step.t === "reasoning") {
-        const id = pushMsg({
-          role: "assistant",
-          kind: "reasoning",
-          steps: step.steps,
-          duration: step.duration,
-          streaming: true,
-        });
-        await sleep(1500);
-        patchMsg(id, { streaming: false });
-        await sleep(350);
-      } else if (step.t === "text") {
-        const id = pushMsg({
-          role: "assistant",
-          kind: "text",
-          text: step.text,
-          streaming: true,
-          suggestions: step.suggestions,
-          onSuggest: (s) => onSendRef.current(s),
-        });
-        await sleep(Math.min(1100, 350 + step.text.length * 14));
-        patchMsg(id, { streaming: false });
-        await sleep(250);
-      } else if (step.t === "meta") {
-        setMeta(INITIAL_META);
-        await sleep(500);
-      } else if (step.t === "field") {
-        const fld = { ...step.field, id: uid("fld"), _new: true };
-        const tid = pushMsg({
-          role: "assistant",
-          kind: "tool",
-          name: "add_field",
-          args: {
-            type: fld.type,
-            label: fld.label,
-            ...(fld.options ? { options: fld.options } : {}),
-            required: !!fld.required,
-          },
-          result: fld._say,
-          status: "running",
-        });
-        await sleep(360);
-        setFields((fs) => [...fs, fld]);
-        clearNew(fld.id);
-        patchMsg(tid, { status: "done" });
-        await sleep(300);
-      }
-    }
+  // Push the canonical model into React state for rendering; schedule the
+  // entrance animation to clear for any freshly-added/updated fields.
+  const syncModel = () => {
+    const m = modelRef.current;
+    setMeta(m.meta ? { ...m.meta } : null);
+    setFields(m.fields.map((f) => ({ ...f })));
+    m.fields.forEach((f) => {
+      if (f._new) clearNew(f.id);
+    });
   };
 
-  // apply a single resolved intent to form state (no chat side-effects)
-  const applyIntent = (r) => {
-    if (r.kind === "add") {
-      const fld = { ...r.field, id: uid("fld"), _new: true };
-      setFields((fs) => {
-        const ci = fs.findIndex((x) => x.type === "consent");
-        if (ci >= 0) {
-          const n = [...fs];
-          n.splice(ci, 0, fld);
-          return n;
-        }
-        return [...fs, fld];
-      });
-      clearNew(fld.id);
-    } else if (r.kind === "remove") {
-      setFields((fs) => fs.slice(0, -1));
-    } else if (r.kind === "require") {
-      setFields((fs) =>
-        fs.map((f) =>
-          r.match && f.label.includes(r.match) ? { ...f, required: true, _new: true } : f,
-        ),
-      );
-      if (r.match) setTimeout(() => setFields((fs) => fs.map((f) => ({ ...f, _new: false }))), 700);
-    } else if (r.kind === "meta") {
-      setMeta((m) => ({ ...m, ...r.set }));
-    } else if (r.kind === "publish") {
-      setPublished(true);
+  // Turn a backend/network failure into a human message for the thread.
+  const errorMessage = (e) => {
+    if (e instanceof ApiError) {
+      if (e.status === 401) return "请先在「集成设置」登录后再使用对话设计。";
+      return e.message || `对话服务出错（${e.status}）。`;
     }
+    return "无法连接到对话服务，请检查网络或后端地址（VITE_API_BASE）。";
   };
 
-  // process a BUFFER of follow-up prompts together: one set of tool calls, one
-  // combined reply (not one reply per message).
-  const runBatch = async (texts) => {
-    await sleep(280);
-    const results = texts.map((tx) => intentReply(tx, { fields: fieldsRef.current }));
-    for (const r of results) {
-      if (!r.tool) continue;
-      const tid = pushMsg({
-        role: "assistant",
-        kind: "tool",
-        name: r.tool.name,
-        args: r.tool.args,
-        result: r.tool.result,
-        status: "running",
+  // One streamed LLM call → one assistant bubble. Text streams in live; a turn
+  // that only calls tools (no prose) drops its empty bubble. On failure (401 未登录,
+  // 409 未配置, 502 上游, network) the placeholder bubble is removed before the error
+  // rethrows — otherwise an empty typing bubble would be orphaned next to the Alert.
+  const callChat = async ({ messages: history }) => {
+    let acc = "";
+    const mid = pushMsg({ role: "assistant", kind: "text", text: "", streaming: true });
+    let res;
+    try {
+      res = await chat({
+        messages: history,
+        onText: (d) => {
+          acc += d;
+          patchMsg(mid, { text: acc });
+        },
       });
-      await sleep(420);
-      applyIntent(r);
-      patchMsg(tid, { status: "done" });
-      await sleep(160);
+    } catch (e) {
+      // drop the placeholder (and any partial stream) so only the error Alert shows
+      removeMsg(mid);
+      throw e;
     }
-    const text =
-      results.length === 1
-        ? results[0].text
-        : "好，这几处我一起改好了：" + results.map((r) => r.text).join(" ");
-    const id = pushMsg({ role: "assistant", kind: "text", text, streaming: true });
-    await sleep(Math.min(1100, 400 + text.length * 14));
-    patchMsg(id, { streaming: false });
-    if (results.some((r) => r.kind === "publish")) setShareOpen(true);
+    const finalText = res.text || acc;
+    if (finalText) patchMsg(mid, { text: finalText, streaming: false });
+    else removeMsg(mid);
+    return res;
+  };
+
+  // Run one agent turn over a merged batch of user prompts (§4 ReAct loop):
+  // stream prose, execute form tools (rendered as tool-call cards), rerender preview.
+  // `merged` is the queue's batch-merged text (numbered + <context>-wrapped for
+  // mid-work input per §4.1) — sent verbatim as the user turn so the model never
+  // misreads buffered messages as a reply to its last output.
+  const runTurn = async (merged) => {
+    historyRef.current.push({ role: "user", content: merged });
+    const midById = new Map();
+    try {
+      await runDesignerTurn({
+        messages: historyRef.current,
+        callChat,
+        executeTool: (name, input) => applyDesignerTool(modelRef.current, name, input),
+        onToolStart: (ev) => {
+          midById.set(
+            ev.id,
+            pushMsg({
+              role: "assistant",
+              kind: "tool",
+              name: ev.name,
+              args: ev.input,
+              status: "running",
+            }),
+          );
+        },
+        onToolEnd: (ev, result) => {
+          const mid = midById.get(ev.id);
+          if (mid) patchMsg(mid, { status: ev.error ? "error" : "done", result });
+        },
+        onPreview: syncModel,
+      });
+    } catch (e) {
+      pushMsg({ role: "assistant", kind: "error", text: errorMessage(e) });
+    }
+    syncModel();
   };
 
   // One message queue for the whole session: connect-send N times → exactly one
-  // consumer loop; the first message bootstraps the form (single scripted build),
-  // everything after is drained as a BUFFER — whatever accumulated flushes together.
-  // `bufferRef` mirrors the queue's atomic flush so the scripted runner can render
-  // the exact per-message texts the consumer is processing this turn.
+  // consumer loop; whatever accumulated flushes together as a single agent turn.
+  // The consumer receives `merged` (queue.mergeBatch of this flush's batch) — the
+  // exact text sent to the model, numbered + <context>-wrapped for mid-work input.
+  // `bufferRef` mirrors the same atomic flush so the visible thread shows each raw
+  // message as its own bubble (and stays in sync when a queued item is cancelled).
   const queueRef = useRef(null);
   const bufferRef = useRef([]);
   if (!queueRef.current) {
-    const q = new MessageQueue(async () => {
+    const q = new MessageQueue(async (merged) => {
       const texts = bufferRef.current;
       bufferRef.current = [];
       texts.forEach((tx) => pushMsg({ role: "user", text: tx }));
       setBuilding(true);
       try {
-        if (!initRef.current) {
-          initRef.current = true;
-          // first turn: bootstrap from the first prompt only; any extras buffered
-          // in the same flush get handled as a follow-up batch right after.
-          await runBuild(texts[0]);
-          if (texts.length > 1) await runBatch(texts.slice(1));
-        } else {
-          await runBatch(texts);
-        }
+        await runTurn(merged);
       } finally {
         setBuilding(false);
       }
@@ -279,7 +252,6 @@ export default function App() {
     bufferRef.current = [...bufferRef.current, text];
     queueRef.current.enqueue(text);
   };
-  onSendRef.current = onSend;
 
   const removeQueued = (i) => {
     const item = queueItems[i];
@@ -362,7 +334,10 @@ export default function App() {
             variant="primary"
             icon={<Icon name="spark" size={14} />}
             disabled={building || fieldCount === 0}
-            onClick={() => onSend("发布并生成链接")}
+            onClick={() => {
+              setPublished(true);
+              setShareOpen(true);
+            }}
           >
             发布
           </Button>
@@ -396,6 +371,11 @@ export default function App() {
             density={t.density}
           />
           <div className="d-foot">
+            {!building && fieldCount > 0 ? (
+              <div className="d-foot__suggest">
+                <Suggestions items={FOLLOWUPS} onSelect={(v) => onSend(v)} scroll />
+              </div>
+            ) : null}
             {queueItems.length > 0 ? (
               <div className="d-foot__queue">
                 <Queue

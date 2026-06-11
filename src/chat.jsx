@@ -1,7 +1,14 @@
 // chat.jsx — chat side, composed entirely from @agentaily/design-system components.
 // Exports: Icon, ChatThread, ChatComposer
 import React, { useRef, useEffect } from "react";
-import { Message, Reasoning, ToolCall, Composer, Suggestions } from "@agentaily/design-system";
+import {
+  Message,
+  Reasoning,
+  ToolCall,
+  Composer,
+  Suggestions,
+  Alert,
+} from "@agentaily/design-system";
 
 // ---- Lucide-geometry icons (brand-sanctioned: copy paths, never freehand) ----
 const ICON_PATHS = {
@@ -112,6 +119,13 @@ function Turn({ m }) {
   }
   if (m.kind === "tool") {
     return <ToolCall name={m.name} args={m.args} result={m.result} status={m.status} />;
+  }
+  if (m.kind === "error") {
+    return (
+      <Alert variant="danger" title="对话出错">
+        {m.text}
+      </Alert>
+    );
   }
   // assistant prose
   return (

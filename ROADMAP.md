@@ -9,7 +9,9 @@
 
 ### 前端（`src/`，已上线 https://form-design.agentaily.com）
 
-- 对话式设计器：左 Agent 对话 + 右实时表单预览（MVP 走 `flow.jsx` 脚本）
+- 对话式设计器：左 Agent 对话 + 右实时表单预览
+- **API client 层**（`core/apiClient` + `core/sse`）：fetch 封装 + `VITE_API_BASE` + Bearer token 注入 + SSE 流解析
+- **对话接真后端 `POST /api/chat`**：DeepSeek 流式（OpenAI 协议）替换写死脚本；`core/designerLoop` 单回合 ReAct（自愈）+ `core/designerTools`（UI 字段模型工具：set_meta / add / update / remove / duplicate / reorder）；对话引擎对测试可注入
 - 表单工具：`add` / `update` / `remove` / `duplicate` / `reorder` field + 校验
 - **markup 指向修改**：hover 高亮预览元素、点击带身份发消息到对话
 - **连续发送（缓冲区）**：处理中可继续输入，消息收进缓冲区、下一轮一次性合并处理（SPEC §4.1，`core/queue.ts` + 顶部 DS `Queue` 组件）
@@ -48,13 +50,13 @@
 
 - 建多维表格 + 给应用开 `bitable` 读写权限 + 发布（可能需管理员审批）→ `app_token` / `table_id` 配进 `/api/config`
 
-### 前端接入后端（`src/`，单独一期）
+### 前端接入后端（`src/`，分阶段）
 
-- `flow.jsx` 接 `/api/chat`（真模型替换写死脚本）
-- 集成设置 modal 接 `/api/config` + `/api/config/test`
-- 提交接 `/api/submit`；公开填写页接 `GET /api/forms/:slug`
-- 数据后台 UI 接 `GET /api/forms/:slug/submissions`
-- 登录页接 `/api/auth/login`
+- ✅ API client 层 + 对话接 `POST /api/chat`（真模型流式替换写死脚本）—— 已完成
+- 登录接 `POST /api/auth/login`：存 session token，owner-only 请求带 Bearer（解锁 `/api/chat`）
+- 集成设置 modal 接 `GET/POST /api/config` + `POST /api/config/test`
+- 发布 + 表单管理：`POST /api/forms` 发布；列表 / 改状态 / 删 用 `GET/PATCH/DELETE /api/forms`
+- 公开填写页 + 数据后台：`GET /api/forms/:slug` 渲染 + `POST /api/submit` 提交；`GET /api/forms/:slug/submissions` 看提交
 
 ### 产品（SPEC §10 Phase 4）
 
