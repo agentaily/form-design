@@ -1,11 +1,10 @@
 name: Deploy to Cloudflare Pages
 
 on:
+  # Auto-deploy on every push to main (first manual run succeeded 2026-06-11).
+  push:
+    branches: [main]
   workflow_dispatch:
-  # TODO: enable auto-deploy on main once the CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
-  # secrets are set and the first manual run succeeds:
-  # push:
-  #   branches: [main]
 
 permissions:
   contents: read
