@@ -55,7 +55,8 @@ describe("App wiring: FormsPanel mount + 401 routes into owner login", () => {
     await waitFor(() => expect(listForms).toHaveBeenCalled());
 
     // The dialog swaps: owner login appears, and the raw 401 is never surfaced inline.
-    await screen.findByText("OWNER 登录");
+    // The dual-mode login dialog title is 「OWNER 登录 / 注册」 (§17 multi-user).
+    await screen.findByText("OWNER 登录 / 注册");
     expect(screen.queryByText(/未授权/)).not.toBeInTheDocument();
   });
 });

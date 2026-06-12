@@ -18,8 +18,6 @@ import schemaSql from "../schema.sql?raw";
 export interface TestEnv {
   DB: D1Database;
   CONFIG_KEY: string;
-  /** owner 登录密码（明文比对）— fixed throwaway value injected in vitest.config.ts (§17.6). */
-  OWNER_PASSWORD: string;
   /** session JWT 的 HMAC 签名密钥 — fixed throwaway value injected in vitest.config.ts (§17.6). */
   AUTH_SECRET: string;
 }
@@ -74,6 +72,15 @@ export async function resetConfig(): Promise<void> {
  */
 export async function resetForms(): Promise<void> {
   await testEnv.DB.exec("DELETE FROM forms");
+}
+
+/**
+ * Empty the `users` table between scenarios. The owner-auth + tenant-isolation
+ * outer-loops register accounts per scenario (and assert on uniqueness / counts),
+ * so each one must start from a clean `users` table.
+ */
+export async function resetUsers(): Promise<void> {
+  await testEnv.DB.exec("DELETE FROM users");
 }
 
 // --- Upstream (DeepSeek) fetch mock ----------------------------------------
@@ -174,34 +181,84 @@ export function installUpstreamMock(reply: UpstreamReply = {}): UpstreamMock {
   };
 }
 
-// --- owner auth helpers (SPEC.md §17) --------------------------------------
+// --- owner auth helpers (SPEC.md §17, open-registration multi-user) ----------
 //
-// owner-only endpoints now sit behind requireAuth. Outer-loop suites that drive
-// those endpoints first log in to obtain a session JWT, then send it as
-// `Authorization: Bearer <token>`. `login()` exercises the REAL POST /api/auth/login
-// route (public, no auth) with the fixed test OWNER_PASSWORD injected in
-// vitest.config.ts, so the token it returns is signed with the test AUTH_SECRET
-// the same way prod would sign it.
+// owner-only endpoints sit behind requireAuth. After the multi-user rework, there
+// is no fixed OWNER_PASSWORD — every owner is a real `users` row keyed by a random
+// email + password. Outer-loop suites that drive owner-only endpoints first
+// REGISTER a real account (注册即登录, §17.2) to obtain a session JWT, then send it
+// as `Authorization: Bearer <token>`. The token's `sub` is that user's real id —
+// the same data-isolation key prod would issue (signed with the test AUTH_SECRET).
+//
+// `login()` registers a FRESH, unique account each call (random email) so it never
+// collides with a leftover row across scenarios, regardless of storage isolation —
+// the suites that relied on the old single-owner login keep working unchanged.
+// `registerOwner()` / `registerAndLogin()` are the multi-owner seam for the
+// tenant-isolation suite: each produces a distinct owner with its own token.
 
 /** Base origin for SELF.fetch requests in the worker tests. */
 export const AUTH_BASE = "https://api.local";
 
-/** The fixed owner login password injected as a miniflare binding (vitest.config.ts). */
-export const OWNER_PASSWORD = "test-owner-password-correct-horse-battery-staple";
+/** A throwaway password (≥ MIN_PASSWORD_LENGTH=8) used by the auth setup helpers. */
+export const TEST_PASSWORD = "correct-horse-battery-staple";
+
+/** Monotonic counter so each registered email in a run is unique. */
+let emailCounter = 0;
+
+/** Mint a unique, shape-valid throwaway email for a fresh test account. */
+export function uniqueEmail(prefix = "owner"): string {
+  emailCounter += 1;
+  return `${prefix}-${Date.now()}-${emailCounter}@test.local`;
+}
 
 /**
- * Log in via the real public `POST /api/auth/login` and return the session JWT.
- *
- * Used by every owner-only outer-loop suite (config / conntest / chat / forms /
- * submissions) to obtain a Bearer token for `authHeader(token)`. Throws if login
- * does not return a 200 `{ token }` — surfacing a broken login route as a loud
- * setup failure rather than a silent undefined token.
+ * The result of registering / logging in a test owner: the session token plus the
+ * real credentials, so the tenant-isolation suite can re-login the SAME owner.
  */
-export async function login(password: string = OWNER_PASSWORD): Promise<string> {
+export interface TestOwner {
+  /** The session JWT (Bearer) — its `sub` is this owner's real user id (§17.5). */
+  token: string;
+  /** The email this owner registered with (unique per call). */
+  email: string;
+  /** The plaintext password this owner registered with. */
+  password: string;
+}
+
+/**
+ * Register a fresh owner via the real public `POST /api/auth/register` and return
+ * its token + credentials. 注册即登录 (§17.2): the 201 response carries a session
+ * JWT whose sub is the NEW user's real id — the data-isolation key for every
+ * owner-only endpoint. Throws if register does not return a 201 `{ token }`.
+ */
+export async function registerOwner(
+  opts: { email?: string; password?: string } = {},
+): Promise<TestOwner> {
+  const email = opts.email ?? uniqueEmail();
+  const password = opts.password ?? TEST_PASSWORD;
+  const res = await SELF.fetch(`${AUTH_BASE}/api/auth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (res.status !== 201) {
+    throw new Error(`setup register failed: ${res.status} ${await res.text()}`);
+  }
+  const json = (await res.json()) as { token?: string };
+  if (typeof json.token !== "string" || json.token.length === 0) {
+    throw new Error(`setup register returned no token: ${JSON.stringify(json)}`);
+  }
+  return { token: json.token, email, password };
+}
+
+/**
+ * Log in an already-registered owner via the real public `POST /api/auth/login`
+ * and return a fresh session JWT. Throws if login does not return a 200 `{ token }`.
+ */
+export async function loginOwner(email: string, password: string): Promise<string> {
   const res = await SELF.fetch(`${AUTH_BASE}/api/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({ email, password }),
   });
   if (res.status !== 200) {
     throw new Error(`setup login failed: ${res.status} ${await res.text()}`);
@@ -211,6 +268,17 @@ export async function login(password: string = OWNER_PASSWORD): Promise<string> 
     throw new Error(`setup login returned no token: ${JSON.stringify(json)}`);
   }
   return json.token;
+}
+
+/**
+ * Register a fresh owner and return only its session JWT — the drop-in replacement
+ * for the old single-owner `login()`. Used by every owner-only outer-loop suite
+ * (config / conntest / chat / forms / submissions) that just needs "a logged-in
+ * owner's token", without caring about the specific account.
+ */
+export async function login(): Promise<string> {
+  const { token } = await registerOwner();
+  return token;
 }
 
 /** Build an `Authorization: Bearer <token>` header object for owner-only requests. */

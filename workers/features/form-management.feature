@@ -1,9 +1,12 @@
 Feature: 表单管理 CRUD 列表 改状态 删除 owner-only
   作为表单 owner
   我想登录后列出自己的表单、开启或关闭某份表单的提交、删除不再需要的表单
-  以便我能在发布之后管理自己的表单，而这些管理动作只对持有 owner 密码的我开放
+  以便我能在发布之后管理自己的表单，而这些管理动作只对登录的我、且只作用于我名下的表单
 
-  背景：MVP 单 owner（owner_id='default'），三个端点都 owner-only，挂 §17 的鉴权 guard。
+  背景：多用户（§17）——forms.owner_id 是发布它的 owner 的真实 user id。三个端点都 owner-only，
+  挂 §17 的鉴权 guard，并按当前 owner（c.get('session').sub）隔离：列表只列自己、PATCH/DELETE 只能改/删
+  自己名下的表单（跨 owner → 404，不暴露存在性，在 tenant-isolation.feature 覆盖）。下列场景均在单个 owner
+  自己名下进行。
   GET /api/forms 列出该 owner 的所有表单（每项 slug/meta/status/createdAt，不含 fields 全量）；
   PATCH /api/forms/:slug 部分更新，至少支持把 status 在 published 与 closed 之间切换；
   DELETE /api/forms/:slug 硬删该表单行（删后公开拉取 / submit 该 slug 都变 404）。

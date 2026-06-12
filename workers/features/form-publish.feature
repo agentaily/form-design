@@ -3,7 +3,9 @@ Feature: 表单发布与公开填写拉取 POST /api/forms 与 GET /api/forms/:s
   我想让 owner 发布一份表单定义拿到公开 slug，答题者无需鉴权即可拉取该表单的 meta 与 fields 来渲染填写页
   以便打通「设计 → 发布 → 公开填写 → 写飞书」的闭环，且公开拉取绝不泄漏 owner 的任何凭据或私有配置
 
-  背景：MVP 单 owner，forms 表的 owner_id 恒为 'default'，不做多租户。
+  背景：多用户（§17）——发布把 forms.owner_id 写成当前登录 owner 的真实 user id；slug 仍全局唯一。
+  POST /api/forms 现为 owner-only（需带有效 token，见 auth.feature）；公开拉取 GET /api/forms/:slug 仍无鉴权、
+  只按 slug。两个 owner 间表单互不可见、跨 owner 越权在 tenant-isolation.feature 覆盖。
   发布把 meta + fields（fields 对齐 §3.2 Field）序列化存入 D1 的 forms 表并生成公开 slug；
   公开拉取只投影 meta + fields + slug，凭据始终留在 owner_config，绝不随表单出网。
   submit 关联：/api/submit 的 body 增加 formSlug，先校验 form 存在再走飞书写入；

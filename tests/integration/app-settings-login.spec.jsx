@@ -44,8 +44,9 @@ describe("App wiring: integration-settings 401 routes into owner login", () => {
     await waitFor(() => expect(getConfig).toHaveBeenCalled());
 
     // Assert: the dialog swaps — owner login appears, settings is gone, and the
-    // raw 401 message is never surfaced as an inline settings error.
-    await screen.findByText("OWNER 登录");
+    // raw 401 message is never surfaced as an inline settings error. The dual-mode
+    // login dialog title is 「OWNER 登录 / 注册」 (§17 multi-user).
+    await screen.findByText("OWNER 登录 / 注册");
     await waitFor(() => expect(screen.queryByText("集成设置")).not.toBeInTheDocument());
     expect(screen.queryByText(/未授权/)).not.toBeInTheDocument();
   });

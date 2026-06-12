@@ -38,6 +38,7 @@ import {
   formExists,
   getFormStatus,
   getFormFields,
+  getFormOwner,
   listForms,
   updateForm,
   deleteForm,
@@ -47,23 +48,27 @@ import {
 } from "./forms";
 import {
   signSession,
-  timingSafeEqualStr,
   requireAuth,
   type AuthVariables,
   type LoginRequest,
+  type RegisterRequest,
 } from "./auth";
+import { createUser, authenticateUser, EmailTakenError, UserValidationError } from "./users";
 import { listSubmissions, BitableReadError } from "./submissions";
 
 /** Worker bindings (see wrangler.toml + vitest.config.ts). */
 interface Env {
-  /** D1 binding for the owner_config table. */
+  /** D1 binding for the owner_config / forms / users tables. */
   DB: D1Database;
   /** base64 256-bit AES-GCM master key (Worker secret in prod). */
   CONFIG_KEY: string;
-  /** owner 登录密码（与提交密码做常量时间比对，§17.6 / §17.8）。Worker secret in prod. */
-  OWNER_PASSWORD: string;
-  /** session JWT 的 HMAC 签名密钥（§17.6）。Worker secret in prod. */
+  /** session JWT 的 HMAC 签名密钥（注册/登录签发、中间件验签，§17.5/§17.6）。Worker secret in prod. */
   AUTH_SECRET: string;
+  /**
+   * 已废弃（§17.8）：多用户改造后登录改为查 users 表 + 密码哈希校验，本绑定**不再用于鉴权**。
+   * 保留为可选字段仅为兼容线上尚未 `wrangler secret delete` 的环境与测试注入；新代码不读它。
+   */
+  OWNER_PASSWORD?: string;
 }
 
 // Agentaily Forms backend. Routes get added per feature (owner config, LLM
@@ -124,36 +129,93 @@ app.patch("/api/forms/:slug", guard);
 app.delete("/api/forms/:slug", guard);
 app.get("/api/forms/:slug/submissions", guard);
 
-// POST /api/auth/login (public) — verify the owner password against OWNER_PASSWORD
-// and issue a short-lived session JWT signed with AUTH_SECRET. Wrong/missing
-// password / non-JSON body → 401 (unified, no extra signal); a server misconfig
-// (OWNER_PASSWORD / AUTH_SECRET unset) → 500. The password / secret never appear
-// in the response (§17.2 / §17.7).
+// POST /api/auth/register (public) — open registration (§17.2). body { email,
+// password } → createUser (email-shape + ≥8 password validation; UNIQUE email is
+// the final de-dup arbiter) → 注册即登录: sign a session JWT whose `sub` is the
+// NEW user's real id. Taken email → 409; bad email / weak password / non-JSON →
+// 400 (nothing persisted). Server misconfig (AUTH_SECRET unset) → 500. The
+// plaintext password / signing secret never appear in the response (§17.2 / §17.6).
+app.post("/api/auth/register", async (c) => {
+  // Server misconfiguration is a deploy error, NOT a client error — never collapse
+  // it into a 400/409 that misleads the caller.
+  if (!c.env.AUTH_SECRET) {
+    return c.json({ error: "服务端未配置鉴权" }, 500);
+  }
+
+  // A non-JSON body is a malformed request → 400, nothing created.
+  let body: RegisterRequest;
+  try {
+    body = (await c.req.json()) as RegisterRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const email = (body as { email?: unknown })?.email;
+  const password = (body as { password?: unknown })?.password;
+
+  // createUser validates shape/strength and de-dups on the UNIQUE email constraint:
+  //   - UserValidationError (bad email / weak password / missing) → 400, not stored.
+  //   - EmailTakenError (UNIQUE collision) → 409, no user created, no token issued.
+  let user: { id: string };
+  try {
+    user = await createUser(
+      c.env.DB,
+      typeof email === "string" ? email : "",
+      typeof password === "string" ? password : "",
+    );
+  } catch (err) {
+    if (err instanceof UserValidationError) {
+      return c.json({ error: err.message }, 400);
+    }
+    if (err instanceof EmailTakenError) {
+      return c.json({ error: err.message }, 409);
+    }
+    throw err;
+  }
+
+  // 注册即登录 (§17.2): the token's sub is the new user's real id — also the data
+  // isolation key for every owner-only endpoint (§17.9). 201 Created.
+  const token = await signSession(c.env.AUTH_SECRET, { sub: user.id });
+  return c.json({ token }, 201);
+});
+
+// POST /api/auth/login (public) — verify email + password against the users table
+// (§17.3) and issue a short-lived session JWT whose `sub` is the user's real id.
+// Wrong email / wrong password / missing field / non-JSON body → a UNIFIED 401
+// (no signal distinguishing 邮箱不存在 vs 密码错, anti-enumeration baked into
+// authenticateUser). Server misconfig (AUTH_SECRET unset) → 500. The plaintext
+// password / signing secret never appear in the response (§17.3 / §17.6).
 app.post("/api/auth/login", async (c) => {
   // Server misconfiguration is a deploy error, NOT an auth failure — it must not
-  // collapse into a 401 that would let everyone in or lock everyone out (§17.2).
-  if (!c.env.OWNER_PASSWORD || !c.env.AUTH_SECRET) {
+  // collapse into a 401 that would let everyone in or lock everyone out (§17.3).
+  if (!c.env.AUTH_SECRET) {
     return c.json({ error: "服务端未配置鉴权" }, 500);
   }
 
   // A non-JSON / missing-field body is treated as an auth failure → unified 401,
-  // nothing else leaked (§17.2).
+  // nothing else leaked (§17.3).
   let body: LoginRequest;
   try {
     body = (await c.req.json()) as LoginRequest;
   } catch {
     return c.json({ error: "未授权" }, 401);
   }
-
-  // 常量时间比对（§17.8）：不用朴素 `!==`，避免泄漏「第几位开始不同」的时序信号。
+  const email = (body as { email?: unknown })?.email;
   const password = (body as { password?: unknown })?.password;
-  if (typeof password !== "string" || !timingSafeEqualStr(password, c.env.OWNER_PASSWORD)) {
+
+  // authenticateUser converges every failure (no such email / wrong password) to
+  // null — AND runs an equal-cost decoy hash on the user-absent path so latency
+  // can't enumerate registered emails (§17.3).
+  const authed = await authenticateUser(
+    c.env.DB,
+    typeof email === "string" ? email : "",
+    typeof password === "string" ? password : "",
+  );
+  if (authed === null) {
     return c.json({ error: "未授权" }, 401);
   }
 
-  // Password matched → sign a session token. Login touches no D1 / Feishu /
-  // DeepSeek — pure secret compare + sign (§17.2).
-  const token = await signSession(c.env.AUTH_SECRET);
+  // Credentials verified → sign a session token with the user's real id as sub.
+  const token = await signSession(c.env.AUTH_SECRET, { sub: authed.id });
   return c.json({ token }, 200);
 });
 
@@ -168,9 +230,11 @@ app.post("/api/config", async (c) => {
   if (typeof input !== "object" || input === null) {
     return c.json({ error: "body must be a JSON object" }, 400);
   }
+  // owner-only: scope every read/write to the logged-in owner's real user id (§17.9).
+  const ownerId = c.get("session").sub;
   const key = await importConfigKey(c.env.CONFIG_KEY);
   try {
-    await saveConfig(c.env.DB, key, input);
+    await saveConfig(c.env.DB, key, ownerId, input);
   } catch (err) {
     if (err instanceof ConfigValidationError) {
       // Missing / invalid required field → 400, nothing written.
@@ -178,14 +242,15 @@ app.post("/api/config", async (c) => {
     }
     throw err;
   }
-  const masked = await getMaskedConfig(c.env.DB, key);
+  const masked = await getMaskedConfig(c.env.DB, key, ownerId);
   return c.json(masked, 200);
 });
 
-// GET /api/config — read the masked config (all-null skeleton when never set).
+// GET /api/config — read THIS owner's masked config (all-null skeleton when never set).
 app.get("/api/config", async (c) => {
+  const ownerId = c.get("session").sub;
   const key = await importConfigKey(c.env.CONFIG_KEY);
-  const masked = await getMaskedConfig(c.env.DB, key);
+  const masked = await getMaskedConfig(c.env.DB, key, ownerId);
   return c.json(masked, 200);
 });
 
@@ -207,9 +272,10 @@ app.post("/api/chat", async (c) => {
     return c.json({ error }, 400);
   }
 
-  // 2) Read + decrypt the owner config (plaintext, in-Worker view only).
+  // 2) Read + decrypt THIS owner's config (plaintext, in-Worker view only, §17.9).
+  const ownerId = c.get("session").sub;
   const key = await importConfigKey(c.env.CONFIG_KEY);
-  const owner = await getOwnerConfig(c.env.DB, key);
+  const owner = await getOwnerConfig(c.env.DB, key, ownerId);
 
   // 3) No DeepSeek configured → 409, never touch upstream.
   try {
@@ -271,8 +337,9 @@ app.post("/api/chat", async (c) => {
 // normal result, not an HTTP error. The owner key / app_secret never appear in
 // any message, header, or body. See SPEC.md §14.
 app.post("/api/config/test", async (c) => {
+  const ownerId = c.get("session").sub;
   const key = await importConfigKey(c.env.CONFIG_KEY);
-  const owner = await getOwnerConfig(c.env.DB, key);
+  const owner = await getOwnerConfig(c.env.DB, key, ownerId);
 
   // DeepSeek: unconfigured → "未配置" (no upstream call); otherwise probe.
   const deepseek: ConnProbe =
@@ -341,11 +408,20 @@ app.post("/api/submit", async (c) => {
     throw err;
   }
 
-  // 2) Read + decrypt the owner config (plaintext, in-Worker view only).
-  const key = await importConfigKey(c.env.CONFIG_KEY);
-  const owner = await getOwnerConfig(c.env.DB, key);
+  // 2) PUBLIC endpoint — there is no "current owner". Reverse-look up the form's
+  //    owning owner_id by slug (§17.9 第 5 条) so the answer lands in THAT owner's
+  //    Feishu tenant, not a fixed / arbitrary one. (formExists already passed, so
+  //    a null here is an anomaly — treat it as not-found, never touch upstream.)
+  const formOwnerId = await getFormOwner(c.env.DB, request.formSlug);
+  if (formOwnerId === null) {
+    return c.json({ error: "form not found" }, 404);
+  }
 
-  // 3) No Feishu configured → 409, never touch upstream.
+  // 3) Read + decrypt the FORM-OWNER's config (plaintext, in-Worker view only).
+  const key = await importConfigKey(c.env.CONFIG_KEY);
+  const owner = await getOwnerConfig(c.env.DB, key, formOwnerId);
+
+  // 4) No Feishu configured → 409, never touch upstream.
   try {
     if (owner.feishu === null) {
       throw new FeishuNotConfiguredError();
@@ -407,8 +483,9 @@ app.post("/api/forms", async (c) => {
     return c.json({ error }, 400);
   }
 
-  // 2) Persist one forms row (owner_id 恒 'default', status 'published') → { slug }.
-  const { slug } = await saveForm(c.env.DB, input);
+  // 2) Persist one forms row owned by the logged-in owner (status 'published') → { slug }.
+  const ownerId = c.get("session").sub;
+  const { slug } = await saveForm(c.env.DB, ownerId, input);
   return c.json({ slug }, 201);
 });
 
@@ -417,7 +494,9 @@ app.post("/api/forms", async (c) => {
 // 列表可回 status / createdAt 这类私有维度，但仍不含任何 owner 凭据（§21.2）。**注意**：这条
 // 路由与公开的 GET /api/forms/:slug 是两条不同路由（无 :slug 段 vs 有），guard 只挂这条列表。
 app.get("/api/forms", async (c) => {
-  const forms = await listForms(c.env.DB);
+  // owner-only: list only THIS owner's forms (§17.9 第 6 条) — never leak another owner's.
+  const ownerId = c.get("session").sub;
+  const forms = await listForms(c.env.DB, ownerId);
   return c.json({ forms, count: forms.length }, 200);
 });
 
@@ -437,7 +516,11 @@ app.patch("/api/forms/:slug", async (c) => {
     const error = err instanceof SyntaxError ? "invalid JSON body" : "invalid request";
     return c.json({ error }, 400);
   }
-  const updated = await updateForm(c.env.DB, slug, input);
+  // owner-only + 横向越权防护 (§17.9 第 2 条): updateForm filters WHERE owner_id=? —
+  // a cross-owner slug updates 0 rows → null → 404 (same code as not-found, no
+  // existence leak).
+  const ownerId = c.get("session").sub;
+  const updated = await updateForm(c.env.DB, slug, ownerId, input);
   if (updated === null) {
     return c.json({ error: "form not found" }, 404);
   }
@@ -449,7 +532,10 @@ app.patch("/api/forms/:slug", async (c) => {
 // 成功 → 200 { ok:true, slug }。
 app.delete("/api/forms/:slug", async (c) => {
   const slug = c.req.param("slug");
-  const deleted = await deleteForm(c.env.DB, slug);
+  // owner-only + 横向越权防护 (§17.9 第 3 条): deleteForm filters WHERE owner_id=? —
+  // a cross-owner slug deletes 0 rows → false → 404 (same code as not-found).
+  const ownerId = c.get("session").sub;
+  const deleted = await deleteForm(c.env.DB, slug, ownerId);
   if (!deleted) {
     return c.json({ error: "form not found" }, 404);
   }
@@ -475,16 +561,23 @@ app.get("/api/forms/:slug", async (c) => {
 // Worker 内，绝不进响应、头或日志；响应也不含 app_token / table_id / owner_id（§18.6）。
 app.get("/api/forms/:slug/submissions", async (c) => {
   const slug = c.req.param("slug");
+  const ownerId = c.get("session").sub;
 
-  // 1) Form must exist BEFORE touching owner config / any Feishu upstream. An
-  //    unknown slug → 404, nothing forwarded (§18.1 step 1).
-  if (!(await formExists(c.env.DB, slug))) {
+  // 1) Ownership gate (§17.9 第 4 条): the form must belong to the LOGGED-IN owner.
+  //    Reverse-look up its owner_id; a slug that doesn't exist OR exists but belongs
+  //    to a DIFFERENT owner both → the SAME 404, with NO Feishu upstream touched —
+  //    a cross-owner 404 must be indistinguishable from a not-found 404 (no
+  //    existence leak). 403 / a different body / a different code would leak that
+  //    "this slug exists, just not yours".
+  const formOwnerId = await getFormOwner(c.env.DB, slug);
+  if (formOwnerId !== ownerId) {
     return c.json({ error: "form not found" }, 404);
   }
 
-  // 2) Read + decrypt the owner config (plaintext, in-Worker view only).
+  // 2) Ownership confirmed → read + decrypt THIS owner's config (the form belongs
+  //    to them, so we read their own Feishu creds — never another owner's, §17.9 第 4 条).
   const key = await importConfigKey(c.env.CONFIG_KEY);
-  const owner = await getOwnerConfig(c.env.DB, key);
+  const owner = await getOwnerConfig(c.env.DB, key, ownerId);
 
   // 3) No Feishu configured → 409, never touch upstream (§18.1 step 4).
   if (owner.feishu === null) {

@@ -4,7 +4,6 @@ import {
   signSession,
   verifySession,
   timingSafeEqualStr,
-  DEFAULT_OWNER_SUB,
   DEFAULT_SESSION_TTL_SECONDS,
 } from "../src/auth";
 
@@ -12,23 +11,30 @@ import {
 // mockable core the outer-loop auth-api.test.ts builds on, tested here in
 // isolation (no Hono, no D1, no fetch): just AUTH_SECRET in / Session | null out.
 //
-//   - signSession   → verifySession round-trips (sub='default' + a future exp)
+// Multi-user (§17.5): `sub` is the owner's REAL user id — required at sign time,
+// no fallback default. signSession({ sub }) round-trips; verifySession converges
+// every failure (bad signature / expired / garbage) to null without throwing.
+//
+//   - signSession({ sub }) → verifySession round-trips (the same sub + a future exp)
 //   - verifySession returns null for a bad signature (wrong secret)
 //   - verifySession returns null for an expired token
 //   - verifySession returns null for a structurally invalid token
-//   - a failure never throws a sensitive detail (収敛 to null, §17.7)
+//   - a failure never throws a sensitive detail (収敛 to null, §17.6)
 //
-// Contract: SPEC.md §17.3 (session JWT 约定) / §17.4 (验签 + 未过期) / §17.7 (安全).
+// Contract: SPEC.md §17.5 (session JWT 约定) / §17.6 (验签 + 未过期 + 安全).
 
 const SECRET = "unit-test-auth-secret-hmac-key-abc123";
 const WRONG_SECRET = "a-completely-different-secret-xyz789";
+// A representative real user id (crypto.randomUUID() shape) — sub is now the
+// data-isolation key, never the old fixed 'default'.
+const USER_ID = "11111111-2222-3333-4444-555555555555";
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
-describe("signSession + verifySession round-trip (SPEC.md §17.3 / §17.4)", () => {
-  it("a freshly signed session verifies back to sub='default' + a future exp", async () => {
+describe("signSession + verifySession round-trip (SPEC.md §17.5 / §17.6)", () => {
+  it("a freshly signed session verifies back to the same sub + a future exp", async () => {
     const before = nowSeconds();
-    const token = await signSession(SECRET);
+    const token = await signSession(SECRET, { sub: USER_ID });
     expect(token).toBeTypeOf("string");
     expect(token.length).toBeGreaterThan(0);
     // JWT is three base64url segments — never the raw secret/password.
@@ -37,8 +43,8 @@ describe("signSession + verifySession round-trip (SPEC.md §17.3 / §17.4)", () 
 
     const session = await verifySession(token, SECRET);
     expect(session).not.toBeNull();
-    // MVP single owner: sub is the fixed default.
-    expect(session?.sub).toBe(DEFAULT_OWNER_SUB);
+    // Multi-user: sub is the real user id we signed, round-tripped intact.
+    expect(session?.sub).toBe(USER_ID);
     // exp is a Unix-seconds timestamp in the future, within the default TTL window.
     expect(session?.exp).toBeTypeOf("number");
     expect(session!.exp).toBeGreaterThan(before);
@@ -47,18 +53,19 @@ describe("signSession + verifySession round-trip (SPEC.md §17.3 / §17.4)", () 
 
   it("honours a custom sub + short TTL when signing", async () => {
     const before = nowSeconds();
-    const token = await signSession(SECRET, { sub: "default", ttlSeconds: 60 });
+    const otherId = "99999999-8888-7777-6666-555555555555";
+    const token = await signSession(SECRET, { sub: otherId, ttlSeconds: 60 });
     const session = await verifySession(token, SECRET);
     expect(session).not.toBeNull();
-    expect(session?.sub).toBe("default");
+    expect(session?.sub).toBe(otherId);
     expect(session!.exp).toBeGreaterThan(before);
     expect(session!.exp).toBeLessThanOrEqual(before + 60 + 5);
   });
 
   it("the signed payload carries no secret material (JWT is signed, not encrypted)", async () => {
-    const token = await signSession(SECRET);
+    const token = await signSession(SECRET, { sub: USER_ID });
     // The payload segment is base64url-decodable by anyone; it must hold only
-    // non-sensitive claims (sub/exp/iat), never the signing secret (§17.3 / §17.7).
+    // non-sensitive claims (sub/exp/iat), never the signing secret (§17.5 / §17.6).
     const payloadSeg = token.split(".")[1];
     const json = new TextDecoder().decode(
       Uint8Array.from(atob(payloadSeg.replace(/-/g, "+").replace(/_/g, "/")), (ch) =>
@@ -67,40 +74,40 @@ describe("signSession + verifySession round-trip (SPEC.md §17.3 / §17.4)", () 
     );
     expect(json).not.toContain(SECRET);
     const claims = JSON.parse(json) as Record<string, unknown>;
-    expect(claims.sub).toBe(DEFAULT_OWNER_SUB);
+    expect(claims.sub).toBe(USER_ID);
     expect(claims.exp).toBeTypeOf("number");
   });
 });
 
-describe("verifySession rejection paths return null (SPEC.md §17.4 / §17.7)", () => {
+describe("verifySession rejection paths return null (SPEC.md §17.6)", () => {
   it("returns null for a token signed with a DIFFERENT secret (bad signature)", async () => {
     // Signed with the wrong secret → our AUTH_SECRET can't verify it.
-    const token = await signSession(WRONG_SECRET);
+    const token = await signSession(WRONG_SECRET, { sub: USER_ID });
     const session = await verifySession(token, SECRET);
     expect(session).toBeNull();
   });
 
   it("returns null for an expired token (exp in the past)", async () => {
     // Hand-sign a token whose exp is already in the past, with the RIGHT secret —
-    // so only the exp check can reject it (proves verify enforces 未过期, §17.4).
+    // so only the exp check can reject it (proves verify enforces 未过期, §17.6).
     const past = nowSeconds() - 60;
-    const expired = await honoSign({ sub: DEFAULT_OWNER_SUB, exp: past }, SECRET, "HS256");
+    const expired = await honoSign({ sub: USER_ID, exp: past }, SECRET, "HS256");
     const session = await verifySession(expired, SECRET);
     expect(session).toBeNull();
   });
 
   it("returns null for structurally invalid / garbage tokens without throwing", async () => {
-    // Each of these must collapse to null (never throw a sensitive detail, §17.7).
+    // Each of these must collapse to null (never throw a sensitive detail, §17.6).
     for (const bad of ["", "not-a-jwt", "a.b", "a.b.c.d", "...", "garbage.garbage.garbage"]) {
       const session = await verifySession(bad, SECRET);
       expect(session).toBeNull();
     }
   });
 
-  it("never throws an error carrying the secret on a rejected token (§17.7)", async () => {
+  it("never throws an error carrying the secret on a rejected token (§17.6)", async () => {
     // verifySession must converge failures to null, not surface the secret / the
     // rejected token's internals via a thrown message.
-    const tampered = (await signSession(SECRET)) + "TAMPERED";
+    const tampered = (await signSession(SECRET, { sub: USER_ID })) + "TAMPERED";
     let threw: unknown;
     let result: unknown;
     try {

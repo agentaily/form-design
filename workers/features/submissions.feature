@@ -3,12 +3,13 @@ Feature: 数据后台提交列表 GET /api/forms/:slug/submissions
   我想按表单 slug 拉取这份表单已收集到的提交列表
   以便在数据后台查看答题者的作答，且全程从我自己的飞书多维表格读取，我的凭据永不出现在客户端
 
-  背景：这是 owner-only 端点，需先带有效 session token（见 auth.feature）。
-  命中流程：先校验 form 存在（不存在 → 404、不打飞书上游），再读 owner 已保存的飞书凭据，
+  背景：这是 owner-only 端点，需先带有效 session token（见 auth.feature）。多用户（§17.9 第 4 条）：
+  命中流程先做归属校验——该 slug 须属于当前登录 owner（slug 不存在或跨 owner 都 → 404、同码、不暴露存在性、
+  不打飞书上游，跨 owner 场景在 tenant-isolation.feature 覆盖）；归属通过后读**当前 owner 自己**的飞书凭据，
   用 app_id+app_secret 换 tenant_access_token，再用该 token 向「多维表格记录列表」端点
   GET 记录，把每条映射成 { recordId, fields, createdTime? } 返回，附带 count。
   owner 的 app_secret 与 tenant_access_token 全程留在 Worker 内，绝不出现在任何响应、头或日志里；
-  响应也不含 app_token / table_id / owner_id。
+  响应也不含 app_token / table_id / owner_id。下列场景均在 owner 自己名下进行。
 
   Scenario: 无鉴权访问数据后台返回 401
     Given 一份已发布的表单
