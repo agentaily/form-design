@@ -82,11 +82,11 @@ npm run dev          # 开发服务器 http://localhost:5173
 
 `.github/workflows/`，全部用 Node 22 + `npm ci`。
 
-| 工作流        | 触发               | 做什么                                                                                                       |
-| ------------- | ------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `ci.yml`      | push `main` / PR   | `verify` job：`prettier --check` → `typecheck` → `test` → `build`；`e2e` job：Playwright（bundled chromium） |
-| `deploy.yml`  | push `main` / 手动 | 构建并发布到 GitHub Pages                                                                                    |
-| `release.yml` | push `main`        | Changesets：开 / 更新「Version Packages」PR，或在其合并后打 tag + 建 GitHub Release                          |
+| 工作流        | 触发               | 做什么                                                                                                                          |
+| ------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `ci.yml`      | push `main` / PR   | `verify` job：`prettier --check` → `typecheck` → `test` → `build`；`e2e` job：Playwright（bundled chromium）                    |
+| `deploy.yml`  | push `main` / 手动 | 构建并发布到 GitHub Pages                                                                                                       |
+| `release.yml` | push `main`        | Changesets：用 App token 开 / 更新「Version Packages」PR 并挂 auto-merge（CI 绿自动合），或在其合并后打 tag + 建 GitHub Release |
 
 ---
 
@@ -103,15 +103,22 @@ npm run dev          # 开发服务器 http://localhost:5173
 
 本仓库是**私有应用，不发 npm**。Changesets 在这里只管 **版本号 + CHANGELOG + GitHub Release**；应用的「上线」是 Pages 部署。配置见 [`.changeset/config.json`](./.changeset/config.json)（`privatePackages.tag/version` 开启，所以私有包也能打 tag）。
 
-**日常流程**
+**日常流程（全自动，零手动）**
 
 1. 改动值得记录时：`npm run changeset` → 选 patch/minor/major + 写一行摘要 → 把 `.changeset/*.md` 跟代码一起提交。
-2. 合到 `main` 后 `release.yml` 自动开一个 **「Version Packages」PR**（消费 changeset、bump `package.json`、写 `CHANGELOG.md`）。
-3. 合并那个 PR → `release.yml` 跑 `changeset tag` 打 tag 并创建 **GitHub Release**。
+2. 合到 `main` 后 `release.yml` 用 **App token** 自动开一个 **「Version Packages」PR**（消费 changeset、bump `package.json`、写 `CHANGELOG.md`）并给它挂上 **auto-merge**。
+3. 这个 PR 的 CI（`e2e / verify / workers`）**自动就跑**（App 身份开的 PR 不像 `github-actions[bot]` 那样卡「awaiting approval」）→ 绿了 **auto-merge 自己合**。
+4. 合并触发 `release.yml` 再跑一次 → `changeset tag` 打 tag 并创建 **GitHub Release**。全程不用人点批准、不用人合。
 
 > 不要手改版本号或 changelog——加 changeset，让机器人来做。
 >
-> 一次性前置：仓库 Settings → Actions → General 需允许「Allow GitHub Actions to create and approve pull requests」，否则 Version PR 开不出来。
+> **为什么用 App token**：`GITHUB_TOKEN` 触发的事件不会再触发新 workflow（GitHub 防递归铁律），所以用它开的 Version PR 会永远卡在「1 workflow awaiting approval」、必需检查永远报不上来。换成 GitHub App 身份开 PR，CI 正常自动跑。
+>
+> 一次性前置（已配好，换机器/换仓库时才需重做）：
+>
+> - 建一个 GitHub App（权限 `Contents: RW` + `Pull requests: RW`），装到本仓库；把 App ID 与私钥存为仓库 secret `RELEASE_BOT_APP_ID` / `RELEASE_BOT_PRIVATE_KEY`。
+> - 仓库 Settings → General 开启 **Allow auto-merge**。
+> - 仓库 Settings → Actions → General 允许「Allow GitHub Actions to create and approve pull requests」。
 
 ---
 

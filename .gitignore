@@ -19,3 +19,6 @@ workers/.dev.vars
 # wrangler 本地状态（miniflare D1/KV、临时 bundle）—— 绝不进 git
 .wrangler/
 workers/.wrangler/
+
+# claude-fleet worktrees (parallel CLI instances; not source)
+.claude/worktrees/

@@ -23,18 +23,18 @@
 
 全部 Node 22 + `npm ci`,定义在 `.github/workflows/`。
 
-| 工作流                  | 触发                                    | 做什么                                                                                                                                                                   |
-| ----------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ci.yml`                | push `main` / **PR**                    | `verify`:`prettier --check` → `typecheck` → `test`(前端 Vitest)→ `build`;`e2e`:Playwright(bundled chromium,`PW_USE_BUNDLED=1`)。**注:前端 CI,不含 `workers/` 的 vitest** |
-| `deploy-cloudflare.yml` | push `main` / 手动                      | `build`(`DEPLOY_BASE=/`、`VITE_API_BASE=线上后端`)→ `pages deploy`。用 secret `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`                                           |
-| `deploy-workers.yml`    | push `main` 且 `workers/**` 变更 / 手动 | `cd workers && wrangler deploy`。用 secret `CLOUDFLARE_WORKERS_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`                                                                      |
-| `deploy.yml`            | push `main` / 手动                      | 构建发布到 GitHub Pages(见 §0 的双部署说明)                                                                                                                              |
-| `release.yml`           | push `main`                             | Changesets:开/更新「Version Packages」PR,或合并后打 tag + 建 GitHub Release                                                                                              |
+| 工作流                  | 触发                                    | 做什么                                                                                                                                                                                                                     |
+| ----------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ci.yml`                | push `main` / **PR**                    | 三个 job:`verify`(`prettier --check` → `typecheck` → `test` 前端 Vitest → `build`)、`e2e`(Playwright bundled chromium,`PW_USE_BUNDLED=1`)、`workers`(后端子包 `typecheck` + vitest;**无 path filter,每个 PR 都跑**,#20 起) |
+| `deploy-cloudflare.yml` | push `main` / 手动                      | `build`(`DEPLOY_BASE=/`、`VITE_API_BASE=线上后端`)→ `pages deploy`。用 secret `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`                                                                                             |
+| `deploy-workers.yml`    | push `main` 且 `workers/**` 变更 / 手动 | `cd workers && wrangler deploy`。用 secret `CLOUDFLARE_WORKERS_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`                                                                                                                        |
+| `deploy.yml`            | push `main` / 手动                      | 构建发布到 GitHub Pages(见 §0 的双部署说明)                                                                                                                                                                                |
+| `release.yml`           | push `main`                             | Changesets:开/更新「Version Packages」PR,或合并后打 tag + 建 GitHub Release                                                                                                                                                |
 
 **关键认知**:
 
 - `deploy-workers.yml` 用 `paths: workers/**` 过滤 —— **只改前端不会触发后端部署**,反之亦然。
-- 后端的 vitest(`workers/test/*`)目前**不在 CI 里**自动跑;改 `workers/` 时请本地 `cd workers && npx vitest run` 自查(见 §6 清单)。
+- 后端 vitest(`workers/test/*`)由 `ci.yml` 的 `workers` job 在**每个 PR** 跑(无 path filter,#20 起),与前端一道作为分支保护必需检查 —— 后端改动不会再漏测。
 - 手动触发:`gh workflow run deploy-workers.yml -R agentaily/form-design`(其余同理)。
 
 ---
@@ -171,5 +171,5 @@ VITE_API_BASE=http://localhost:8787 npx vite --port 5173
 ## 8. 待办 / 已知项
 
 - **前端双部署**:`deploy.yml`(GitHub Pages)与 `deploy-cloudflare.yml`(CF Pages)并存,生产以 CF Pages 为准。GH Pages 那条不注入 `VITE_API_BASE`、接不到后端,建议择机删除 `deploy.yml`。
-- **后端 CI 缺位**:`workers/test/*` 未进 `ci.yml`,改后端靠本地自查。后续可加一个 `working-directory: workers` 的 vitest job。
+- ~~后端 CI 缺位~~:已解决 —— #20 给 `ci.yml` 加了 `workers` job(后端 typecheck + vitest,无 path filter,每个 PR 都跑)。
 - **邮箱验证 / 找回密码**:`users.email_verified` 字段与发信钩子已预留(SPEC §17.11),接 Resend 后启用。

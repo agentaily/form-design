@@ -86,3 +86,70 @@ Feature: 提交写飞书多维表格 POST /api/submit 答题落库
     When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
     Then 整个响应里不包含 owner 的明文飞书 app secret
     And 整个响应里不包含换取到的 tenant_access_token
+
+  # §15.8 飞书列自动创建（自愈）—— 写记录遇缺列时反应式补列并重试一次，稳态零开销。
+
+  Scenario: 写记录遇列不存在时自动建缺失列并重试成功
+    Given 一个已保存完整飞书凭据的 owner
+    And 一份已发布的表单
+    And 上游飞书 tenant_access_token 接口将返回 code 为 0
+    And 上游飞书多维表格新增记录接口第一次返回列不存在的 code 1254045
+    And 上游飞书列出字段接口将返回现有列名集合
+    And 上游飞书新建字段接口将返回 code 为 0
+    And 上游飞书多维表格新增记录接口第二次返回 code 为 0 且带 record id
+    When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
+    Then 响应状态码为 200
+    And 响应体的 ok 为真
+    And 响应体带有上游返回的 recordId
+    And 后端列出过该表的现有字段恰好一次
+    And 后端对每个缺失的列各新建字段一次
+    And 后端对多维表格新增记录接口共发起两次请求
+
+  Scenario: 自愈只新建缺失的列不重复建已存在的列
+    Given 一个已保存完整飞书凭据的 owner
+    And 一份已发布的表单
+    And 上游飞书 tenant_access_token 接口将返回 code 为 0
+    And 上游飞书多维表格新增记录接口第一次返回列不存在的 code 1254045
+    And 上游飞书列出字段接口将返回已含其中一个待写列的现有列名集合
+    And 上游飞书新建字段接口将返回 code 为 0
+    And 上游飞书多维表格新增记录接口第二次返回 code 为 0 且带 record id
+    When 答题者带着该表单的 slug 提交含一个已存在列与一个缺失列的作答
+    Then 响应状态码为 200
+    And 后端只对缺失的那个列发起新建字段请求
+    And 后端没有对已存在的列发起新建字段请求
+
+  Scenario: 列已存在时稳态提交不调用任何字段端点
+    Given 一个已保存完整飞书凭据的 owner
+    And 一份已发布的表单
+    And 上游飞书 tenant_access_token 接口将返回 code 为 0
+    And 上游飞书多维表格新增记录接口首写即返回 code 为 0 且带 record id
+    When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
+    Then 响应状态码为 200
+    And 后端没有向飞书列出字段接口发起任何请求
+    And 后端没有向飞书新建字段接口发起任何请求
+    And 后端对多维表格新增记录接口只发起一次请求
+
+  Scenario: 新建字段遇 FieldNameDuplicated 视为成功
+    Given 一个已保存完整飞书凭据的 owner
+    And 一份已发布的表单
+    And 上游飞书 tenant_access_token 接口将返回 code 为 0
+    And 上游飞书多维表格新增记录接口第一次返回列不存在的 code 1254045
+    And 上游飞书列出字段接口将返回现有列名集合
+    And 上游飞书新建字段接口将返回 FieldNameDuplicated 的 code 1254014
+    And 上游飞书多维表格新增记录接口第二次返回 code 为 0 且带 record id
+    When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
+    Then 响应状态码为 200
+    And 响应体的 ok 为真
+
+  Scenario: 自愈后重试写入仍失败时返回 502 且不泄漏凭据
+    Given 一个已保存完整飞书凭据的 owner
+    And 一份已发布的表单
+    And 上游飞书 tenant_access_token 接口将返回 code 为 0
+    And 上游飞书多维表格新增记录接口两次都返回列不存在的 code 1254045
+    And 上游飞书列出字段接口将返回现有列名集合
+    And 上游飞书新建字段接口将返回 code 为 0
+    When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
+    Then 响应状态码为 502
+    And 后端对多维表格新增记录接口只重试一次共两次请求
+    And 错误响应里不包含 owner 的明文飞书 app secret
+    And 错误响应里不包含换取到的 tenant_access_token

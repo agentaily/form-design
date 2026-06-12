@@ -5,6 +5,13 @@ name: Release
 # itself is shipped by deploy.yml (GitHub Pages). On push to main this either
 # opens/updates a "Version Packages" PR (consuming pending changesets) or, once
 # that PR is merged, tags the new version and creates the GitHub Release.
+#
+# The PR is opened with a GitHub App token (not the default GITHUB_TOKEN): events
+# triggered by GITHUB_TOKEN never spawn new workflow runs, so a GITHUB_TOKEN-opened
+# Version PR would sit forever "awaiting approval" and its required checks could
+# never report. An App identity triggers CI normally, so the PR's checks run on
+# their own — and the auto-merge step below merges it the moment they go green.
+# Fully hands-off: drop changesets, push to main, a release ships itself.
 on:
   push:
     branches: [main]
@@ -21,15 +28,24 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # Mint a short-lived App installation token so the Version PR is authored by
+      # the App (→ CI runs automatically), not by github-actions[bot] (→ gated).
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # changesets needs full history
+          token: ${{ steps.app-token.outputs.token }} # push the Version PR branch as the App
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - uses: changesets/action@v1
+        id: changesets
         with:
           version: npx changeset version # bump + changelog in the Version PR
           publish: npx changeset tag # tag the version once the Version PR merges (no npm publish)
@@ -37,4 +53,13 @@ jobs:
           title: "chore: version packages"
           createGithubReleases: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+      # Queue auto-merge on the Version PR. It waits for the required checks
+      # (e2e / verify / workers) and squash-merges itself once they pass. Skipped
+      # on the post-merge run (no PR to merge — changesets tags instead).
+      - name: Auto-merge the Version PR once CI is green
+        if: steps.changesets.outputs.pullRequestNumber
+        run: gh pr merge --squash --auto "$PR"
+        env:
+          PR: ${{ steps.changesets.outputs.pullRequestNumber }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
