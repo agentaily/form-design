@@ -1,7 +1,8 @@
 # Agentaily Forms — Roadmap
 
 > 对话式动态表单设计器：**设计 → 发布 → 收集 → 看结果**。
-> 产品规格见 [SPEC.md](./SPEC.md)，运维见 [OPERATIONS.md](./OPERATIONS.md)。
+> 产品规格见 [SPEC.md](./SPEC.md)，运维见 [OPERATIONS.md](./OPERATIONS.md)，
+> 研发驱动范式见 [METHODOLOGY.md](./METHODOLOGY.md)。
 
 ---
 
