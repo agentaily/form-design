@@ -3,7 +3,9 @@ import { testEnv, applySchema } from "./helpers";
 import {
   createUser,
   findUserByEmail,
+  findUserById,
   authenticateUser,
+  markEmailVerified,
   EmailTakenError,
   UserValidationError,
   MIN_PASSWORD_LENGTH,
@@ -53,7 +55,8 @@ describe("createUser (SPEC.md §17.2 注册)", () => {
     expect(user!.passwordHash.length).toBeGreaterThan(0);
     expect(user!.passwordSalt.length).toBeGreaterThan(0);
     expect(user!.iterations).toBeGreaterThan(0);
-    // email_verified is reserved-and-fixed-0 this milestone (§17.11).
+    // email_verified starts at 0 on a fresh register (§23): a real status bit now,
+    // flipped to 1 only by verify-email/confirm — not gating any feature.
     expect(user!.emailVerified).toBe(0);
   });
 
@@ -77,13 +80,34 @@ describe("createUser (SPEC.md §17.2 注册)", () => {
     expect(id).toBeTypeOf("string");
   });
 
-  it("rejects a re-registration of the same email with EmailTakenError (UNIQUE → 409)", async () => {
-    await createUser(testEnv.DB, EMAIL, PASSWORD);
-    // The UNIQUE email constraint is the FINAL de-dup arbiter (§17.2) — a second
-    // INSERT of the same email collides and surfaces as EmailTakenError.
+  // 去重三态 (§17.2 修订，防「占座别人邮箱」):
+  //   不存在 → 建号；未验证 → 覆盖重注册（换新 id + 新密码 + 清残留）；已验证 → 锁死 (EmailTakenError)。
+
+  it("OVERWRITES an UNVERIFIED same-email re-registration with a NEW id (未验证可覆盖, §17.2)", async () => {
+    const first = await createUser(testEnv.DB, EMAIL, PASSWORD);
+    // The email exists but is unverified (email_verified=0) → the真实邮箱主人 can take it
+    // back: a re-register succeeds, mints a NEW user id, and stores the NEW password.
+    const second = await createUser(testEnv.DB, EMAIL, "another-strong-password");
+    expect(second.id).not.toBe(first.id);
+    // The email row now resolves to the NEW account (single users row per email, UNIQUE).
+    const row = await findUserByEmail(testEnv.DB, EMAIL);
+    expect(row!.id).toBe(second.id);
+    // ...and the old account id no longer exists (覆盖清掉了旧未验证行).
+    expect(await findUserById(testEnv.DB, first.id)).toBeNull();
+    // The NEW password authenticates; the OLD one no longer does.
+    expect(await authenticateUser(testEnv.DB, EMAIL, "another-strong-password")).not.toBeNull();
+    expect(await authenticateUser(testEnv.DB, EMAIL, PASSWORD)).toBeNull();
+  });
+
+  it("LOCKS a VERIFIED email — re-registration throws EmailTakenError (一旦验证就锁死, §17.2)", async () => {
+    const { id } = await createUser(testEnv.DB, EMAIL, PASSWORD);
+    // Once the email is verified (§23.4), it is locked: nobody can overwrite it.
+    await markEmailVerified(testEnv.DB, id);
     await expect(createUser(testEnv.DB, EMAIL, "another-strong-password")).rejects.toBeInstanceOf(
       EmailTakenError,
     );
+    // The verified account is untouched: its original password still authenticates.
+    expect(await authenticateUser(testEnv.DB, EMAIL, PASSWORD)).not.toBeNull();
   });
 });
 

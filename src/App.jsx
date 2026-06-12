@@ -11,6 +11,7 @@ import {
   SchemaDisplay,
   Queue,
   Suggestions,
+  Alert,
 } from "@agentaily/design-system";
 
 import { Icon, ChatThread, ChatComposer } from "./chat.jsx";
@@ -20,13 +21,25 @@ import { LoginDialog } from "./auth.jsx";
 import { SettingsDialog } from "./settings.jsx";
 import { FormsPanel, PublishFeedback } from "./forms-panel.jsx";
 import { PublicFormPage } from "./public-form.jsx";
-import { matchPublicForm, currentPathname } from "./core/router";
+import { ResetPasswordPage } from "./reset-password.jsx";
+import { VerifyEmailPage } from "./verify-email.jsx";
+import {
+  matchPublicForm,
+  matchResetPassword,
+  matchVerifyEmail,
+  currentPathname,
+  currentSearch,
+} from "./core/router";
 import { MessageQueue } from "./core/queue";
 import { createFormModel, applyDesignerTool, uid, DESIGNER_SYSTEM } from "./core/designerTools";
 import { runDesignerTurn } from "./core/designerLoop";
 import { streamDesignerChat } from "./core/designerChat";
 import { ApiError } from "./core/apiClient";
-import { isLoggedIn as authIsLoggedIn } from "./core/auth";
+import {
+  isLoggedIn as authIsLoggedIn,
+  requestEmailVerification as authRequestEmailVerification,
+  getCurrentUser as authGetCurrentUser,
+} from "./core/auth";
 
 // Fixed follow-up prompt chips shown once a form exists (a product affordance,
 // not model output) — keeps "继续改" discoverable. Each routes through the agent.
@@ -93,22 +106,32 @@ function schemaFor(meta, fields) {
   return out;
 }
 
-// ── 路由分流挂载点 (第 6 步, SPEC §16.4.1) ───────────────────────────────────
+// ── 路由分流挂载点 (第 6 步, SPEC §16.4.1 / §23.6 / §24.5) ─────────────────────
 // The app's ONE route split (no react-router — see src/core/router.ts). App reads the
-// current pathname (injectable for tests, defaults to currentPathname()) and:
-//   • /f/:slug  → render ONLY <PublicFormPage slug=...> — the bare answerer view, with
-//     NONE of the designer chrome (no chat / preview / login / settings / publish) and
-//     no owner token. publicClient handles its I/O with NO Bearer.
-//   • anything else → the full designer (<DesignerApp>) below.
-// This wrapper does the decision with no hooks before the branch, so the two routes
-// never share hook order. Tests drive the split by passing an explicit `pathname`
-// (and may inject getPublicForm/submitForm through to PublicFormPage).
+// current pathname + search (injectable for tests) and mounts ONE bare page when a
+// public/auth-landing route matches, else the full designer:
+//   • /f/:slug             → <PublicFormPage>   — the bare answerer view (公开填写).
+//   • /reset-password?token= → <ResetPasswordPage> — set a new password (§24.5).
+//   • /verify-email?status=  → <VerifyEmailPage>    — show the verify result (§23.6).
+//   • anything else        → the full designer (<DesignerApp>) below.
+// Each landing page is chrome-less: NO chat / preview / login / settings / publish, and
+// NO owner token held on the page itself (reset/verify I/O is public, NO Bearer). This
+// wrapper decides with no hooks before the branch, so routes never share hook order.
+// Tests drive the split by passing explicit `pathname` / `search` (and may inject the
+// per-route seams: getPublicForm/submitForm, confirmReset, onBackToLogin/onBackToApp).
 export default function App({
   pathname = currentPathname(),
+  search = currentSearch(),
   // PublicFormPage I/O seams, injected straight through on the public route so
   // App-level tests can drive the public-page fetch/submit deterministically.
   getPublicForm,
   submitForm,
+  // ResetPasswordPage seam (§24.5): the confirm client, injectable for tests.
+  confirmReset,
+  // Landing-page navigation seams (§23.6 / §24.5): route 回登录 / 回设计器, injectable
+  // so tests assert the affordance without a real navigation.
+  onBackToLogin,
+  onBackToApp,
   ...rest
 } = {}) {
   const publicRoute = matchPublicForm(pathname);
@@ -121,6 +144,20 @@ export default function App({
       />
     );
   }
+  const resetRoute = matchResetPassword(pathname, search);
+  if (resetRoute) {
+    return (
+      <ResetPasswordPage
+        token={resetRoute.token}
+        confirmReset={confirmReset}
+        onBackToLogin={onBackToLogin}
+      />
+    );
+  }
+  const verifyRoute = matchVerifyEmail(pathname, search);
+  if (verifyRoute) {
+    return <VerifyEmailPage status={verifyRoute.status} onBackToApp={onBackToApp} />;
+  }
   return <DesignerApp {...rest} />;
 }
 
@@ -129,6 +166,9 @@ function DesignerApp({
   login,
   register,
   logout,
+  // 找回密码 发起 (§24.5) — injected through to LoginDialog's forgot sub-state so
+  // App-level tests can drive it deterministically (defaults to core/auth inside the dialog).
+  requestPasswordReset,
   // Integration-settings client (SPEC §12/§14). Defaults to the real configClient
   // functions inside SettingsDialog; injectable here so App-level tests can drive
   // the 401 → close-settings + open-login wiring deterministically (same seam as
@@ -148,6 +188,13 @@ function DesignerApp({
   // 数据后台「看提交」(§18). Defaults to the real submissionsClient inside SubmissionsView
   // (mounted per-row by FormsPanel); injectable here for App-level tests, same seam.
   listSubmissions,
+  // 邮箱未验证 banner 的「重新发送」(§23.3 owner-only). Defaults to the real
+  // core/auth.requestEmailVerification (POST with Bearer); injectable for tests.
+  requestEmailVerification = authRequestEmailVerification,
+  // Authoritative 邮箱验证状态 read (§23.6 owner-only): GET /api/auth/me →
+  // { email, emailVerified }, fail-soft to null. Defaults to the real
+  // core/auth.getCurrentUser; injectable so banner tests are deterministic.
+  getCurrentUser = authGetCurrentUser,
 } = {}) {
   const [t, setTweak] = useUiState(UI_DEFAULTS);
   const [messages, setMessages] = useState([]);
@@ -169,6 +216,18 @@ function DesignerApp({
   // owner session (SPEC §17): logged-in unlocks the owner-only /api/chat proxy.
   const [loggedIn, setLoggedIn] = useState(() => authIsLoggedIn());
   const [loginOpen, setLoginOpen] = useState(false);
+  // 邮箱验证状态 (§23.6). The AUTHORITATIVE bit comes from GET /api/auth/me
+  // (getCurrentUser below) — fetched on mount (when logged in) and after each login —
+  // so the banner is correct across reloads AND on a plain 登录, not just a fresh 注册.
+  // We default to `true` (no banner) and treat「刚注册」as an OPTIMISTIC initial flip to
+  // 未验证 (register always yields email_verified=0) purely to avoid a first-frame
+  // flicker before `me` resolves; once `me` returns it is authoritative. A failed/null
+  // `me` leaves whatever optimistic value we have (banner stays a soft nudge, never a
+  // hard error). Logout resets it to true (no owner to verify).
+  const [emailVerified, setEmailVerified] = useState(true);
+  // 重新发送 反馈: "" | "sending" | "sent" — the banner shows a neutral「已重新发送」
+  // after a resend, never leaking the backend's already-verified/send状态 (§23.3).
+  const [resendState, setResendState] = useState("");
   // integration settings (SPEC §12 + §14): owner connects DeepSeek + 飞书 here.
   const [settingsOpen, setSettingsOpen] = useState(false);
   // single-column mobile layout (≤720px): one pane at a time via the sub-bar.
@@ -226,6 +285,44 @@ function DesignerApp({
       return e.message || `对话服务出错（${e.status}）。`;
     }
     return "无法连接到对话服务，请检查网络或后端地址（VITE_API_BASE）。";
+  };
+
+  // Pull the AUTHORITATIVE 验证状态 from GET /api/auth/me (§23.6). getCurrentUser is
+  // fail-soft (resolves null on 401 / network), so on a null we leave `emailVerified`
+  // as-is (keep the optimistic value, never crash). On a real snapshot we adopt its
+  // bit — this is what makes the banner correct after a reload and on a plain 登录.
+  const refreshMe = useCallback(async () => {
+    const me = await getCurrentUser();
+    if (me) setEmailVerified(me.emailVerified);
+  }, [getCurrentUser]);
+
+  // On mount (and whenever we transition into a logged-in session), read me once so
+  // the banner reflects the real verified bit — independent of how we got here
+  // (reload, 登录, or 注册). Logged-out sessions have nothing to verify, so we skip.
+  useEffect(() => {
+    if (loggedIn) refreshMe();
+  }, [loggedIn, refreshMe]);
+
+  // 重新发送验证邮件 (§23.3, owner-only). The request always succeeds when
+  // authenticated (already-verified → no-op; unverified → sends), so on resolve we
+  // show ONE neutral「已重新发送」regardless. A 401 means the session lapsed — route
+  // into login (same handler as the chat/settings 401 flow) so the fix is one step away.
+  const resendVerification = async () => {
+    if (resendState === "sending") return;
+    setResendState("sending");
+    try {
+      await requestEmailVerification();
+      setResendState("sent");
+      // Re-read me: the owner may have verified out-of-band (e.g. clicked the email
+      // link in another tab); adopt the authoritative bit so the banner self-clears.
+      refreshMe();
+    } catch (e) {
+      setResendState("");
+      if (e instanceof ApiError && e.status === 401) {
+        setLoggedIn(false);
+        setLoginOpen(true);
+      }
+    }
   };
 
   // One streamed LLM call → one assistant bubble. Text streams in live; a turn
@@ -435,6 +532,34 @@ function DesignerApp({
         </div>
       </header>
 
+      {/* 邮箱未验证 banner (§23.6). Soft — it gates NOTHING (§23.1); it only nudges the
+          owner to verify. Shown when logged in AND the AUTHORITATIVE verified bit from
+          GET /api/auth/me (emailVerified, fetched on mount/login above) is false — so it
+          is correct across reloads and on a plain 登录, not just a fresh 注册. The
+          「重新发送」action calls the owner-only resend; after it resolves we show ONE
+          neutral「已重新发送」(§23.3) and re-read me so an out-of-band verify self-clears. */}
+      {loggedIn && !emailVerified ? (
+        <div className="d-verify-banner" data-testid="verify-banner">
+          <Alert variant="warn" title="邮箱未验证" icon={<Icon name="mail" size={16} />}>
+            <div className="d-verify-banner__row">
+              <span>验证你的邮箱可锁定它归你所有；在此之前所有功能照常可用。</span>
+              {resendState === "sent" ? (
+                <span className="ax-label d-verify-banner__sent">已重新发送</span>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={resendState === "sending"}
+                  onClick={resendVerification}
+                >
+                  {resendState === "sending" ? "发送中…" : "重新发送"}
+                </Button>
+              )}
+            </div>
+          </Alert>
+        </div>
+      ) : null}
+
       {isMobile ? (
         <div className="d-mbar">
           <button
@@ -592,9 +717,29 @@ function DesignerApp({
         login={login}
         register={register}
         logout={logout}
+        requestPasswordReset={requestPasswordReset}
         onClose={() => setLoginOpen(false)}
-        onLoggedIn={() => setLoggedIn(true)}
-        onLoggedOut={() => setLoggedIn(false)}
+        // setLoggedIn(true) flips loggedIn false→true, which triggers the mount/login
+        // effect to fetch GET /api/auth/me and adopt the AUTHORITATIVE verified bit
+        // (§23.6) — so a plain 登录 is now as accurate as a 注册. For 注册 we ALSO flip
+        // emailVerified→false optimistically (register always yields email_verified=0)
+        // to avoid a first-frame flicker before `me` resolves; `me` then confirms it.
+        onLoggedIn={(info) => {
+          if (info?.registered) {
+            setEmailVerified(false);
+            setResendState("");
+          }
+          setLoggedIn(true);
+          // Always re-read me on login: covers a re-login while already logged in
+          // (where setLoggedIn(true) is a no-op and wouldn't retrigger the effect).
+          refreshMe();
+        }}
+        onLoggedOut={() => {
+          setLoggedIn(false);
+          // logging out drops the session — hide the banner (no owner to verify).
+          setEmailVerified(true);
+          setResendState("");
+        }}
       />
 
       {/* Integration settings (§12/§14). A 401 from any config call means the owner

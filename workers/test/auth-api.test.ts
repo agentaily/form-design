@@ -6,6 +6,7 @@ import {
   resetConfig,
   resetForms,
   resetUsers,
+  resetAuthTokens,
   testEnv,
   uniqueEmail,
   registerOwner,
@@ -122,6 +123,24 @@ async function usersRowCount(): Promise<number> {
   return row?.n ?? 0;
 }
 
+/** Read the real user id (UUID) the de-dup arbiter assigned to an email, or "" if absent. */
+async function userIdForEmail(email: string): Promise<string> {
+  const row = await testEnv.DB.prepare("SELECT id FROM users WHERE email = ?")
+    .bind(email)
+    .first<{ id: string }>();
+  return row?.id ?? "";
+}
+
+/**
+ * Mark a user's email as verified (email_verified=1) directly in D1 — the §17.2
+ * lock that flips re-registration from「未验证可覆盖」(201) to「已验证锁死」(409).
+ * In prod this happens via GET /api/auth/verify-email/confirm (§23.4); here we set
+ * the bit directly so the auth-feature suite stays focused on the de-dup contract.
+ */
+async function markVerified(email: string): Promise<void> {
+  await testEnv.DB.prepare("UPDATE users SET email_verified = 1 WHERE email = ?").bind(email).run();
+}
+
 describe("owner auth (workers/features/auth.feature)", () => {
   beforeAll(async () => {
     await applySchema();
@@ -131,6 +150,7 @@ describe("owner auth (workers/features/auth.feature)", () => {
     await resetConfig();
     await resetForms();
     await resetUsers();
+    await resetAuthTokens();
   });
 
   // --- 注册（POST /api/auth/register）---------------------------------------
@@ -162,23 +182,85 @@ describe("owner auth (workers/features/auth.feature)", () => {
     expect(sub).toBe(userId?.id);
   });
 
-  it("Scenario: 注册一个已被占用的邮箱返回 409", async () => {
-    // Given 一个已注册了某邮箱的后端
+  // REALIGNED to §17.2 修订「注册去重三态」: the old test asserted「占用邮箱 → 409」
+  // unconditionally. After the「未验证可覆盖」rework, occupying an UNVERIFIED email no
+  // longer 409s — it overwrites (201, new id, residue cleared). Only a VERIFIED email
+  // locks (409). The two scenarios below pin both legs.
+
+  it("Scenario: 邮箱未验证时可被真实主人覆盖重注册（201，换新 id、清旧残留）", async () => {
+    // Given 某邮箱已被一个从未验证的账号注册占用 (注册即登录, email_verified=0)
     const email = uniqueEmail();
     expect((await postRegister({ email, password: TEST_PASSWORD })).status).toBe(201);
+    const oldId = await userIdForEmail(email);
+    expect(oldId).not.toBe("");
     expect(await usersRowCount()).toBe(1);
 
-    // When 访客用同一个邮箱再次请求注册 (a DIFFERENT password — email is the de-dup key)
+    // The old (unverified) account leaves residue keyed on its id: an owner config row
+    // + a published form. The §17.2 覆盖重注册 must wipe BOTH when the email is reclaimed.
+    await testEnv.DB.prepare(
+      "INSERT INTO owner_config (owner_id, deepseek_model, updated_at) VALUES (?, 'residue-model', '2026-01-01T00:00:00Z')",
+    )
+      .bind(oldId)
+      .run();
+    await testEnv.DB.prepare(
+      "INSERT INTO forms (slug, owner_id, meta_json, schema_json, status, created_at) VALUES ('residue-slug', ?, '{}', '[]', 'published', '2026-01-01T00:00:00Z')",
+    )
+      .bind(oldId)
+      .run();
+
+    // When 另一人用同一邮箱与新密码重新注册
     const res = await postRegister({ email, password: "another-strong-password-2" });
 
-    // Then 响应状态码为 409
+    // Then 重新注册成功并成为该邮箱的新账号 (201 + a token bound to a NEW id)
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { token?: string };
+    expect(body.token).toBeTypeOf("string");
+    const newSub = decodeJwtSub(body.token!);
+    // Still exactly one row for the email, but it's a DIFFERENT user id (covered over).
+    expect(await usersRowCount()).toBe(1);
+    const newId = await userIdForEmail(email);
+    expect(newId).not.toBe("");
+    expect(newId).not.toBe(oldId);
+    expect(newSub).toBe(newId);
+
+    // And 旧的未验证账号及其残留配置被清除 — no owner_config / forms left under the old id.
+    const cfg = await testEnv.DB.prepare(
+      "SELECT COUNT(*) AS n FROM owner_config WHERE owner_id = ?",
+    )
+      .bind(oldId)
+      .first<{ n: number }>();
+    const forms = await testEnv.DB.prepare("SELECT COUNT(*) AS n FROM forms WHERE owner_id = ?")
+      .bind(oldId)
+      .first<{ n: number }>();
+    expect(cfg?.n).toBe(0);
+    expect(forms?.n).toBe(0);
+
+    // The new account can log in with its NEW password; the old password no longer works.
+    expect((await postLogin({ email, password: "another-strong-password-2" })).status).toBe(200);
+    expect((await postLogin({ email, password: TEST_PASSWORD })).status).toBe(401);
+  });
+
+  it("Scenario: 邮箱一旦验证就锁死不可再被注册（409）", async () => {
+    // Given 某邮箱已被一个已验证的账号占用
+    const email = uniqueEmail();
+    expect((await postRegister({ email, password: TEST_PASSWORD })).status).toBe(201);
+    const verifiedId = await userIdForEmail(email);
+    await markVerified(email); // 完成验证 → §17.2 锁死
+    expect(await usersRowCount()).toBe(1);
+
+    // When 另一人用同一邮箱尝试注册 (a DIFFERENT password)
+    const res = await postRegister({ email, password: "another-strong-password-2" });
+
+    // Then 注册被拒绝并提示该邮箱已注册 (409, no token, no new user)
     expect(res.status).toBe(409);
     const body = (await res.json()) as { token?: string; error?: string };
     expect(body.error).toBeTypeOf("string");
-    // And 没有签发任何 token
     expect(body.token).toBeUndefined();
-    // And 没有新建任何用户 (still exactly the one from the first register)
     expect(await usersRowCount()).toBe(1);
+
+    // And 已验证账号不受影响 — same id, still logs in with its ORIGINAL password.
+    expect(await userIdForEmail(email)).toBe(verifiedId);
+    expect((await postLogin({ email, password: TEST_PASSWORD })).status).toBe(200);
   });
 
   it("Scenario: 注册时密码过弱返回 400", async () => {

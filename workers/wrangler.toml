@@ -19,3 +19,12 @@ migrations_dir = "migrations"
 # CONFIG_KEY (AES-GCM master key for encrypting owner secrets) is set via
 # `wrangler secret put CONFIG_KEY` in prod, never committed. For tests it's
 # injected as a miniflare binding in vitest.config.ts (a throwaway 256-bit key).
+
+# 发信抽象 (§22) 的非密配置 —— 明文 vars（非敏感，可入 git）：
+#   * EMAIL_FROM  : Resend 的发件人（mail.agentaily.com 发件域已验证，§22.1）。
+#   * APP_BASE_URL: 前端站点根，拼邮件里的落地页链接（验证确认 / 找回密码，§22.1 / §23.3 / §24.2）。
+# RESEND_API_KEY 是 **secret**，**不**写进本文件——生产 `wrangler secret put RESEND_API_KEY`
+# （release-eng 负责），测试由 vitest.config.ts 注入 throwaway 值（不真发信，外环 mock fetch）。
+[vars]
+EMAIL_FROM = "Agentaily Forms <noreply@mail.agentaily.com>"
+APP_BASE_URL = "https://form-design.agentaily.com"

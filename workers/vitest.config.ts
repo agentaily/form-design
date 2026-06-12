@@ -20,6 +20,14 @@ import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 // OWNER_PASSWORD is GONE post multi-user rework: there is no single shared owner
 // password — every owner is a real `users` row (email + per-user password hash),
 // so register/login derive the token from the users table, not an env binding.
+//
+// Test environment for the transactional-email feature (SPEC.md §22–§24):
+//   - RESEND_API_KEY: the Resend send-email secret. A FIXED throwaway value injected
+//                     here (prod is a `wrangler secret`, never committed). Email tests
+//                     stub global fetch (no real send / no key egress), so this value
+//                     never leaves the isolate.
+//   - EMAIL_FROM / APP_BASE_URL: non-secret [vars] — read from wrangler.toml directly,
+//                     so they're already on c.env in tests; no miniflare override needed.
 export default defineConfig({
   plugins: [
     cloudflareTest({
@@ -30,6 +38,9 @@ export default defineConfig({
           CONFIG_KEY: "P3Kapkxk/Sr/CyvCHLlIVmRUqVvBuxghj596WmWLdoc=",
           // Throwaway owner-auth secret — fixed test value, NOT a prod secret.
           AUTH_SECRET: "test-auth-secret-hmac-key-do-not-use-in-prod-9f3a",
+          // Throwaway Resend key — fixed test value, NOT a prod secret. Email tests
+          // mock fetch so this never hits the network / never leaves the isolate.
+          RESEND_API_KEY: "re_test_THROWAWAY_resend_key_do_not_use_in_prod",
         },
       },
     }),

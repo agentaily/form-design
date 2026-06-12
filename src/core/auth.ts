@@ -19,6 +19,14 @@ interface AuthResponse {
   token: string;
 }
 
+/** The authoritative current-owner snapshot from `GET /api/auth/me` (§23.6). */
+export interface CurrentUser {
+  /** The owner's email (informational; the frontend never decodes the token for it). */
+  email: string;
+  /** Whether the owner has confirmed their email — the SOLE source of the 未验证 banner. */
+  emailVerified: boolean;
+}
+
 /**
  * Register a new owner with email + password (§17.2). Open registration: any
  * valid email + password (≥ 8 chars) self-registers and is **immediately logged
@@ -59,6 +67,78 @@ export async function login(email: string, password: string): Promise<void> {
     throw new Error("登录响应缺少 token");
   }
   setToken(res.token);
+}
+
+/**
+ * Start the 找回密码 flow (§24.1, public): POST `{ email }` to
+ * `/api/auth/password-reset/request`. The backend **always** answers 200 with a
+ * neutral body — whether or not the email is registered — so the UI can never
+ * enumerate accounts. This wrapper goes one step further and **always resolves**:
+ * even a network failure or a non-200 hiccup is swallowed, so the caller shows the
+ * SAME neutral copy「若该邮箱已注册，我们已发送重置链接」in every case and never
+ * leaks a different outcome. No Bearer (the user is logged out by definition).
+ */
+export async function requestPasswordReset(email: string): Promise<void> {
+  try {
+    await apiFetch("/api/auth/password-reset/request", { body: { email } });
+  } catch {
+    // Anti-enumeration: swallow everything so the caller's neutral copy is uniform.
+  }
+}
+
+/**
+ * Finish 找回密码 (§24.3, public): POST `{ token, password }` to
+ * `/api/auth/password-reset/confirm`. On 200 the password is reset (the reset token
+ * is consumed) — this stores **no** session token; the user re-logs in afterwards.
+ * A 400 {@link ApiError} means the link is 失效 / 过期 / 已用 **or** the new password
+ * is 过弱 (the backend returns a unified 400 that does not distinguish them, §24.3) —
+ * rethrown untouched for the caller (the reset landing page) to show. No Bearer.
+ *
+ * The plaintext `password` only ever leaves the browser to this confirm call; it is
+ * never stored client-side.
+ */
+export async function confirmPasswordReset(token: string, password: string): Promise<void> {
+  await apiFetch("/api/auth/password-reset/confirm", { body: { token, password } });
+}
+
+/**
+ * Resend the verification email for the **current** logged-in owner (§23.3,
+ * owner-only): POST `/api/auth/verify-email/request` with the owner's Bearer. The
+ * backend addresses the email by the session `sub` (never a body email), so this
+ * call carries no payload. It **always succeeds** when authenticated (already
+ * verified → no-op 200/204; unverified → sends; send failure is swallowed
+ * server-side) — so a resolve means「已重新发送」for the UI's neutral feedback. A
+ * missing / expired session surfaces as a 401 {@link ApiError} for the caller to
+ * route into login (§23.3).
+ */
+export async function requestEmailVerification(): Promise<void> {
+  await apiFetch("/api/auth/verify-email/request", { method: "POST", auth: true });
+}
+
+/**
+ * Read the **authoritative** current-owner snapshot (§23.6, owner-only): GET
+ * `/api/auth/me` with the owner's Bearer → `{ email, emailVerified }`. This is the
+ * single source of truth for the 邮箱未验证 banner — it makes the banner correct
+ * across reloads and on a plain 登录 (not just a fresh 注册), where the login
+ * response carries no verified bit.
+ *
+ * Degradation is **fail-soft to null**: a missing/expired session (401), any other
+ * non-2xx hiccup, or a network failure all resolve to `null` rather than throw, so a
+ * transient backend problem never crashes the shell and merely leaves the banner in
+ * its (optimistic) default state. `emailVerified` is coerced to a strict boolean so a
+ * 0/1 from the backend's SQLite-backed schema can't leak a truthy-number into the UI.
+ */
+export async function getCurrentUser(): Promise<CurrentUser | null> {
+  let res: { email?: unknown; emailVerified?: unknown } | undefined;
+  try {
+    res = await apiFetch("/api/auth/me", { auth: true });
+  } catch {
+    // 401 (会话失效 / 无 token) and any network/backend hiccup → null; the banner
+    // simply keeps its optimistic default rather than surfacing an error.
+    return null;
+  }
+  if (!res || typeof res.email !== "string") return null;
+  return { email: res.email, emailVerified: !!res.emailVerified };
 }
 
 /** Drop the session token (stateless logout — §17.5 keeps no server-side blacklist). */

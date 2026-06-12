@@ -13,7 +13,16 @@
 // The route-split BEHAVIOR (App renders PublicFormPage vs the designer) is pinned at
 // the integration level in tests/integration/public-fill.spec.jsx.
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { matchPublicForm, currentPathname, PUBLIC_FORM_PREFIX } from "../../src/core/router";
+import {
+  matchPublicForm,
+  matchResetPassword,
+  matchVerifyEmail,
+  currentPathname,
+  currentSearch,
+  PUBLIC_FORM_PREFIX,
+  RESET_PASSWORD_PATH,
+  VERIFY_EMAIL_PATH,
+} from "../../src/core/router";
 
 describe("router · PUBLIC_FORM_PREFIX", () => {
   it("is the contract-fixed /f/ prefix (SPEC §16.4.1)", () => {
@@ -61,6 +70,81 @@ describe("router · matchPublicForm — the designer (null) cases", () => {
     // "/foo" shares the "/f" character prefix but is a different segment → the designer.
     expect(matchPublicForm("/foo")).toBeNull();
     expect(matchPublicForm("/features")).toBeNull();
+  });
+});
+
+describe("router · auth landing paths (SPEC §23.6 / §24.5)", () => {
+  it("exposes the contract-fixed landing paths", () => {
+    expect(RESET_PASSWORD_PATH).toBe("/reset-password");
+    expect(VERIFY_EMAIL_PATH).toBe("/verify-email");
+  });
+});
+
+describe("router · matchResetPassword — recognises /reset-password?token=", () => {
+  it("matches the reset path and pulls the token from the search string", () => {
+    expect(matchResetPassword("/reset-password", "?token=abc123")).toEqual({ token: "abc123" });
+  });
+
+  it("URL-decodes the token", () => {
+    expect(matchResetPassword("/reset-password", "?token=a%20b")).toEqual({ token: "a b" });
+  });
+
+  it("tolerates a single trailing slash", () => {
+    expect(matchResetPassword("/reset-password/", "?token=abc")).toEqual({ token: "abc" });
+  });
+
+  it("returns a match with an empty token when the token query is missing (page shows a readable hint)", () => {
+    // A missing/blank token still resolves to the reset landing page (not the
+    // designer); the page itself renders the「链接无效」hint. The match carries "".
+    expect(matchResetPassword("/reset-password", "")).toEqual({ token: "" });
+    expect(matchResetPassword("/reset-password", "?foo=bar")).toEqual({ token: "" });
+  });
+
+  it("returns null for any other path (the designer / public form)", () => {
+    expect(matchResetPassword("/", "?token=abc")).toBeNull();
+    expect(matchResetPassword("/reset", "?token=abc")).toBeNull();
+    expect(matchResetPassword("/reset-password/extra", "?token=abc")).toBeNull();
+    expect(matchResetPassword("/f/abc", "")).toBeNull();
+  });
+});
+
+describe("router · matchVerifyEmail — recognises /verify-email?status=", () => {
+  it("matches the verify path and pulls the status (ok / invalid)", () => {
+    expect(matchVerifyEmail("/verify-email", "?status=ok")).toEqual({ status: "ok" });
+    expect(matchVerifyEmail("/verify-email", "?status=invalid")).toEqual({ status: "invalid" });
+  });
+
+  it("tolerates a single trailing slash", () => {
+    expect(matchVerifyEmail("/verify-email/", "?status=ok")).toEqual({ status: "ok" });
+  });
+
+  it("normalises a missing/unknown status to 'invalid' (fail-closed)", () => {
+    // The page only knows two outcomes; anything that is not the literal 'ok' is
+    // treated as the failure copy — never claim 已验证 without a 'status=ok'.
+    expect(matchVerifyEmail("/verify-email", "")).toEqual({ status: "invalid" });
+    expect(matchVerifyEmail("/verify-email", "?status=weird")).toEqual({ status: "invalid" });
+  });
+
+  it("returns null for any other path", () => {
+    expect(matchVerifyEmail("/", "?status=ok")).toBeNull();
+    expect(matchVerifyEmail("/verify", "?status=ok")).toBeNull();
+    expect(matchVerifyEmail("/verify-email/extra", "")).toBeNull();
+  });
+});
+
+describe("router · currentSearch — the one impure read of the query string", () => {
+  const realLocation = window.location;
+  afterEach(() => {
+    Object.defineProperty(window, "location", { value: realLocation, configurable: true });
+  });
+
+  it("reads window.location.search when present", () => {
+    Object.defineProperty(window, "location", {
+      value: { pathname: "/reset-password", search: "?token=xyz" },
+      configurable: true,
+    });
+    expect(currentSearch()).toBe("?token=xyz");
+    expect(matchResetPassword(currentPathname(), currentSearch())).toEqual({ token: "xyz" });
   });
 });
 

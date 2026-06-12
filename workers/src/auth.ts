@@ -94,6 +94,41 @@ export interface AuthErrorBody {
   error: string;
 }
 
+// ---------------------------------------------------------------------------
+// 邮箱验证（§23）/ 找回密码（§24）的请求 / 响应形状
+// ---------------------------------------------------------------------------
+
+/**
+ * `POST /api/auth/password-reset/request` 的请求体（§24.1，公开）。
+ * 端点**永远回 200**（防邮箱枚举，不泄漏邮箱是否注册）；仅当邮箱存在时才真发信。
+ */
+export interface PasswordResetRequestBody {
+  /** 要找回密码的邮箱。 */
+  email: string;
+}
+
+/**
+ * `POST /api/auth/password-reset/confirm` 的请求体（§24.3，公开）。
+ * 校验 token（未过期 / 未用过 / kind='reset'）+ 新密码强度（≥ 8，复用 §17.2）→ 重置密码。
+ */
+export interface PasswordResetConfirmBody {
+  /** 来自邮件链接 ?token= 的一次性明文 token。 */
+  token: string;
+  /** 新明文密码（强度校验复用 §17.2 的 ≥ 8，弱 → 400）。 */
+  password: string;
+}
+
+/**
+ * 邮箱验证 / 找回密码端点的「中性 OK」响应体（§23 / §24）。用于不该泄漏内部状态的成功回执：
+ * - `POST /api/auth/verify-email/request`（重发，永远 200/204，已验证则 no-op，§23.3）。
+ * - `POST /api/auth/password-reset/request`（永远 200，防枚举，无论邮箱是否存在，§24.1）。
+ * - `POST /api/auth/password-reset/confirm`（200，改密成功，§24.3）。
+ * 文案中性，**绝不**回显「邮箱是否注册」「是否真发了信」等可辅助枚举的信号（§24.1）。
+ */
+export interface NeutralOkBody {
+  ok: true;
+}
+
 /**
  * Hono context 上挂 session 的变量键（§17.6）：`requireAuth` 校验通过后
  * `c.set('session', session)`，下游 owner-only handler 可 `c.get('session')` 取用

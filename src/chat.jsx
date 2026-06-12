@@ -62,6 +62,13 @@ const ICON_PATHS = {
   ),
   x: <path d="M18 6 6 18M6 6l12 12" />,
   arrow: <path d="M5 12h14M12 5l7 7-7 7" />,
+  "arrow-left": <path d="M19 12H5M12 19l-7-7 7-7" />,
+  mail: (
+    <g>
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <path d="m22 7-10 6L2 7" />
+    </g>
+  ),
   lock: (
     <g>
       <rect x="3" y="11" width="18" height="11" rx="2" />
