@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { login, register, logout, isLoggedIn } from "../../src/core/auth";
+import {
+  login,
+  register,
+  logout,
+  isLoggedIn,
+  requestPasswordReset,
+  confirmPasswordReset,
+  requestEmailVerification,
+  getCurrentUser,
+} from "../../src/core/auth";
 import { getToken, setToken, clearToken } from "../../src/core/apiClient";
 
 // Inner-loop unit specs for src/core/auth — the frontend session seam (SPEC §17,
@@ -115,6 +124,188 @@ describe("auth · register", () => {
 
     await expect(register("new@example.com", "strong-password")).rejects.toThrow();
     expect(getToken()).toBeNull();
+  });
+});
+
+describe("auth · requestPasswordReset (§24.1 — 公开发起，防枚举)", () => {
+  it("POSTs { email } to /api/auth/password-reset/request and resolves on 200", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestPasswordReset("owner@example.com");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/auth/password-reset/request");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ email: "owner@example.com" });
+  });
+
+  it("does not attach a Bearer header (the request entry is public, even if a stale token exists)", async () => {
+    setToken("stale-token");
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestPasswordReset("owner@example.com");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers.authorization).toBeUndefined();
+  });
+
+  it("resolves (never rejects) so the neutral copy is shown even on a backend hiccup (anti-enumeration)", async () => {
+    // The backend contract is 永远 200; but if the network/backend misbehaves the
+    // UI must still show the SAME neutral copy and never leak a different outcome.
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "boom" }, { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(requestPasswordReset("owner@example.com")).resolves.toBeUndefined();
+  });
+
+  it("resolves even when fetch itself rejects (offline)", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(requestPasswordReset("owner@example.com")).resolves.toBeUndefined();
+  });
+});
+
+describe("auth · confirmPasswordReset (§24.3 — 凭一次性 reset token 改密)", () => {
+  it("POSTs { token, password } to /api/auth/password-reset/confirm and resolves on 200", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await confirmPasswordReset("reset-token-abc", "brand-new-pass");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/auth/password-reset/confirm");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({
+      token: "reset-token-abc",
+      password: "brand-new-pass",
+    });
+  });
+
+  it("does not store any token on success (reset ≠ login; the user re-logs in)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await confirmPasswordReset("reset-token-abc", "brand-new-pass");
+    expect(getToken()).toBeNull();
+  });
+
+  it("propagates a 400 ApiError (链接失效 / 过期 / 已用 / 弱密码) for the UI to map", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ error: "invalid or expired token" }, { status: 400 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(confirmPasswordReset("dead-token", "brand-new-pass")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 400,
+    });
+  });
+});
+
+describe("auth · requestEmailVerification (§23.3 — owner-only 重发)", () => {
+  it("POSTs to /api/auth/verify-email/request WITH a Bearer header (owner-only)", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestEmailVerification();
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/auth/verify-email/request");
+    expect(init.method).toBe("POST");
+    expect(init.headers.authorization).toBe("Bearer owner-jwt");
+  });
+
+  it("resolves on an empty 204 (already verified → no-op, §23.3)", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(requestEmailVerification()).resolves.toBeUndefined();
+  });
+
+  it("propagates a 401 ApiError (会话失效 → 引导先登录, §23.3)", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(requestEmailVerification()).rejects.toMatchObject({
+      name: "ApiError",
+      status: 401,
+    });
+  });
+});
+
+describe("auth · getCurrentUser (§23.6 — 读真实验证状态)", () => {
+  it("GETs /api/auth/me WITH a Bearer header (owner-only) and returns { email, emailVerified }", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ email: "owner@example.com", emailVerified: false }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const me = await getCurrentUser();
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/auth/me");
+    expect(init.method).toBe("GET");
+    expect(init.headers.authorization).toBe("Bearer owner-jwt");
+    expect(me).toEqual({ email: "owner@example.com", emailVerified: false });
+  });
+
+  it("returns emailVerified=true when the backend says the email is verified", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ email: "owner@example.com", emailVerified: true }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentUser()).resolves.toEqual({
+      email: "owner@example.com",
+      emailVerified: true,
+    });
+  });
+
+  it("coerces emailVerified to a strict boolean (backend may send 0/1, §23 schema)", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ email: "owner@example.com", emailVerified: 0 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const me = await getCurrentUser();
+    expect(me).toEqual({ email: "owner@example.com", emailVerified: false });
+    expect(me.emailVerified).toBe(false);
+  });
+
+  it("resolves to null on a 401 (会话失效 / 无 token) instead of throwing — banner just stays off", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentUser()).resolves.toBeNull();
+  });
+
+  it("resolves to null on a network failure (offline) instead of throwing", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentUser()).resolves.toBeNull();
+  });
+
+  it("resolves to null on any non-2xx (5xx hiccup) so a transient backend error never crashes the shell", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "boom" }, { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentUser()).resolves.toBeNull();
   });
 });
 

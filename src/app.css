@@ -496,6 +496,47 @@ body {
   line-height: var(--leading-snug);
   margin: 0;
 }
+/* 「忘记密码？」/「返回登录」 inline text entry — a borderless link affordance that
+   inherits DS tokens (no hard-coded color). */
+.d-auth__link {
+  align-self: flex-start;
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out);
+}
+.d-auth__link:hover {
+  color: var(--text-body);
+}
+
+/* ─────────────────────── 邮箱未验证 banner (设计器顶部, §23.6) ─────────────────── */
+.d-verify-banner {
+  padding: 0 var(--space-4, 16px);
+  margin-top: var(--space-2, 8px);
+}
+.d-verify-banner__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3, 12px);
+  flex-wrap: wrap;
+}
+.d-verify-banner__sent {
+  color: var(--text-muted);
+}
+
+/* ─────────────── 找回密码 / 邮箱验证 落地页 (裸页, §23.6 / §24.5) ──────────────── */
+/* Reuses the public-fill page shell (.pf-page / .pf-card / .pf-head / .pf-foot). */
+.auth-land__state,
+.auth-land__form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
 
 /* ───────────────────────── integration settings dialog ───────────────────────── */
 .d-settings {

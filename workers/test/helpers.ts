@@ -15,10 +15,13 @@
 import { env, SELF } from "cloudflare:test";
 import { vi } from "vitest";
 import initialSchema from "../migrations/0001_initial_schema.sql?raw";
+import authTokensSchema from "../migrations/0002_auth_tokens.sql?raw";
 
 // Schema migrations applied to the test D1, in order — mirrors what prod gets via
 // `wrangler d1 migrations apply`. Append future schema migrations to this list.
-const SCHEMA_MIGRATIONS = [initialSchema];
+//   0001 — users / owner_config / forms.
+//   0002 — auth_tokens (邮箱验证 + 找回密码的一次性 token，§22.4 / §23 / §24).
+const SCHEMA_MIGRATIONS = [initialSchema, authTokensSchema];
 
 /** The bindings the owner-config + owner-auth features rely on, surfaced for the tests. */
 export interface TestEnv {
@@ -89,6 +92,15 @@ export async function resetForms(): Promise<void> {
  */
 export async function resetUsers(): Promise<void> {
   await testEnv.DB.exec("DELETE FROM users");
+}
+
+/**
+ * Empty the `auth_tokens` table between scenarios (§22.4). The email-verification /
+ * password-reset outer-loops issue + consume one-shot tokens per scenario, so each
+ * must start from a clean table. `applySchema` already builds it (0002 migration).
+ */
+export async function resetAuthTokens(): Promise<void> {
+  await testEnv.DB.exec("DELETE FROM auth_tokens");
 }
 
 // --- Upstream (DeepSeek) fetch mock ----------------------------------------
@@ -185,6 +197,152 @@ export function installUpstreamMock(reply: UpstreamReply = {}): UpstreamMock {
   return {
     calls,
     called: () => calls.length > 0,
+    restore: () => vi.unstubAllGlobals(),
+  };
+}
+
+// --- Resend (transactional email) fetch mock --------------------------------
+//
+// 邮箱验证 / 找回密码 真发信走 Resend 的纯 HTTP API（src/email.ts → POST
+// https://api.resend.com/emails）。外环要 mock 掉这次出网：既断言「发没发 / 发给谁」，
+// 又能从拦截到的请求 body（邮件 html）里提取 `?token=` 明文，再拿它去调 confirm 端点
+// （最忠实于真实流程，§22.1 / §23.4 / §24.3）。
+//
+// 与 installUpstreamMock 同样是 default-deny 的全局 fetch stub：只放行 Resend 端点，
+// 其它 origin 一律抛错——register / login / verify / reset 这些流程本不该 fan-out 到任何
+// 别的上游，所以意外出网就硬失败暴露出来（而非静默打到真实网络）。
+
+/** The Resend send-email endpoint the email layer POSTs to (SPEC.md §22.1). */
+export const RESEND_API_URL = "https://api.resend.com/emails";
+
+/** One captured outbound request to Resend (a transactional send). */
+export interface ResendCall {
+  /** Recipient (the `to` field of the Resend body). */
+  to: string;
+  /** Email subject. */
+  subject: string;
+  /** Email body HTML (carries the one-shot landing link with ?token=). */
+  html: string;
+  /** The `Authorization` header value the Worker sent (to assert key wiring / non-leak). */
+  authorization: string | null;
+  /** The raw parsed Resend request body. */
+  body: { from?: string; to?: string; subject?: string; html?: string };
+}
+
+/** Handle returned by {@link installResendMock} for per-test assertions. */
+export interface ResendMock {
+  /** Every send the Worker made, in order. */
+  readonly calls: ResendCall[];
+  /** Convenience: how many sends happened. */
+  count(): number;
+  /** The most recent send (throws if none — call after asserting count ≥ 1). */
+  last(): ResendCall;
+  /**
+   * Wait until at least `n` sends have been captured (default 1), polling the mock.
+   * Register / verify / reset发信 happen in `c.executionCtx.waitUntil(...)` (background,
+   * §22.2 / §23.2), so under SELF.fetch the send may land AFTER the HTTP response
+   * resolves. Tests await this before asserting on the captured email. Times out
+   * (rejects) after ~1s so a never-sent expectation still fails loudly.
+   */
+  waitForSends(n?: number): Promise<void>;
+  /**
+   * Assert (after letting any background sends drain) that NO send happened — for the
+   * 未注册邮箱 / 已验证 no-op paths (§24.1 / §23.3). Waits a short beat first so a
+   * stray background send can't sneak in after the assertion.
+   */
+  expectNoSend(): Promise<void>;
+  /**
+   * Extract the one-shot token from a captured email's link (the `?token=` plaintext
+   * the user would click). Defaults to the most recent send. URL-decoded, mirroring
+   * how the backend encodeURIComponent-wraps it into the link (§23.3 / §24.2).
+   */
+  tokenFrom(call?: ResendCall): string;
+  /** Restore the real global fetch (call in afterEach). */
+  restore(): void;
+}
+
+/**
+ * Stub the global `fetch` so the Worker's outbound Resend send is captured + answered
+ * locally — never hitting the real api.resend.com.
+ *
+ * @param opts.status upstream status to return (default 200 = delivered). Pass a 5xx
+ *   to exercise the best-effort / 防枚举 paths where a send FAILURE must not change the
+ *   endpoint's outward behavior (注册仍 201、request 仍 200，§22.2 / §23.2 / §24.1).
+ */
+export function installResendMock(opts: { status?: number } = {}): ResendMock {
+  const calls: ResendCall[] = [];
+  const status = opts.status ?? 200;
+
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    const req = new Request(input as RequestInfo, init);
+    if (!req.url.startsWith(RESEND_API_URL)) {
+      // Default-deny: these auth flows must only ever talk to Resend (no DeepSeek / 飞书).
+      throw new Error(`unexpected outbound fetch to ${req.url} (only ${RESEND_API_URL} is mocked)`);
+    }
+    const bodyText = await req.clone().text();
+    let body: ResendCall["body"] = {};
+    try {
+      body = bodyText.length > 0 ? JSON.parse(bodyText) : {};
+    } catch {
+      body = {};
+    }
+    calls.push({
+      to: typeof body.to === "string" ? body.to : "",
+      subject: typeof body.subject === "string" ? body.subject : "",
+      html: typeof body.html === "string" ? body.html : "",
+      authorization: req.headers.get("authorization"),
+      body,
+    });
+    // 2xx → delivered; a forced 5xx makes sendEmail throw EmailSendError (best-effort
+    // callers swallow it — the endpoint's status code must not change, §22.2).
+    return new Response(status >= 200 && status < 300 ? "{}" : "upstream error", { status });
+  });
+
+  const tokenFrom = (call?: ResendCall): string => {
+    const c = call ?? calls[calls.length - 1];
+    if (!c) return "";
+    // The token rides the landing link as ?token=<plaintext> (encodeURIComponent'd by
+    // the backend). Pull it out + URL-decode it, exactly as the user's click would.
+    const m = c.html.match(/[?&]token=([^"&\s]+)/);
+    if (!m) return "";
+    try {
+      return decodeURIComponent(m[1]);
+    } catch {
+      return m[1];
+    }
+  };
+
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  const waitForSends = async (n = 1): Promise<void> => {
+    const deadline = Date.now() + 1000;
+    while (calls.length < n) {
+      if (Date.now() > deadline) {
+        throw new Error(`installResendMock: expected ≥ ${n} send(s), saw ${calls.length}`);
+      }
+      await sleep(5);
+    }
+  };
+
+  const expectNoSend = async (): Promise<void> => {
+    // Let any background waitUntil send drain, then assert none landed.
+    await sleep(50);
+    if (calls.length !== 0) {
+      throw new Error(`installResendMock: expected NO send, saw ${calls.length}`);
+    }
+  };
+
+  return {
+    calls,
+    count: () => calls.length,
+    last: () => {
+      const c = calls[calls.length - 1];
+      if (!c) throw new Error("installResendMock: no Resend send captured");
+      return c;
+    },
+    waitForSends,
+    expectNoSend,
+    tokenFrom,
     restore: () => vi.unstubAllGlobals(),
   };
 }

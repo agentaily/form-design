@@ -1011,11 +1011,13 @@ CREATE TABLE IF NOT EXISTS forms (
 >
 > **方案（邮箱 + 密码 → session JWT）：** owner 用邮箱 + 密码**注册**（注册即登录）或**登录**，后端校验后签发一个短期 session JWT（用 Worker secret `AUTH_SECRET` 以 `HS256` 签名）；后续 owner-only 端点凭 `Authorization: Bearer <jwt>` 通行。**多 owner**：JWT 的 `sub` 是该用户的**真实 user id**（`users.id`，`crypto.randomUUID()`），不再钉死 `'default'`；它既是 session 主体，也是数据隔离键（对齐 `owner_config.owner_id` / `forms.owner_id`）。
 >
-> **邮箱 + 密码，先不验证邮箱：** 邮箱仅作**唯一标识 + 登录名**。`users.email_verified` 字段**预留（恒 0）**、发信钩子**预留但不启用**——以后接 Resend 是增量、不重构。忘密码暂靠运维手动重置（找回流程留后续 feature）。
+> **邮箱 + 密码 + 软验证（已增量接 Resend）：** 邮箱作**唯一标识 + 登录名**。注册仍是「注册即登录」（不门禁任何功能），但额外异步发一封验证邮件做**软验证**：`users.email_verified` 由「恒 0」升级为真实状态位，完成验证置 1（§23）。验证只服务两件事——①防「占座别人邮箱」（§17.2 修订：未验证可覆盖、已验证锁死）；②前端展示「邮箱未验证」banner。**找回密码**亦已接入（§24，凭一次性 reset token 重置）。发信抽象见 §22，token 表见 §22.4 / migration `0002`。
 >
 > **本节范围（仅 Worker 端）：** `POST /api/auth/register`（注册即登录）、`POST /api/auth/login`（邮箱 + 密码 → token）、users 表、密码哈希约定、auth 中间件（验签 + 未过期）、owner-only 端点保护清单 + **按 owner 隔离数据**、横向越权约束（§17.9）、env secret 约定、安全。
 >
-> **不在本节：** 邮箱验证 / 发信（预留不启用）、改密 / 找回密码、刷新 token / 登出黑名单、限流 / 防爆破 / 验证码、RBAC / 细粒度权限、前端登录注册页 UI。这些留后续 feature。
+> **不在本节（迁出）：** 邮箱验证 + 发信（已增量，独立成 §22 发信 / §23 邮箱验证）、找回密码（§24）。
+>
+> **仍不在范围：** 刷新 token / 登出黑名单、限流 / 防爆破 / 验证码、RBAC / 细粒度权限、前端登录注册页 UI。这些留后续 feature。
 >
 > **数据迁移（运维一次性，不在本节细化）：** 现有线上 `owner_config` / `forms` 各有一行 `owner_id='default'`。部署新代码 + 建 `users` 表后，由运维用真实邮箱注册首个账号，再跑一次性 SQL 把 `owner_id='default'` 的行 `UPDATE` 成该账号的 `users.id`（脚本 `workers/migrations/002-migrate-default-owner.sql`，user id 部署时填）。这是运维动作，不属本节契约。
 
@@ -1025,6 +1027,11 @@ CREATE TABLE IF NOT EXISTS forms (
 |---|---|---|---|
 | `POST /api/auth/register` | 任意访客 | **公开**（注册入口自身不保护） | body `{ email, password }` → 创建 user（注册即登录）→ 201 `{ token }`（`sub`=新 user.id）；邮箱占用 → 409；非法 email / 弱密码(<8) → 400 |
 | `POST /api/auth/login` | owner | **公开**（登录入口自身不保护） | body `{ email, password }` → 查 user + 校验密码 → 200 `{ token }`（`sub`=user.id）；失败**统一 401** |
+| `GET /api/auth/me` | owner | **owner-only** | 回**当前登录 owner**的 `{ email, emailVerified }`，供前端 banner 跨刷新拿真实验证位；sub 指向已删账号 → 401（§17.12）|
+| `POST /api/auth/verify-email/request` | owner | **owner-only** | 给**当前登录 owner**重发验证邮件；已验证则 no-op。**永远成功**（200/204，§23.3）|
+| `GET /api/auth/verify-email/confirm?token=` | 任意 | **公开** | 校验一次性 verify token → 置 `email_verified=1` → 重定向落地页带结果（§23.4）|
+| `POST /api/auth/password-reset/request` | 任意 | **公开** | body `{ email }` → **永远 200**（防枚举）；仅邮箱存在才发 reset 邮件（§24.1）|
+| `POST /api/auth/password-reset/confirm` | 任意 | **公开** | body `{ token, password }` → 校验 token + 新密码强度 → 重置密码 → 200；token 失效 / 弱密码 → 400（§24.3）|
 | `GET /api/config` | owner | **owner-only** | 读**当前 owner**的掩码配置（§12） |
 | `POST /api/config` | owner | **owner-only** | 保存**当前 owner**的配置（§12） |
 | `POST /api/config/test` | owner | **owner-only** | 测**当前 owner**的连接（§14） |
@@ -1048,12 +1055,23 @@ CREATE TABLE IF NOT EXISTS forms (
 { "email": "owner@example.com", "password": "至少 8 位的密码" }
 ```
 
-- 成功（邮箱合法、密码 ≥ 8 位、邮箱未被占用）：`201`，`{ "token": "<jwt>" }`——**注册即登录**，token 的 `sub` 是新建 user 的 id。后端流程：校验 email 形状 + 密码强度 → `hashPassword`（§17.4）→ `INSERT` 一行 `users`（`id=crypto.randomUUID()`、`email_verified=0`）→ `signSession(AUTH_SECRET, { sub: user.id })`。
-- 邮箱已被占用（`users.email` UNIQUE 冲突）：`409`，`{ "error": "..." }`（如「邮箱已注册」），**不**新建 user、**不**签发 token。
+- 成功（邮箱合法、密码 ≥ 8 位、邮箱未被**已验证**账号占用）：`201`，`{ "token": "<jwt>" }`——**注册即登录**，token 的 `sub` 是新建 / 覆盖后 user 的 id，`email_verified=0`。后端流程：校验 email 形状 + 密码强度 → `hashPassword`（§17.4）→ 按下面「未验证可覆盖」三态写库 → `signSession(AUTH_SECRET, { sub: user.id })` → **额外异步、best-effort 发一封验证邮件**（§23.2；发信失败**不**让注册失败，注册结果与发信解耦）。
 - 非法 email（形状不符）/ 弱密码（长度 < 8）/ 缺字段 / body 非合法 JSON：`400`，`{ "error": "..." }`，**不**落库。
 - 明文密码**绝不入库**：只存 PBKDF2 派生的 `password_hash` + per-user `password_salt` + `iterations`（§17.4）。
-- 注册**不**触碰飞书 / DeepSeek——只校验 + 建 user + 签 token。
-- **邮箱占用检测的并发约定：** 唯一性以 `users.email` 的 UNIQUE 约束为**最终裁决**——实现可先 `findUserByEmail` 预检，但**必须**靠 `INSERT` 的 UNIQUE 冲突兜底（两个并发注册同一邮箱时，先到者 201、后到者 409），不能只靠预检（有 TOCTOU 竞态）。
+- 注册**不**触碰飞书 / DeepSeek——只校验 + 建/覆盖 user + 签 token + 异步发验证邮件。
+
+**去重三态（修订：防「占座别人邮箱」，配合 §23 邮箱验证）：** 原「email 一占就 409」会让任何人用「注册了不验证」长期占住别人的真实邮箱。改为按 email 现有行决策——
+
+| email 现状 | 行为 | HTTP |
+|---|---|---|
+| 不存在 | 建号（`id=crypto.randomUUID()`、`email_verified=0`） | `201` |
+| 存在且**已验证**（`email_verified=1`） | **锁死** → `EmailTakenError`，不建/不覆盖、不签 token | `409` |
+| 存在但**未验证**（`email_verified=0`） | **覆盖重注册**：换**新** user id + 新派生密码、`email_verified` 仍 0、`created_at` 刷新；并**清掉旧未验证号的残留**（`owner_config` / `forms` where `owner_id=旧 id` 删除、旧号 `auth_tokens` 作废）| `201` |
+
+这样：没人能用「注册了不验证」长期占座别人的邮箱（未验证随时可被真实邮箱主人覆盖回来）；**一旦该邮箱完成验证（§23）即锁死**，后续注册同邮箱一律 409。
+
+- **覆盖与 UNIQUE 的并发协作：** `users.email` 的 UNIQUE 仍是「同一邮箱不会并发产出两条 users 行」的**最终裁决**。覆盖二选一并写清并发语义：(a) **UPDATE** 同 email 那行的 id / 密码列（原地换值，无 INSERT 冲突）；或 (b) **delete 旧行 + INSERT 新行**（在一个 D1 batch / 事务内，靠 INSERT 撞 UNIQUE 兜并发覆盖：两个并发覆盖同一未验证邮箱，先到者成功、后到者撞 UNIQUE → 视作 409 或重试，由实现定）。无论 (a)/(b)，实现**必须**靠 UNIQUE 兜并发，不能只靠 `findUserByEmail` 预检（有 TOCTOU 竞态）。
+- **已验证占用的并发约定：** 命中「已验证」邮箱 → 409，不走覆盖；并发下两个请求都试图注册同一**新**邮箱时，仍由 UNIQUE 冲突让后到者 409。
 
 ### 17.3 `POST /api/auth/login` 契约
 
@@ -1120,10 +1138,13 @@ owner-only 端点统一挂一道 auth 中间件，校验 `Authorization: Bearer 
 |---|---|---|
 | `AUTH_SECRET` | session JWT 的 HMAC 签名密钥（注册 / 登录签发、中间件验签） | 生产 `wrangler secret put AUTH_SECRET`；测试由 `vitest.config.ts` 注入固定值 |
 | `CONFIG_KEY` | owner 配置加密主密钥（§12，不变） | 生产 `wrangler secret put CONFIG_KEY`；测试由 `vitest.config.ts` 注入固定值 |
+| `RESEND_API_KEY` | Resend 发信 API key（事务邮件：邮箱验证 / 找回密码，§22） | 生产 `wrangler secret put RESEND_API_KEY`；测试注入固定值（或 mock fetch，不真发信）|
+| `EMAIL_FROM` | 发件人 `Agentaily Forms <noreply@mail.agentaily.com>`（非密，§22.1） | `wrangler.toml` `[vars]` 或 secret；非敏感 |
+| `APP_BASE_URL` | 前端站点根 `https://form-design.agentaily.com`，拼邮件落地页链接（非密，§22.1） | `wrangler.toml` `[vars]`；非敏感 |
 | `OWNER_PASSWORD` | **已废弃（多用户改造后不再用于登录）** | 登录改为查 `users` 表 + 密码哈希校验；本 secret 可保留不删（线上 `wrangler secret delete OWNER_PASSWORD` 清理是可选运维动作），**implementer 不再读它做鉴权** |
 
-- `AUTH_SECRET` / `CONFIG_KEY` 均为 Worker secret，**绝不**入 git、不进任何响应 / 日志。
-- `Env` 接口（`index.ts`）至少需 `AUTH_SECRET: string`、`CONFIG_KEY: string`、`DB: D1Database`；`OWNER_PASSWORD` 绑定的去留交 implementer（保留亦无害，但不得用于鉴权）。
+- `AUTH_SECRET` / `CONFIG_KEY` / `RESEND_API_KEY` 均为 Worker secret，**绝不**入 git、不进任何响应 / 日志（§22.3）。`EMAIL_FROM` / `APP_BASE_URL` 非敏感。
+- `Env` 接口（`index.ts`）至少需 `AUTH_SECRET: string`、`CONFIG_KEY: string`、`RESEND_API_KEY: string`、`EMAIL_FROM: string`、`APP_BASE_URL: string`、`DB: D1Database`；`OWNER_PASSWORD` 绑定的去留交 implementer（保留亦无害，但不得用于鉴权）。
 
 ### 17.9 多租户数据隔离 + 横向越权（头等约束）
 
@@ -1167,8 +1188,19 @@ CREATE TABLE IF NOT EXISTS users (
 - **`users.id` 是隔离键：** 它即 session JWT 的 `sub`，也即 `owner_config.owner_id` / `forms.owner_id` 写入的真实 user id（§17.5 / §17.9）。
 - **`email` UNIQUE 是注册去重的最终裁决：** 并发注册同一邮箱时靠 UNIQUE 冲突兜底（先到者成功、后到者 409），不能只靠 `findUserByEmail` 预检（§17.2）。
 - **明文密码绝不入库：** 只存 `password_hash` / `password_salt` / `iterations`（§17.4）。
-- **`email_verified` 预留恒 0：** 本期不写入 / 不读取它做任何门控；它与发信钩子都为将来接邮箱验证（Resend 等）预留，先不启用。
+- **`email_verified` 已升级为真实状态位（§23）：** 注册 / 覆盖时为 0，完成邮箱验证（§23.4）置 1。它**不门禁**任何功能（§23.1），唯一后端作用是 §17.2 去重三态（未验证可覆盖、已验证锁死）+ 前端 banner。列定义不变（`0001` 的 `email_verified INTEGER NOT NULL DEFAULT 0` 既已含默认 0，无需改表），只是从「恒 0、不读」变成「真实读写」。一次性 token 落新表 `auth_tokens`（§22.4 / migration `0002`），不动 `users` 表结构。
 - **`owner_config` / `forms` 的 `owner_id` 升级为多租户键：** 二表的 `owner_id` 由「恒 `'default'`」改为「真实 user id」；`owner_config` 由单行升级为按 `owner_id` 多行（每 owner 一行配置，§12.5）。schema 列不变，只更新表头注释。
+
+### 17.12 `GET /api/auth/me` 契约（当前 owner 身份摘要）
+
+**用途：** 前端「邮箱未验证」banner 的真实状态来源。注册即登录时前端只知道「刚注册 = 未验证」，但验证位会在用户点验证邮件后（§23.4）翻成 1，且页面刷新 / 换设备登录后本地无从得知。本端点让前端凭已存的 token 随时拉回**当前登录 owner**的真实 `{ email, emailVerified }`，据此决定是否显示 banner。
+
+`GET /api/auth/me`（**owner-only**，挂 §17 的 auth 中间件）：
+
+- 成功：`200`，`{ "email": "owner@example.com", "emailVerified": 0 }`。`emailVerified` 为 `0|1`（与 `users.email_verified` 同形，§17.11）。后端流程：`ownerId = c.get('session').sub` → `findUserById(db, ownerId)` → 投影 `{ email, emailVerified }`。
+- 缺 / 坏 / 过期 token：`401 { error }`，auth 中间件拦截（§17.6），不进入 handler。
+- token 验签通过但 `sub` 指向的 user **已不存在**（如该邮箱被「未验证可覆盖」重注册换了新 id，旧 token 的 `sub` 已失效，§17.2）：`401 { error: "未授权" }`——会话失效，让前端清掉本地 token 重新登录（与 §17.6 统一「未授权」语义一致，不把它当成一个还存在的空账号）。
+- **只投影 `email` + 验证位**：`password_hash` / `password_salt` / `iterations` 等敏感字段**绝不**出网（`UserRow` 不整体回客户端，§17.11）。owner-only + 凭 `sub` 隔离，A 拿不到 B 的身份。
 
 ---
 
@@ -1454,3 +1486,158 @@ CREATE TABLE IF NOT EXISTS users (
 
 - 复用现有 `forms` 表（schema.sql / §16.7），**无需新增列**：列表读 `slug` / `meta_json` / `status` / `created_at`，且 `WHERE owner_id=?`；PATCH 改 `status`（及可选 `meta_json` / `schema_json`），`WHERE slug=? AND owner_id=?`；DELETE 删行，`WHERE slug=? AND owner_id=?`。`listForms` / `updateForm` / `deleteForm` 均加 `ownerId` 参数（owner-only handler 从 `c.get('session').sub` 取），跨 owner 的 PATCH / DELETE 因 owner 维度不匹配影响 0 行 → 404（§17.9 第 1/2/3/6 条）。
 - `status` 列已存在且取值 `'published' | 'draft' | 'closed'`；本节让 `'closed'` 第一次有了写入入口（PATCH），`'draft'` 仍只是预留态（MVP 无写入入口）。
+
+---
+
+## 22. 后端 · 发信抽象（Resend 纯 HTTP，事务邮件的统一出口）
+
+> **与第 17 节的关系：** §17 把系统做成开放注册的多用户，但「邮箱仅作标识、不验证、忘密码靠运维手动重置」。本节起把邮箱从「一个字符串」升级成「一个可达地址」：接 **Resend**（纯 HTTP API，无 SDK）做事务邮件，让 §23（邮箱验证）/ §24（找回密码）真能发信。本节只定义**发信抽象 + token 存储**这两块共用基建，不含具体业务流程（那在 §23 / §24）。
+>
+> **基建已就位（运维一次性，不在本节细化）：** 发件域 `mail.agentaily.com` 已在 Resend 验证；发件人 `Agentaily Forms <noreply@mail.agentaily.com>`。Worker 侧新增三个 env：`RESEND_API_KEY`（secret）、`EMAIL_FROM`（= 发件人）、`APP_BASE_URL`（= `https://form-design.agentaily.com`，拼邮件落地页链接用）。
+>
+> **接口位置：** 发信在 `workers/src/email.ts`（`sendEmail` + `buildVerifyEmail` / `buildResetEmail`）；一次性 token 在 `workers/src/tokens.ts`（生成 / 哈希 / 颁发 / 消费 / 作废）+ 新表 `auth_tokens`（migration `0002`）。
+
+### 22.1 `sendEmail` — 走 Resend 的薄发信层
+
+`sendEmail(env, { to, subject, html })` 是事务邮件的唯一出口：
+
+- **直打 Resend HTTP API：** `POST https://api.resend.com/emails`，headers `Authorization: Bearer <RESEND_API_KEY>` + `content-type: application/json`，body `{ from: EMAIL_FROM, to, subject, html }`。无 SDK、无中转。
+- **成功：** 上游 2xx → resolve（视为已投递给 Resend）。
+- **失败：** 上游非 2xx / 网络失败 → 抛**可识别错误** `EmailSendError`，供调用方决定是否吞（§22.2）。
+- **落地页链接：** 邮件正文里的链接由调用方（§23 / §24）用 `APP_BASE_URL` 拼好后传给模板构造函数；`sendEmail` 自身不读 env 里的 URL，只负责把成品 HTML 发出去。
+
+### 22.2 best-effort 语义（发信失败不拖垮主流程）
+
+事务邮件是「锦上添花」，不是主流程的成败关卡：
+
+- **注册的验证邮件（§23.2）：** 注册成功照旧 `201 { token }`、`email_verified=0`；验证邮件**异步、best-effort** 发出，发信失败**不**让注册失败（吞 `EmailSendError`，注册结果与发信解耦）。建议用 `c.executionCtx.waitUntil` 后台发，不阻塞 201。
+- **找回密码的 request（§24.1）：** 永远回 200（防枚举）；即便发信失败也不改变「永远 200」的对外行为（吞 `EmailSendError`）。
+- 其它场景可按需上报错误；`sendEmail` 只负责「发或抛」，是否吞由调用方定。
+
+### 22.3 安全约束（key 绝不出网）
+
+- `RESEND_API_KEY` 只在 Worker 内用于拼 `Authorization: Bearer <key>` 发往 Resend；**绝不**写进任何响应体、HTTP 头、日志、或抛出的 `EmailSendError.message`。
+- 模板构造函数不读 / 不打印任何 secret；邮件链接里的 token 是高熵一次性串（§22.4），它本身就是凭据，但正文不另外打印别的 secret。
+- `EMAIL_FROM` / `APP_BASE_URL` 是非敏感配置（前者是公开发件人、后者是公开站点根），可入响应外的常规使用，但与 key 无关。
+
+### 22.4 一次性 token 存储（新表 `auth_tokens`，migration `0002`）
+
+邮箱验证与找回密码都靠「一封邮件里的一次性链接」工作，链接里带一个**高熵、限时、单次**的 token。存储约定（库泄漏也拿不到活 token）：
+
+- **只存 SHA-256，绝不存明文：** 表 `auth_tokens` 的主键 `token_hash` 是 token 明文的 SHA-256；明文是高熵随机串（`crypto.getRandomValues`，≥ 128 bit），只在生成时返回一次用于发信，服务端事后不再持有。确认时把收到的明文重新 SHA-256，再按 `token_hash` 查行。
+- **列：** `token_hash`（PK）、`user_id`（`users.id`，§17.11）、`kind`（`'verify'` | `'reset'`）、`expires_at`（ISO-8601）、`used_at`（NULL=未用，单次使用）、`created_at`（ISO-8601）。
+- **限时：** `expires_at = now + TTL`。verify TTL `24h`、reset TTL `1h`（改密窗口更短，降低被捡到风险）。
+- **单次使用（原子作废）：** 确认成功即把 `used_at` 写成当前时刻；作废用「`UPDATE ... SET used_at=? WHERE token_hash=? AND used_at IS NULL`、影响 1 行才算消费成功」兜并发重放（两个并发确认同一 token 只有一个 1 行成功）。
+- **作废残留：** 覆盖重注册（§17.2）清旧未验证号的 verify token；改密成功（§24.3）作废该 user 其余 reset token（防一封旧邮件二次改密）。`revokeUserTokens(db, userId, kind)` 负责。
+- **统一收敛失败：** 「token 不存在 / 已用 / 过期 / kind 不匹配」**不区分**，一律收敛成同一「无效」语义，绝不向外泄漏是哪一种（防 token 探测，§24.3）。
+
+D1 建表 SQL 见 `workers/migrations/0002_auth_tokens.sql`（沿用 0001 注释风格 + `IF NOT EXISTS`）。
+
+```sql
+CREATE TABLE IF NOT EXISTS auth_tokens (
+  token_hash   TEXT PRIMARY KEY,   -- token 明文的 SHA-256（绝不存明文）
+  user_id      TEXT NOT NULL,      -- users.id（§17.11）
+  kind         TEXT NOT NULL,      -- 'verify' | 'reset'
+  expires_at   TEXT NOT NULL,      -- ISO-8601（verify 24h、reset 1h）
+  used_at      TEXT,               -- ISO-8601；NULL=未用（单次使用）
+  created_at   TEXT NOT NULL       -- ISO-8601
+);
+```
+
+---
+
+## 23. 后端 · 邮箱验证（软验证：注册即发、确认置位、不门禁功能）
+
+> **与第 17/22 节的关系：** §17 让注册即登录、`email_verified` 预留恒 0；§22 提供发信抽象 + token 表。本节把 `email_verified` 变成真实状态位：注册后异步发一封验证邮件，owner 点链接确认后置 1。验证是**软验证**——**不门禁**任何功能（未验证用户照常用全部 owner 端点），它只服务两件事：①防「占座别人邮箱」（§17.2 修订：未验证可被覆盖、已验证锁死）；②前端展示「邮箱未验证 · 重新发送」banner。
+>
+> **本节范围（仅 Worker 端）：** 注册时的 best-effort 发信、`POST /api/auth/verify-email/request`（owner-only 重发）、`GET /api/auth/verify-email/confirm`（公开确认）的契约、状态码、安全。
+>
+> **不在本节：** 任何「未验证则拒绝某功能」的 gate（本期一律不门禁）、邮箱变更 / 换绑、验证后的欢迎流程。
+
+### 23.1 不门禁原则
+
+- 未验证用户（`email_verified=0`）照常能调全部 owner-only 端点（配置 / 对话 / 发布 / 数据后台），与已验证用户无差别。
+- `email_verified` 的唯一后端作用是 §17.2 的去重三态裁决（未验证可覆盖、已验证锁死）。前端据它显示一个可关闭的提示 banner（§23.6），不阻断任何操作。
+
+### 23.2 注册时发信（best-effort，§17.2 / §22.2）
+
+- 注册成功（建号 / 覆盖）后，后端**异步、best-effort** 发验证邮件：`issueToken(DB, user.id, 'verify')` → 拼 `confirmUrl`（用 `APP_BASE_URL`）→ `buildVerifyEmail(confirmUrl)` → `sendEmail`。
+- 发信失败**不**让注册失败：吞 `EmailSendError`，`201 { token }` 与发信解耦（§22.2）。建议 `waitUntil` 后台发，不阻塞 201。
+
+### 23.3 `POST /api/auth/verify-email/request`（owner-only，重发）
+
+给**当前登录 owner**重发验证邮件：
+
+- 鉴权：owner-only（挂 §17 的 `requireAuth`）。按 `c.get('session').sub` 查当前 user 的 email——**不**接受 body 里的任意 email（只给登录者本人重发，防被当成滥发别人邮箱的工具）。
+- 已验证（`email_verified=1`）：**no-op**，回 `200`（或 `204`），不发信、不报错。
+- 未验证：`issueToken('verify')` + 发验证邮件（best-effort，吞 `EmailSendError`）。
+- **永远成功**：无论已验证 / 未验证 / 发信成败，对外都是成功回执（`200 { ok: true }` 或 `204`），不泄漏内部状态。
+- 缺 / 坏 / 过期 token → `401`（guard 拦截，§17.6）。
+
+### 23.4 `GET /api/auth/verify-email/confirm?token=...`（公开，确认）
+
+owner 点邮件里的链接，落到这个公开端点（不需要 session——token 自证）：
+
+- `consumeToken(token, 'verify')`：命中且可用（未过期 / 未用 / kind='verify'）→ 原子作废该 token → `markEmailVerified(userId)`（`UPDATE users SET email_verified=1`，已是 1 则幂等）→ **成功**。
+- token 无效 / 过期 / 已用 / kind 不匹配 / 缺 token → **失败**（统一收敛，不区分原因，§22.4）。
+- **结果呈现（成功 / 失败都给前端可展示的两态）：** 重定向到前端落地页并带结果，建议 `302 Location: ${APP_BASE_URL}/verify-email?status=ok`（成功）/ `?status=invalid`（失败）。前端落地页据 `status` 展示「邮箱已验证 / 链接已失效，请重新发送」。（也可回 JSON `{ ok: true }` / `{ error }` 二选一，但选定后必须让前端能区分两态。）
+- **一旦验证成功，该邮箱在 §17.2 即锁死**：后续注册同邮箱一律 409，不再可覆盖。
+
+### 23.5 token 约定（verify）
+
+- kind `'verify'`，TTL `24h`（§22.4 / `tokens.ts` 的 `VERIFY_TOKEN_TTL_SECONDS`）。
+- 同一 user 可有多枚未用 verify token（多次重发）；旧的不自动失效，各自到期或被覆盖重注册清掉。
+
+### 23.6 前端「邮箱未验证」banner（UI）
+
+- owner 登录后，若其账号 `email_verified=0`，前端在显著位置（如顶栏下方）展示一个可关闭的提示条：「邮箱未验证 · 重新发送」，点「重新发送」调 `POST /api/auth/verify-email/request`，发出后给「已重新发送」的中性反馈。
+- 落地页 `/verify-email?status=ok|invalid`（§23.4 重定向目标）据 `status` 展示「已验证」/「链接已失效，请重新发送」。
+- **UI 一律消费 `@agentaily/design-system`**（banner / 按钮 / 反馈），不手搓组件。banner 不阻断任何操作（§23.1 不门禁）。
+
+---
+
+## 24. 后端 · 找回密码（凭一次性 reset token 重置，防邮箱枚举）
+
+> **与第 17/22/23 节的关系：** §17 把登录改成查 users 表 + 密码哈希，忘密码原本「靠运维手动重置」；§22 提供发信 + token 基建。本节补上 owner 自助找回密码：发起 → 收邮件 → 点链接设新密码。两个端点都**公开**（忘密码的人本来就登录不了），靠一次性 reset token 自证身份。
+>
+> **本节范围（仅 Worker 端）：** `POST /api/auth/password-reset/request`（发起，防枚举）、`POST /api/auth/password-reset/confirm`（确认改密）的契约、状态码、安全。
+>
+> **不在本节：** 限流 / 防刷（公开端点的限流统一留后续 feature）、改密后强制登出其它设备（§17.5 无状态 JWT，不维护黑名单；reset 只作废 reset token，不吊销已签发的 session）、双因素。
+
+### 24.1 `POST /api/auth/password-reset/request`（公开，发起）
+
+请求体（JSON）：`{ "email": "owner@example.com" }`。
+
+- **永远回 `200`**（`{ ok: true }`，中性文案）——**防邮箱枚举**：无论该邮箱是否注册过，对外响应（状态码 / 体 / 尽量耗时）一致，**不泄漏**邮箱是否存在。
+- 仅当 `findUserByEmail` 命中时，才真 `issueToken('reset')` + 发 reset 邮件：链接指向前端 `${APP_BASE_URL}/reset-password?token=<明文>`（`buildResetEmail` → `sendEmail`，best-effort，吞 `EmailSendError`，§22.2）。
+- 邮箱不存在 → 同样 `200`、但不发信、不落 token。
+- 缺 `email` / body 非合法 JSON → 仍回 `200`（中性），不泄漏「请求是否有效命中」的差异（或按实现回 `400` 仅针对**明显畸形 body**——但**绝不**用状态码区分「邮箱注册过没有」）。
+
+### 24.2 token 约定（reset）
+
+- kind `'reset'`，TTL `1h`（§22.4 / `tokens.ts` 的 `RESET_TOKEN_TTL_SECONDS`）——改密窗口取更短，降低链接被捡到的风险。
+- 链接落到**前端** `/reset-password?token=...`（前端表单收新密码，再 `POST` 到 §24.3 的 confirm）；与 §23 的 verify 链接直落后端 confirm 端点不同——改密要先让用户在前端输入新密码。
+
+### 24.3 `POST /api/auth/password-reset/confirm`（公开，确认改密）
+
+请求体（JSON）：`{ "token": "<明文 reset token>", "password": "新密码" }`。
+
+- **新密码强度：** 复用 §17.2 的 `≥ 8` 规则；弱密码 → `400 { error }`（统一文案），**不**改密。
+- **token 校验 + 改密：** `consumeToken(token, 'reset')`：命中且可用 → 原子作废 token → `resetUserPassword(userId, password)`（`hashPassword` 新派生 → `UPDATE users` 整组替换 `password_hash`/`password_salt`/`iterations`；明文绝不入库）→ 内部 `revokeUserTokens(userId, 'reset')` 作废该 user 其余 reset token（防一封旧邮件二次改密）→ `200 { ok: true }`。
+- **token 失效 / 过期 / 已用 / kind 不匹配 / 缺 token：** `400 { error }`（**统一文案**，不区分是哪种、不泄漏，§22.4）。
+- 不需要 session——reset token 自证身份。改密**不**吊销已签发的 session JWT（§17.5 无状态）；它们各自到 `exp` 自然失效。
+
+### 24.4 状态码小结
+
+| 端点 | 情况 | 状态码 | 响应体 |
+|---|---|---|---|
+| `password-reset/request` | 任意（邮箱存在 / 不存在 / 发信成败） | `200` | `{ ok: true }`（中性，防枚举）|
+| `password-reset/confirm` | 改密成功 | `200` | `{ ok: true }` |
+| `password-reset/confirm` | token 失效 / 过期 / 已用 / kind 错 | `400` | `{ error }`（统一文案，不泄漏）|
+| `password-reset/confirm` | 新密码过弱（< 8） | `400` | `{ error }` |
+
+### 24.5 前端「找回密码」流程（UI）
+
+- 登录框提供「忘记密码？」入口 → 输入邮箱 → 调 `password-reset/request` → 无论是否注册过都显示中性提示「若该邮箱已注册，我们已发送重置链接」。
+- `/reset-password?token=...` 落地页：表单收新密码（+ 确认）→ `POST password-reset/confirm` → 成功提示并引导回登录；token 失效 / 弱密码据 `400` 文案提示。
+- **UI 一律消费 `@agentaily/design-system`**（输入 / 按钮 / 反馈），不手搓组件。

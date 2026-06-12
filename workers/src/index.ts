@@ -52,8 +52,23 @@ import {
   type AuthVariables,
   type LoginRequest,
   type RegisterRequest,
+  type PasswordResetRequestBody,
+  type PasswordResetConfirmBody,
+  type NeutralOkBody,
 } from "./auth";
-import { createUser, authenticateUser, EmailTakenError, UserValidationError } from "./users";
+import {
+  createUser,
+  authenticateUser,
+  findUserByEmail,
+  findUserById,
+  markEmailVerified,
+  resetUserPassword,
+  EmailTakenError,
+  UserValidationError,
+  MIN_PASSWORD_LENGTH,
+} from "./users";
+import { issueToken, consumeToken } from "./tokens";
+import { sendEmail, buildVerifyEmail, buildResetEmail, EmailSendError } from "./email";
 import { listSubmissions, BitableReadError } from "./submissions";
 
 /** Worker bindings (see wrangler.toml + vitest.config.ts). */
@@ -64,6 +79,21 @@ interface Env {
   CONFIG_KEY: string;
   /** session JWT 的 HMAC 签名密钥（注册/登录签发、中间件验签，§17.5/§17.6）。Worker secret in prod. */
   AUTH_SECRET: string;
+  /**
+   * Resend API key（Worker secret，§22.3）。发事务邮件（邮箱验证 / 找回密码）时只用于拼
+   * `Authorization: Bearer <key>` 打 Resend HTTP API；**绝不**进任何响应体 / HTTP 头 / 日志。
+   */
+  RESEND_API_KEY: string;
+  /**
+   * 发件人（§22.1），形如 `Agentaily Forms <noreply@mail.agentaily.com>`（mail.agentaily.com
+   * 发件域已验证）。非敏感，用作 Resend 请求体的 `from`。
+   */
+  EMAIL_FROM: string;
+  /**
+   * 前端站点根（§22.1），= `https://form-design.agentaily.com`。用于拼邮件里的落地页链接
+   * （验证确认 / 找回密码 `${APP_BASE_URL}/reset-password?token=...`，§23.3 / §24.2）。非敏感。
+   */
+  APP_BASE_URL: string;
   /**
    * 已废弃（§17.8）：多用户改造后登录改为查 users 表 + 密码哈希校验，本绑定**不再用于鉴权**。
    * 保留为可选字段仅为兼容线上尚未 `wrangler secret delete` 的环境与测试注入；新代码不读它。
@@ -111,10 +141,52 @@ app.get("/health", (c) => c.json({ ok: true, service: "form-design-api" }));
 const guard: MiddlewareHandler<{ Bindings: Env; Variables: AuthVariables }> = (c, next) =>
   requireAuth<{ Bindings: Env; Variables: AuthVariables }>(c.env.AUTH_SECRET)(c, next);
 
+// --- best-effort 发信辅助 (§22.2 / §23.2 / §24.1) ---------------------------
+//
+// 两个共用的「发一封事务邮件」收口：issueToken → 拼落地页链接(APP_BASE_URL) → build*Email →
+// sendEmail。**吞** EmailSendError（best-effort，发信失败绝不拖垮主流程）；其它异常也吞（在
+// waitUntil 后台跑，不该让未捕获 promise rejection 冒泡）。明文 / RESEND_API_KEY 绝不进日志。
+
+/** 给某 user 发一封验证邮件（注册时 / owner-only 重发，§23.2 / §23.3）。失败静默吞。 */
+async function sendVerifyEmail(env: Env, userId: string, to: string): Promise<void> {
+  try {
+    const { plaintext } = await issueToken(env.DB, userId, "verify");
+    const confirmUrl = `${env.APP_BASE_URL}/api/auth/verify-email/confirm?token=${encodeURIComponent(plaintext)}`;
+    const { subject, html } = buildVerifyEmail(confirmUrl);
+    await sendEmail(env, { to, subject, html });
+  } catch (err) {
+    // best-effort：发信失败（EmailSendError）或 token 落库异常都不外溢——主流程已成功（§22.2）。
+    if (!(err instanceof EmailSendError)) {
+      // 非发信失败（如 D1 异常）也吞，但保留可观测性：只记错误名，绝不记 key / 明文 token。
+      console.error("verify email best-effort failed", err instanceof Error ? err.name : "unknown");
+    }
+  }
+}
+
+/** 给某 user 发一封找回密码邮件（§24.1）。失败静默吞（仍回中性 200）。 */
+async function sendResetEmail(env: Env, userId: string, to: string): Promise<void> {
+  try {
+    const { plaintext } = await issueToken(env.DB, userId, "reset");
+    const resetUrl = `${env.APP_BASE_URL}/reset-password?token=${encodeURIComponent(plaintext)}`;
+    const { subject, html } = buildResetEmail(resetUrl);
+    await sendEmail(env, { to, subject, html });
+  } catch (err) {
+    if (!(err instanceof EmailSendError)) {
+      console.error("reset email best-effort failed", err instanceof Error ? err.name : "unknown");
+    }
+  }
+}
+
 // /api/config covers both GET (read masked) + POST (save) — method-agnostic.
 app.use("/api/config", guard);
 app.post("/api/config/test", guard);
 app.post("/api/chat", guard);
+// POST /api/auth/verify-email/request → owner-only 重发验证邮件（§23.3）。其它三个邮件端点
+// （verify-email/confirm、password-reset/request、password-reset/confirm）是**公开**，不挂 guard。
+app.post("/api/auth/verify-email/request", guard);
+// GET /api/auth/me → owner-only：回当前登录 owner 的 { email, emailVerified }（§17.12），供前端
+// 「邮箱未验证」banner 跨刷新 / 登录拿到真实验证位（不再仅凭注册时本地状态）。
+app.get("/api/auth/me", guard);
 // /api/forms 前缀下鉴权与公开交错（§21.1 路由共存陷阱）——逐条点名 owner-only 的
 // method+path，绝不用宽匹配 `app.use("/api/forms/*", guard)`（会误伤公开拉取）：
 //   - GET  /api/forms              → owner-only 列表（§21.2）。注意它与 GET /api/forms/:slug
@@ -152,9 +224,10 @@ app.post("/api/auth/register", async (c) => {
   const email = (body as { email?: unknown })?.email;
   const password = (body as { password?: unknown })?.password;
 
-  // createUser validates shape/strength and de-dups on the UNIQUE email constraint:
+  // createUser validates shape/strength and de-dups with the §17.2 修订「未验证可覆盖」
+  // semantics (email 不存在 → 建号 / 已验证 → 409 / 未验证 → 覆盖重注册 + 清残留):
   //   - UserValidationError (bad email / weak password / missing) → 400, not stored.
-  //   - EmailTakenError (UNIQUE collision) → 409, no user created, no token issued.
+  //   - EmailTakenError (email taken by a VERIFIED account) → 409, no token issued.
   let user: { id: string };
   try {
     user = await createUser(
@@ -172,10 +245,127 @@ app.post("/api/auth/register", async (c) => {
     throw err;
   }
 
+  // 注册成功后**异步、best-effort** 发一封验证邮件（§23.2）：issueToken('verify') → 拼
+  // confirmUrl(APP_BASE_URL) → buildVerifyEmail → sendEmail。发信失败**不**让注册失败：注册
+  // 结果与发信解耦（吞 EmailSendError）。用 executionCtx.waitUntil 后台发，不阻塞 201。
+  // 明文密码 / RESEND_API_KEY 绝不进响应（§22.3）。
+  c.executionCtx.waitUntil(sendVerifyEmail(c.env, user.id, typeof email === "string" ? email : ""));
+
   // 注册即登录 (§17.2): the token's sub is the new user's real id — also the data
-  // isolation key for every owner-only endpoint (§17.9). 201 Created.
+  // isolation key for every owner-only endpoint (§17.9). 201 Created (email_verified=0).
   const token = await signSession(c.env.AUTH_SECRET, { sub: user.id });
   return c.json({ token }, 201);
+});
+
+// --- 邮箱验证 (§23) + 找回密码 (§24) — endpoint handlers ----------------------
+//
+// 类型见 auth.ts（PasswordResetRequestBody / PasswordResetConfirmBody / NeutralOkBody）、
+// users.ts（markEmailVerified / resetUserPassword / findUserByEmail）、tokens.ts（issueToken /
+// consumeToken）、email.ts（sendEmail / buildVerifyEmail / buildResetEmail）。
+
+// POST /api/auth/verify-email/request (OWNER-ONLY, guard 已挂上面, §23.3) — 给当前登录 owner
+// 重发验证邮件。按 c.get('session').sub 查当前 user 的 email（**不**接受 body 里的任意 email——
+// 防被当成滥发别人邮箱的工具）；已验证 → no-op；未验证 → best-effort 发验证邮件（吞 EmailSendError）。
+// **永远成功**（200 { ok:true }），不泄漏内部状态（已验证 / 未验证 / 发信成败都同一回执）。
+app.post("/api/auth/verify-email/request", async (c) => {
+  const ownerId = c.get("session").sub;
+  // 据 session.sub 反查当前用户行（拿 email + 验证状态）。
+  const user = await findUserById(c.env.DB, ownerId);
+  // 未验证才发信；已验证 / 用户不存在(异常态) → no-op。永远回中性成功。
+  if (user !== null && user.emailVerified === 0) {
+    c.executionCtx.waitUntil(sendVerifyEmail(c.env, user.id, user.email));
+  }
+  return c.json({ ok: true } satisfies NeutralOkBody, 200);
+});
+
+// GET /api/auth/me (OWNER-ONLY, guard 已挂上面, §17.12) — 回当前登录 owner 的身份摘要，供前端
+// 「邮箱未验证」banner 跨刷新 / 跨登录拿到**真实**验证位（而非只信注册时记在本地的状态）。据
+// c.get('session').sub 反查当前用户行；命中 → 200 { email, emailVerified }（emailVerified 为
+// 0|1，与 users.email_verified 同形）。绝不回 password_hash / password_salt / iterations 等任何
+// 敏感字段——只投影 email + 验证位（§17.12）。token 指向已删账号（如该邮箱被「未验证可覆盖」重注册
+// 换了新 id，旧 token 的 sub 已不存在）→ 401 未授权（与 §17.6 既有「未授权」语义一致，让前端清掉
+// 失效会话引导重登，而非把它当成一个还存在的空账号）。
+app.get("/api/auth/me", async (c) => {
+  const ownerId = c.get("session").sub;
+  const user = await findUserById(c.env.DB, ownerId);
+  // token 验签通过但 sub 指向的 user 已不存在（已删 / 被覆盖重注册换了 id）→ 401：会话失效，
+  // 不暴露其它细节，让前端清掉本地 token 重新登录（§17.6 统一「未授权」语义）。
+  if (user === null) {
+    return c.json({ error: "未授权" }, 401);
+  }
+  // 只投影 email + 验证位；password_* / iterations 等绝不出网（§17.12）。
+  return c.json({ email: user.email, emailVerified: user.emailVerified }, 200);
+});
+
+// GET /api/auth/verify-email/confirm?token=... (PUBLIC, §23.4) — owner 点邮件里的链接落到这里
+// （不需要 session，token 自证）。consumeToken('verify') 命中 → markEmailVerified → 302 落地页
+// status=ok；token 无效/过期/已用/kind 错/缺 token → 统一收敛 → 302 落地页 status=invalid（不区分原因）。
+app.get("/api/auth/verify-email/confirm", async (c) => {
+  const token = c.req.query("token") ?? "";
+  let status: "ok" | "invalid" = "invalid";
+  if (token.length > 0) {
+    const consumed = await consumeToken(c.env.DB, token, "verify");
+    if (consumed !== null) {
+      await markEmailVerified(c.env.DB, consumed.userId);
+      status = "ok";
+    }
+  }
+  // 成功 / 失败都重定向到前端落地页带结果，让前端展示「已验证 / 链接已失效」。
+  return c.redirect(`${c.env.APP_BASE_URL}/verify-email?status=${status}`, 302);
+});
+
+// POST /api/auth/password-reset/request (PUBLIC, body { email }, §24.1) — 发起找回密码。
+// **永远回 200 中性体**（防邮箱枚举，不泄漏邮箱是否注册）；仅当 findUserByEmail 命中才 best-effort
+// 发 reset 邮件（链接 → 前端 /reset-password?token=...，吞 EmailSendError）。邮箱不存在 / 非法 JSON
+// → 同样 200、但不发信、不落 token。绝不用状态码区分「邮箱注册过没有」。
+app.post("/api/auth/password-reset/request", async (c) => {
+  let email = "";
+  try {
+    const body = (await c.req.json()) as PasswordResetRequestBody;
+    if (typeof body?.email === "string") {
+      email = body.email;
+    }
+  } catch {
+    // 非法 JSON 也回中性 200（不泄漏「请求是否有效命中」的差异，§24.1）。
+    email = "";
+  }
+  // 仅当邮箱命中才真发信；不命中 / 空 → 不发信、不落 token，但对外仍然 200（防枚举）。
+  if (email.length > 0) {
+    const user = await findUserByEmail(c.env.DB, email);
+    if (user !== null) {
+      c.executionCtx.waitUntil(sendResetEmail(c.env, user.id, user.email));
+    }
+  }
+  return c.json({ ok: true } satisfies NeutralOkBody, 200);
+});
+
+// POST /api/auth/password-reset/confirm (PUBLIC, body { token, password }, §24.3) — 凭 reset
+// token 改密。先校验新密码强度（≥8，复用 §17.2，弱 → 400 统一文案，不消费 token）；consumeToken
+// ('reset') 命中 → resetUserPassword（内部整组换密码 + 作废其余 reset token）→ 200 中性体。token
+// 无效/过期/已用/kind 错/缺 token → 400 统一文案（不泄漏是哪种，§22.4）。不需要 session。
+app.post("/api/auth/password-reset/confirm", async (c) => {
+  let body: PasswordResetConfirmBody;
+  try {
+    body = (await c.req.json()) as PasswordResetConfirmBody;
+  } catch {
+    return c.json({ error: "重置链接无效或已过期" }, 400);
+  }
+  const token = typeof body?.token === "string" ? body.token : "";
+  const password = typeof body?.password === "string" ? body.password : "";
+
+  // 新密码强度先于 token 消费校验：弱密码 → 400，**不**消费 token（让用户可用同一链接重试）。
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return c.json({ error: "密码至少 8 位" }, 400);
+  }
+
+  // 统一收敛 token 失败：不存在 / 过期 / 已用 / kind 错 / 缺 token 都 → 同一 400 文案（不泄漏）。
+  const consumed = token.length > 0 ? await consumeToken(c.env.DB, token, "reset") : null;
+  if (consumed === null) {
+    return c.json({ error: "重置链接无效或已过期" }, 400);
+  }
+  // 命中 → 整组替换密码 + 作废该 user 其余 reset token（防一封旧邮件二次改密，§24.3）。
+  await resetUserPassword(c.env.DB, consumed.userId, password);
+  return c.json({ ok: true } satisfies NeutralOkBody, 200);
 });
 
 // POST /api/auth/login (public) — verify email + password against the users table

@@ -21,6 +21,12 @@
 /** The public fill-page path prefix (SPEC §16.4.1). A published form lives at /f/:slug. */
 export const PUBLIC_FORM_PREFIX = "/f/";
 
+/** 找回密码 reset landing page (SPEC §24.5). The email link lands here at /reset-password?token=. */
+export const RESET_PASSWORD_PATH = "/reset-password";
+
+/** 邮箱验证 result landing page (SPEC §23.6). The backend confirm endpoint 302s here at /verify-email?status=. */
+export const VERIFY_EMAIL_PATH = "/verify-email";
+
 /** A recognised public-fill route, carrying the slug parsed out of /f/:slug. */
 export interface PublicFormRoute {
   slug: string;
@@ -58,6 +64,68 @@ export function matchPublicForm(pathname: string): PublicFormRoute | null {
   return { slug };
 }
 
+/** A recognised /reset-password route, carrying the reset token read off the query. */
+export interface ResetPasswordRoute {
+  /** The plaintext one-time reset token from `?token=` ("" when missing — the page shows a hint). */
+  token: string;
+}
+
+/** A recognised /verify-email route, carrying the backend-supplied result status. */
+export interface VerifyEmailRoute {
+  /** "ok" only when `?status=ok`; anything else (missing/unknown) normalises to "invalid" (fail-closed). */
+  status: "ok" | "invalid";
+}
+
+/**
+ * Is `pathname` exactly `target` (tolerating one trailing slash)? Shared by the two
+ * auth landing matchers so "/reset-password" and "/reset-password/" both hit but
+ * "/reset-password/extra" / "/reset" do not.
+ */
+function isExactPath(pathname: string, target: string): boolean {
+  if (typeof pathname !== "string") return false;
+  return pathname === target || pathname === target + "/";
+}
+
+/**
+ * Match the 找回密码 reset landing route (SPEC §24.5). Pure: given the pathname and the
+ * query string (e.g. window.location.search), return `{ token }` when the path is
+ * `/reset-password` (one trailing slash tolerated), else `null` (the designer/public).
+ * The token is read off `?token=` and URL-decoded; a missing/blank token yields
+ * `{ token: "" }` so the landing page still mounts and renders its「链接无效」hint
+ * (rather than falling through to the designer). The token is read from the URL only —
+ * never persisted, never logged.
+ */
+export function matchResetPassword(pathname: string, search: string): ResetPasswordRoute | null {
+  if (!isExactPath(pathname, RESET_PASSWORD_PATH)) return null;
+  return { token: readQueryParam(search, "token") };
+}
+
+/**
+ * Match the 邮箱验证 result landing route (SPEC §23.6). Pure: given the pathname and the
+ * query string, return `{ status }` when the path is `/verify-email` (one trailing
+ * slash tolerated), else `null`. `status` is "ok" ONLY when `?status=ok`; every other
+ * value (missing / unknown) normalises to "invalid" — fail-closed, so the page never
+ * claims 邮箱已验证 without an explicit `status=ok` from the backend redirect.
+ */
+export function matchVerifyEmail(pathname: string, search: string): VerifyEmailRoute | null {
+  if (!isExactPath(pathname, VERIFY_EMAIL_PATH)) return null;
+  return { status: readQueryParam(search, "status") === "ok" ? "ok" : "invalid" };
+}
+
+/**
+ * Read a single query parameter (URL-decoded) out of a search string like
+ * "?token=abc&x=1", returning "" when absent or malformed. Uses URLSearchParams so
+ * decoding + multi-param parsing is correct without hand-rolling it.
+ */
+function readQueryParam(search: string, key: string): string {
+  if (typeof search !== "string" || search === "") return "";
+  try {
+    return new URLSearchParams(search.startsWith("?") ? search.slice(1) : search).get(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 /**
  * The single impure read of the current path (window.location.pathname), isolated so
  * App can take an injectable `pathname` prop that defaults to this. In a non-browser /
@@ -73,4 +141,21 @@ export function currentPathname(): string {
     return window.location.pathname;
   }
   return "/";
+}
+
+/**
+ * The single impure read of the current query string (window.location.search,
+ * including the leading "?"), isolated next to {@link currentPathname} so App can take
+ * an injectable `search` prop that defaults to this. In a non-browser / test
+ * environment with no `window.location`, returns "" so render never throws.
+ */
+export function currentSearch(): string {
+  if (
+    typeof window !== "undefined" &&
+    window.location &&
+    typeof window.location.search === "string"
+  ) {
+    return window.location.search;
+  }
+  return "";
 }
