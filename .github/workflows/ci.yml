@@ -37,3 +37,23 @@ jobs:
       - run: npm run test:e2e
         env:
           PW_USE_BUNDLED: "1"
+
+  # workers/ is an independent npm subpackage (Cloudflare Workers backend) with
+  # its own lockfile, typecheck, and vitest (real workerd via
+  # @cloudflare/vitest-pool-workers). Gate it on every PR — no path filter — so
+  # it always reports status for branch protection.
+  workers:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: workers/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
