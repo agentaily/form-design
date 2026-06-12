@@ -1,5 +1,11 @@
 # agentaily-forms
 
+## 0.4.1
+
+### Patch Changes
+
+- [#23](https://github.com/agentaily/form-design/pull/23) [`0d82d50`](https://github.com/agentaily/form-design/commit/0d82d50b15c8bd2f91881d2bddbe3deb29a94773) Thanks [@yarnovo](https://github.com/yarnovo)! - 发版机器人组织化:复用组织级 GitHub App `agentaily-release-bot` + 组织级 secret(可见性 selected)开 Version PR 并 auto-merge,新仓接入只需勾两个列表。OPERATIONS.md §7 一次性前置同步为组织级口径。
+
 ## 0.4.0
 
 ### Minor Changes
