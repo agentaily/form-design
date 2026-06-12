@@ -384,6 +384,61 @@ export async function preCreateBitableColumnsBestEffort(
 export type BitableColumnTypes = Map<string, FeishuFieldType>;
 
 /**
+ * 一列在飞书表里的**详细身份**：实际列类型 + 飞书侧的 `field_id`（§16.8.7）。
+ *
+ * `field_id` 是飞书 Bitable 列的稳定标识——**改名一跳**（{@link renameBitableColumn} 的
+ * `PUT .../fields/{field_id}`）唯一据以定位目标列的键。现有 {@link listBitableColumns} 只投影
+ * 「名 → 类型」、丢掉了 `field_id`，故改名链路需要本更宽的视图（{@link listBitableColumnsDetailed}）。
+ */
+export interface BitableColumnDetail {
+  /** 该列的实际飞书列类型（同 {@link BitableColumnTypes} 的值，未知 / 缺失兜底文本）。 */
+  type: FeishuFieldType;
+  /** 该列的飞书 `field_id`（`data.items[].field_id`）；改名 API 的路径参数。 */
+  fieldId: string;
+}
+
+/**
+ * 列出目标表现有列的「列名 → {@link BitableColumnDetail}」（含 `field_id`，§16.8.7）。
+ *
+ * 与 {@link listBitableColumns} 共用同一次「列出字段」上游一跳（{@link listBitableFieldItems}），
+ * 但**多投影一个 `data.items[].field_id`**——改名链路据 `field_id` 定位列。**`listBitableColumns`
+ * 的签名（`Map<列名, 类型>`）与 §16.8.4 提交写值路径完全不变**：要么让 `listBitableColumns` 从本
+ * 函数的产物投影出「名 → 类型」、要么二者并存各读一次，由 implementer 在合约内定（别破坏写值路径）。
+ *
+ * 丢弃 `field_id` 缺失（异常态）的 item：没有 `field_id` 的列无法被改名定位，纳入也无用。
+ * 失败语义沿用 {@link listBitableFieldItems}：抛 {@link import("./submit").BitableWriteError}
+ * （message 只带非敏感 code / 状态，绝不含 token / secret，§15.7）。
+ *
+ * @param token tenant_access_token；只进 `Authorization` 头（§15.7）。
+ * @param appToken owner Bitable app token。
+ * @param tableId owner Bitable table id。
+ * @returns 列名 → { 实际类型, field_id }；空表 → 空 Map。
+ * @throws {@link import("./submit").BitableWriteError} 列出失败（非 2xx / code≠0 / 不可达）。
+ */
+export async function listBitableColumnsDetailed(
+  token: string,
+  appToken: string,
+  tableId: string,
+): Promise<Map<string, BitableColumnDetail>> {
+  // 与 listBitableColumns 共用同一次「列出字段」上游一跳，但多投影 field_id（改名据此定位列）。
+  const items = await listBitableFieldItems(token, appToken, tableId);
+  const cols = new Map<string, BitableColumnDetail>();
+  for (const item of items) {
+    // 丢弃没有 field_name 或 field_id 的 item：没有 field_id 的列无法被改名定位，纳入无用。
+    if (typeof item.field_name !== "string" || typeof item.field_id !== "string") {
+      continue;
+    }
+    // 未知 / 缺失 type 兜底文本，保证值始终是合法 FeishuFieldType（与 listBitableColumns 一致）。
+    const type =
+      typeof item.type === "number"
+        ? (item.type as FeishuFieldType)
+        : FEISHU_BITABLE_FIELD_TYPE.TEXT;
+    cols.set(item.field_name, { type, fieldId: item.field_id });
+  }
+  return cols;
+}
+
+/**
  * 列出目标表现有列的「列名 → 飞书列类型」映射（§15.8 升级 / §16.8）。
  *
  * `GET` {@link import("./submit").FEISHU_BITABLE_FIELDS_URL}（`?page_size=` 列页大小），取
@@ -422,10 +477,12 @@ export async function listBitableColumns(
 // 内部：列出 / 建列的飞书上游调用收口（listBitableColumns / preCreateBitableColumns 共用）
 // ---------------------------------------------------------------------------
 
-/** 一条飞书列出字段响应里的 item（只取本模块用到的 `field_name` / `type`）。 */
+/** 一条飞书列出字段响应里的 item（只取本模块用到的 `field_name` / `type` / `field_id`）。 */
 interface FeishuFieldItem {
   field_name?: string;
   type?: number;
+  /** 飞书列稳定标识；{@link listBitableColumnsDetailed} 投影它供改名定位（§16.8.7）。 */
+  field_id?: string;
 }
 
 /**
@@ -543,4 +600,290 @@ export function flattenLeafFields(fields: Field[]): Field[] {
   };
   walk(fields);
   return leaves;
+}
+
+/**
+ * 把字段树展平成**全部**叶子字段序列——**不按 label 去重**（与 {@link flattenLeafFields} 唯一的
+ * 差别）：group 容器自身不算叶子、只递归展开其 `children`，每个非 group 字段都是一个叶子，**同
+ * label 不同 id 的两个字段都保留**。
+ *
+ * 为什么需要它(§16.8.7 改名 diff)：{@link flattenLeafFields} **按 `label` 去重**（为预建路径设计——
+ * 同名列只建一次），但改名 diff（{@link computeFieldRenames}）是**按 `field.id` 配对**做的。两者冲突：
+ * 若旧 schema 有两个同 `label` 的字段（如 `[{id:f1,label:"其他"},{id:f2,label:"其他"}]`，`parseField`
+ * 只禁空 label、不禁重复 label，故可达），`flattenLeafFields` 会把其一按 label 去重掉 → 改名 diff 的
+ * `oldById` 缺了那个 id → 改它的 label 时认不出是改名、当成新字段 → 预建按新 label 另建一列、旧列连
+ * 数据被孤立（正是改名同步要防的丢数据）。故改名 diff **只**用本不去重的摊平；**预建路径仍用
+ * {@link flattenLeafFields} 的 label 去重不变**（别破坏 §16.8 预建「同名只建一列」语义）。
+ *
+ * 仅供本模块内部的改名 diff 用，不导出。同 id 的两个叶子（异常态）在调用方按 id 配对时仍 first-wins。
+ */
+function flattenLeafFieldsAll(fields: Field[]): Field[] {
+  const leaves: Field[] = [];
+  const walk = (fs: Field[]): void => {
+    for (const field of fs) {
+      if (field.type === "group") {
+        // 容器字段自身无值、不建列；只展开其子字段。
+        walk(field.children ?? []);
+        continue;
+      }
+      // 不按 label 去重：同 label 不同 id 的字段都保留，供按 id 配对的改名 diff 全量看到。
+      leaves.push(field);
+    }
+  };
+  walk(fields);
+  return leaves;
+}
+
+// ---------------------------------------------------------------------------
+// §16.8.7：改字段标签 → 同步飞书列改名（best-effort，v1 只改名）—— 实现留给 implementer
+// ---------------------------------------------------------------------------
+
+/**
+ * 飞书「改字段名 / 改单列」端点模板（按 `field_id` 定位单列，§16.8.7）。
+ *
+ * `PUT https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields/{field_id}`，
+ * `Authorization: Bearer <tenant_access_token>`，body **同时带回原 `type`**：`{ field_name, type }`
+ * ——**只改名、不改类型**（漏带 `type` 可能被飞书误改 / 拒；列类型由 §16.8.4 既有列冲突兜底负责）。
+ * 与 {@link import("./submit").FEISHU_BITABLE_FIELDS_URL}（建列 / 列出，无 `field_id` 段）是不同路由。
+ */
+export const FEISHU_BITABLE_FIELD_BY_ID_URL =
+  "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields/{field_id}";
+
+/**
+ * 一条「飞书列改名」计划项（{@link computeFieldRenames} 的产物）：把某字段对应的飞书列从
+ * `oldLabel` 改名成 `newLabel`。`type` 是该字段映射出的飞书列类型，**仅作改名调用时带回原 `type`
+ * 的兜底参照**；改名一跳真正带回的 `type` 应以**飞书侧该列现有类型**为准（来自
+ * {@link listBitableColumnsDetailed}），二者通常一致，冲突时以列现有类型为准（只改名不改类型）。
+ */
+export interface FieldRename {
+  /** 字段稳定 `id`（§3.2；新旧配对的钥匙，改名后不变）。 */
+  fieldId: string;
+  /** 旧标签——**即飞书那列现在的名字**，据此定位列（§16.8.7）。 */
+  oldLabel: string;
+  /** 新标签——改名后的列名。 */
+  newLabel: string;
+  /** 该字段映射出的飞书列类型（`toBitableFieldType(field.type)`），改名带回 `type` 的参照。 */
+  type: FeishuFieldType;
+}
+
+/**
+ * **纯函数 seam（inner-loop 单测靶）：** 对比编辑前后的字段定义，算出「哪些字段被改了名」
+ * （§16.8.7）。**无 I/O**。
+ *
+ * 规则：
+ * - 先各自摊平 `group`（分组子字段一并参与配对；容器自身不参与）——用**不按 label 去重**的
+ *   {@link flattenLeafFieldsAll}（**非** {@link flattenLeafFields}），保证同 label 不同 id 的两个
+ *   字段都进 diff；否则按 label 去重会丢掉其一的 id、把改它名当成新字段而漏判改名（丢数据）。
+ * - 按 `field.id` 把新旧字段**配对**：`id` 在**新旧都有**、且 `label` **不同** = 一条改名
+ *   （`oldLabel` = 旧字段 label，`newLabel` = 新字段 label，`type` = `toBitableFieldType(新字段.type)`）。
+ * - **新增**（id 只在新）/ **删除**（id 只在旧）/ **改类型但 label 不变** → **不在结果内**
+ *   （v1 只同步改名；新增由预建处理，删 / 改类型不同步，§16.8.7 范围表）。
+ * - `oldLabel === newLabel`（label 没变）→ 跳过，不产生改名项。
+ * - 同一旧 id 出现多次（异常态）/ label 为空等脏数据的处理由 implementer 在合约内定，但**不得抛**
+ *   （一份脏字段定义不该拖垮整次 diff，与本模块「永不因坏字段拖垮」的纪律一致）。
+ *
+ * @param oldFields 编辑落库**前**的字段定义（来自旧 `schema_json`）。
+ * @param newFields 编辑后的字段定义（`UpdateFormInput.fields`）。
+ * @returns 改名计划项数组；无改名 → `[]`（调用方据此不发任何改名调用）。
+ */
+export function computeFieldRenames(oldFields: Field[], newFields: Field[]): FieldRename[] {
+  // 各自摊平 group → 叶子字段（分组子字段一并参与配对；容器自身不参与）——用 flattenLeafFieldsAll
+  // （不按 label 去重），保证同 label 不同 id 的两个字段都进 diff；若用 flattenLeafFields 的 label
+  // 去重，会丢掉其一的 id → 改它名时认不出改名、当成新字段（旧列连数据被孤立的丢数据 bug）。
+  // 按 field.id 索引旧字段，同一旧 id 多次出现（异常态）只取首次（不抛——一份脏字段定义不该拖垮整次 diff）。
+  const oldById = new Map<string, Field>();
+  for (const leaf of flattenLeafFieldsAll(oldFields)) {
+    if (!oldById.has(leaf.id)) {
+      oldById.set(leaf.id, leaf);
+    }
+  }
+
+  const renames: FieldRename[] = [];
+  const seenNewIds = new Set<string>();
+  for (const leaf of flattenLeafFieldsAll(newFields)) {
+    // 同一新 id 多次出现（异常态）只认首次，避免对同一字段产出多条改名。
+    if (seenNewIds.has(leaf.id)) {
+      continue;
+    }
+    seenNewIds.add(leaf.id);
+
+    const old = oldById.get(leaf.id);
+    // id 只在新（新增字段）→ 不进结果（新增由预建建列）。
+    if (old === undefined) {
+      continue;
+    }
+    // id 两边都有但 label 未变（仅改类型 / 改校验 / 重排）→ 不进结果（v1 只同步改名）。
+    if (old.label === leaf.label) {
+      continue;
+    }
+    // id 同、label 不同 = 一条改名。type 取新字段映射类型，仅作改名带回 type 的参照
+    // （真正带回的 type 以飞书侧列现有类型为准，syncBitableColumnRenamesBestEffort 里取）。
+    renames.push({
+      fieldId: leaf.id,
+      oldLabel: old.label,
+      newLabel: leaf.label,
+      type: toBitableFieldType(leaf.type),
+    });
+  }
+  // id 只在旧（删除字段）天然不进结果（只遍历新字段）。
+  return renames;
+}
+
+/**
+ * 改飞书表里**一列**的名字（§16.8.7 单列一跳）。
+ *
+ * `PUT` {@link FEISHU_BITABLE_FIELD_BY_ID_URL}（`{field_id}` 填该列的飞书 field_id），body
+ * `{ field_name: newLabel, type }`——**带回原 `type` 只改名、不改类型**。成功要求 `2xx` 且
+ * `code === 0`。失败抛 {@link import("./submit").BitableWriteError}（message 只带非敏感
+ * code / 状态，绝不含 token / secret / 列值，§15.7）；对外由 {@link syncBitableColumnRenamesBestEffort}
+ * 逐项 try/catch 吞掉，单列失败不影响其它列。
+ *
+ * 注意：**调用前的冲突判定不在本函数**——「新名撞已存在的另一列」「旧名找不到列」由
+ * {@link syncBitableColumnRenamesBestEffort} 在调本函数前据 {@link listBitableColumnsDetailed}
+ * 的产物逐项过滤（§16.8.7 冲突 / 边界）。本函数只管「拿着 field_id 把名字改成 newLabel」这一跳。
+ *
+ * @param token tenant_access_token；只进 `Authorization` 头（§15.7）。
+ * @param appToken owner Bitable app token。
+ * @param tableId owner Bitable table id。
+ * @param fieldId 目标列的飞书 field_id（来自 {@link listBitableColumnsDetailed}）。
+ * @param newLabel 新列名。
+ * @param type 该列现有类型，带回 body 以**只改名不改类型**。
+ * @throws {@link import("./submit").BitableWriteError} 改名失败（非 2xx / code≠0 / 不可达）。
+ */
+export async function renameBitableColumn(
+  token: string,
+  appToken: string,
+  tableId: string,
+  fieldId: string,
+  newLabel: string,
+  type: FeishuFieldType,
+): Promise<void> {
+  const url = FEISHU_BITABLE_FIELD_BY_ID_URL.replace("{app_token}", appToken)
+    .replace("{table_id}", tableId)
+    .replace("{field_id}", fieldId);
+  // body 带回原 type 一起改名——只改名、不改类型（漏带 type 飞书可能误改 / 拒）。
+  const reqBody = { field_name: newLabel, type };
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "PUT",
+      headers: {
+        // tenant_access_token 的唯一去处是 Authorization 头（§15.7）。
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(reqBody),
+    });
+  } catch {
+    throw new BitableWriteError("飞书改列名失败：上游不可达");
+  }
+  let body: { code?: number };
+  try {
+    body = (await res.json()) as { code?: number };
+  } catch {
+    throw new BitableWriteError(`飞书改列名失败：上游返回 ${res.status}`);
+  }
+  // 成功要求 2xx 且 code === 0；失败抛 BitableWriteError（message 只带非敏感 code / 状态，
+  // 绝不含 token / secret / 列值，§15.7）——对外由 syncBitableColumnRenamesBestEffort 逐项吞掉。
+  if (res.ok && body.code === FEISHU_OK_CODE) {
+    return;
+  }
+  throw new BitableWriteError(`飞书改列名失败：code ${body.code}`);
+}
+
+/**
+ * {@link computeFieldRenames} + 飞书改名的 **best-effort 外壳**——编辑路径（`PATCH /api/forms/:slug`
+ * 带了 `fields`）在 `c.executionCtx.waitUntil(...)` 里**先于** {@link preCreateBitableColumnsBestEffort}
+ * 调用的就是它（顺序铁律见 §16.8.1 / §16.8.7）。把整段同步（读配置 → 换 token → 列出含 field_id →
+ * 逐个改名）的**任何**失败都**吞掉**，只记一条**不含凭据 / 列值**的日志，**绝不**让编辑响应失败。
+ *
+ * 内部职责（§16.8.7 接线）：
+ * 1. `renames = computeFieldRenames(oldFields, newFields)`；空 → 直接 return（不打任何上游）。
+ * 2. 读 + 解密**该 owner** 的飞书配置（`getOwnerConfig`）；`owner.feishu === null`（未配飞书）→ return。
+ * 3. `getFeishuTenantToken(appId, appSecret)`；换 token 失败 → 吞掉、return。
+ * 4. `listBitableColumnsDetailed(token, appToken, tableId)` 拿现有列「名 → { type, fieldId }」。
+ * 5. **逐项**改名（冲突 / 边界逐项跳过，互不影响，§16.8.7）：
+ *    - 旧 label 在现有列里**找不到** → 跳过该项（从没建过 / 已被改过）。
+ *    - 新 label 在现有列里**已存在另一个不同列**（撞名）→ **跳过 + 记日志（不含凭据）**，不强改。
+ *    - 否则 `renameBitableColumn(...)` 用该列 `fieldId` + 列**现有类型**改名；单项失败 try/catch 吞掉、继续下一项。
+ *
+ * 即：renames 为空 / owner 未配飞书 / 飞书连不上 / token 换取失败 / 列出失败 / 某项改名失败 ——
+ * 一律**静默跳过**，编辑照常 `200`。与 {@link preCreateBitableColumnsBestEffort} 同 best-effort
+ * 纪律：只记 `err.name`，**绝不**把 `app_secret` / `tenant_access_token` / 列值写进日志（§15.7）。
+ *
+ * 顺序铁律（§16.8.7）：本函数**先于**预建跑——改名把现有列改成新名后，随后的预建列出现有列、
+ * 看到已改名的列存在即跳过，**不会按新 label 重复建一个列**。
+ *
+ * @param env 提供 `DB` / `CONFIG_KEY` 的 Worker env（与预建外壳同源读 owner 配置）。
+ * @param ownerId 编辑这份表单的 owner 真实 user id（= 当前 session.sub）。
+ * @param oldFields 编辑落库**前**的字段定义（旧 `schema_json`，调用方在 `updateForm` 前读取）。
+ * @param newFields 编辑后的字段定义（`UpdatedForm.fields` / `UpdateFormInput.fields`）。
+ * @returns 总是 resolve（best-effort，永不 reject）。
+ */
+export async function syncBitableColumnRenamesBestEffort(
+  env: { DB: D1Database; CONFIG_KEY: string },
+  ownerId: string,
+  oldFields: Field[],
+  newFields: Field[],
+): Promise<void> {
+  try {
+    // 1) 纯 diff 算改名计划——无改名 → 直接 return（不读配置、不打任何上游）。
+    const renames = computeFieldRenames(oldFields, newFields);
+    if (renames.length === 0) {
+      return;
+    }
+    // 2) 读 + 解密该 owner 的飞书配置；未配飞书 → 静默 return。
+    const key = await importConfigKey(env.CONFIG_KEY);
+    const owner = await getOwnerConfig(env.DB, key, ownerId);
+    if (owner.feishu === null) {
+      return;
+    }
+    const feishu = owner.feishu;
+    // 3) 换 tenant_access_token（失败抛 FeishuTokenError，落入下方 catch 被吞）。
+    const token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
+    // 4) 列出现有列「名 → { type, fieldId }」（失败抛 BitableWriteError，落入 catch 被吞）。
+    const existing = await listBitableColumnsDetailed(token, feishu.appToken, feishu.tableId);
+    // 5) 逐项改名——冲突 / 边界逐项跳过、互不影响、单项失败不外抛（§16.8.7）。
+    for (const rename of renames) {
+      const col = existing.get(rename.oldLabel);
+      // 旧 label 在现有列里找不到（从没建过 / 已被改过）→ 跳过该项。
+      if (col === undefined) {
+        continue;
+      }
+      // 新 label 已是另一个不同列（撞名）→ 跳过 + 记日志（不含凭据 / 列值），不强改。
+      const collision = existing.get(rename.newLabel);
+      if (collision !== undefined && collision.fieldId !== col.fieldId) {
+        console.error("feishu column rename skipped: target name already exists");
+        continue;
+      }
+      try {
+        // 用该列 fieldId + 列现有类型改名（只改名不改类型）。单项失败 try/catch 吞掉、继续下一项。
+        await renameBitableColumn(
+          token,
+          feishu.appToken,
+          feishu.tableId,
+          col.fieldId,
+          rename.newLabel,
+          col.type,
+        );
+        // 本地视图同步：改名后该列以新名存在、旧名消失，使同批次后续改名的撞名 / 定位判断准确。
+        existing.delete(rename.oldLabel);
+        existing.set(rename.newLabel, col);
+      } catch (itemErr) {
+        // 单条改名失败 → 静默跳过，只记 err.name（绝不含 token / secret / 列值，§15.7），不外抛。
+        console.error(
+          "feishu column rename item failed",
+          itemErr instanceof Error ? itemErr.name : "unknown",
+        );
+      }
+    }
+  } catch (err) {
+    // best-effort 铁律（§16.8.7）：owner 未配飞书 / 飞书连不上 / token 换取失败 / 列出失败 ——
+    // 一律静默吞掉，绝不改变编辑的状态码与响应体。只记 err.name，绝不把 app_secret /
+    // tenant_access_token / 列值写进日志（§15.7）。
+    console.error(
+      "sync feishu column renames best-effort failed",
+      err instanceof Error ? err.name : "unknown",
+    );
+  }
 }
