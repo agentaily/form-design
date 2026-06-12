@@ -1,5 +1,30 @@
 # agentaily-forms
 
+## 0.8.0
+
+### Minor Changes
+
+- [#37](https://github.com/agentaily/form-design/pull/37) [`930d655`](https://github.com/agentaily/form-design/commit/930d6558f6f681fd82ca59cefdc11779145875c9) Thanks [@yarnovo](https://github.com/yarnovo)! - 设计同步：前端 UI 全面上移到上游 `@agentaily/design-system`（`^0.2.0 → ^0.6.0`）。
+
+  把本地手搓的页面外壳 / 对话线程 / 账户控件 / 登录 / 指向修改换成上游组件——`DesignerShell`（双栏外壳 + 拖拽 + 移动端切换）、`ConversationThread`（纯渲染 + `controller`，对接现有 §4.1 `core/queue.ts` MessageQueue，富消息走 `renderTurn`）、`AccountControl`（账户下拉：我的表单 / 集成设置 / 退出登录）、`SignInPage`、`MarkupLayer`、统一 `Icon`、布局 token `--bar-h/--topbar-h`。
+
+  **登录从应用内弹窗改为独立 `/signin` 路由页**（`src/signin.jsx` = DS `SignInPage` 接真实 `core/auth`）；未登录触发受限操作会跳转登录页并在回跳后续跑（intent 经 sessionStorage 跨页）。删除 `src/auth.jsx`、`src/markup.jsx` 及整段手写外壳 / 线程 / markup 的 CSS。
+
+  **集成设置改为独立 `/settings` 路由页**（`src/settings.jsx` = `SettingsScreen`）：DS 纯展示连接卡 `DeepSeekCard` + `FeishuCard` + form-design 自己的保存栏 / 后端 400 逐字回显 / 门禁，接真 BYOK 后端 `core/configClient`（掩码不重交 §12.4、401→/signin、逐连接测试）；删除本地 `SettingsDialog`。**登录页 `SignInPage` 用上游 `error`/`submitting` seam**，删本地 `.d-signin-error` 浮层兜底。logo 字标光标随 DS 默认（`BrandMark` cursor 默认 false）消失。
+
+  这两处经**向 DS 上游反馈两轮 seam**落地：0.5.0 加 `SignInPage` error/submitting + `IntegrationSettings` 受控 seam；0.6.0 进一步把集成设置**拆成纯展示连接卡**（组件零 localStorage/状态/保存/门禁，全归调用方）+ 删除旧 `IntegrationSettings` + `BrandMark` 默认去光标。全程经 claude.ai/design 对话设计 → `design-sync` 落地（见全局 skill `design-via-claude-design`）。
+
+- [#39](https://github.com/agentaily/form-design/pull/39) [`5572a9c`](https://github.com/agentaily/form-design/commit/5572a9c8334329494d2afb8b6573e94676d76866) Thanks [@yarnovo](https://github.com/yarnovo)! - feat(feishu): 改字段标签 → 同步改飞书对应列名(不新建列、不丢数据)
+
+  owner 在设计器里把某字段的 `label` 改了再保存,系统就去 owner 的飞书多维表格把**那一列改名** —— 而不是像以前那样按新标签**新建一列**、把旧列连同已收数据丢下(数据分家)。
+
+  - **定位**:编辑时按字段稳定 `id` 配对「旧/新」字段定义(`id` 不变、`label` 变 = 改名);旧 `label` 即飞书那列现在的名字,据此定位、调飞书 `PUT .../fields/{field_id}` 改名(带回列原 type,只改名不改类型)。不引入持久映射表。
+  - **顺序**:编辑 `waitUntil` 里**先改名、后预建**(改名后预建看到列已存在即跳过,绝不按新 label 重复建列)。
+  - **best-effort**:owner 未配飞书 / 连不上 / 改名失败 → 编辑仍 `200`、静默跳过(只记 `err.name`、不记凭据)。冲突(撞名 / 旧列找不到 / 单条失败)逐项跳过、互不影响。
+  - **v1 范围**:只改名。删字段 → 飞书那列**保留不动**(绝不删已收数据);改类型 / 排序不同步(留 follow-up)。
+
+  SPEC §16.8.7 + `features/feishu-column-rename.feature`。
+
 ## 0.7.0
 
 ### Minor Changes
