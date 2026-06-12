@@ -14,21 +14,21 @@ import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 // real Hono app in workerd via SELF.fetch, with ALL Feishu upstreams mocked
 // locally — never hits open.feishu.cn.
 //
-// The §15.8 self-heal is REACTIVE: a steady-state write (target columns already
-// exist → first add-record returns code 0) hits ONLY the token-exchange + the
-// add-record endpoints, never the two field endpoints. Only when add-record
-// returns code 1254045 (FieldNameNotFound, no record produced) does the route
-//   GET  .../fields           list existing column names
-//   POST .../fields           create each missing column (type 1, 文本)
-//   POST .../records          retry the write exactly ONCE
+// §15.8 升级（方案 a，SPEC §16.8）：稳态写记录前**先** `GET .../fields?page_size=100`
+// （listBitableColumns）拿每列真实类型再格式化值。所以现在每次提交都会**列出一次字段**
+// （不再是「稳态零字段端点流量」）。仅当 add-record 返回 code 1254045（FieldNameNotFound，
+// 无记录）才自愈：再列出一次 + `POST .../fields` 按字段 type 建缺列 + 重试写恰好一次。故
+// 缺列自愈路径上 list-fields 会出现 **两次**（稳态写值前 + 自愈补列前）。
+// 此外，发布作为 setup（POST /api/forms，owner 已配飞书）会在 waitUntil 后台触发
+// preCreateBitableColumnsBestEffort（§16.8），打到同一 mock；setup 后 drain + reset 掉这股扇出。
 // This file realizes every §15.8 scenario of workers/features/submit.feature:
-//   1. 写记录遇列不存在 → 补建缺失列 → 重试成功 (200 + recordId)
+//   1. 写记录遇列不存在 → 补建缺失列 → 重试成功 (200 + recordId)，list-fields 两次
 //   2. 自愈只建缺失的列（已存在的列不重复建）
-//   3. 列已存在（稳态）→ 零字段端点调用
+//   3. 列已存在（稳态）→ 列出一次列类型但不建任何列
 //   4. 建列遇 FieldNameDuplicated (1254014) → 幂等成功 → 200
 //   5. 自愈后重试仍失败 → 502，响应不含 token / app_secret
 //
-// Contract: SPEC.md §15.8.
+// Contract: SPEC.md §15.8、§16.8.
 
 const BASE = "https://api.local";
 
@@ -160,6 +160,8 @@ interface FeishuMock {
   readonly fieldsListCalls: CapturedCall[];
   /** ④ create-field (POST fields) calls, in order. */
   readonly fieldCreateCalls: CapturedCall[];
+  /** Empty every captured-call array (discards the publish background pre-create). */
+  resetCalls(): void;
   restore(): void;
 }
 
@@ -257,10 +259,29 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
     recordCalls,
     fieldsListCalls,
     fieldCreateCalls,
+    resetCalls: () => {
+      tokenCalls.length = 0;
+      recordCalls.length = 0;
+      fieldsListCalls.length = 0;
+      fieldCreateCalls.length = 0;
+    },
     restore: () => {
       globalThis.fetch = realFetch;
     },
   };
+}
+
+/**
+ * Drain the publish-setup background `preCreateBitableColumnsBestEffort` (§16.8) —
+ * wait for its token exchange to land, then settle so any list/create follow-ups also
+ * land, so the caller can `resetCalls()` and assert on the §15 / §15.8 submit alone.
+ */
+async function drainBackgroundPreCreate(mock: FeishuMock): Promise<void> {
+  const deadline = Date.now() + 800;
+  while (mock.tokenCalls.length === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await new Promise((r) => setTimeout(r, 25));
 }
 
 // Owner-only setup token (§17.1) for the POST /api/config + POST /api/forms calls.
@@ -353,9 +374,10 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
   it("Scenario: 写记录遇列不存在时自动建缺失列并重试成功", async () => {
     // Given 一个已保存完整飞书凭据的 owner + 一份已发布的表单
     await configureOwner();
-    const slug = await publishFormWithLabels(["姓名", "城市"]);
 
-    // And token OK；首写返回 1254045（缺列）；列出现有列（不含两列）；建列成功；重试写成功。
+    // And token OK；列出现有列（不含两列）；建列成功；首写返回 1254045（缺列）；重试写成功。
+    // §15.8 升级：提交先 listBitableColumns（拿真实类型）→ 写 → 缺列则自愈再列出 + 建列 → 重试。
+    // 先装 mock 再发布，drain 掉发布预建后台扇出后 reset，使下面的计数只反映这次提交。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: [
@@ -365,6 +387,9 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
       fieldsList: { status: 200, body: fieldsListBody([]) },
       fieldCreate: { status: 200, body: FIELD_CREATE_OK_BODY },
     });
+    const slug = await publishFormWithLabels(["姓名", "城市"]);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When 答题者带着该表单的 slug 提交作答（两列都缺）
     const res = await postSubmit(
@@ -380,15 +405,15 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     expect(body.ok).toBe(true);
     expect(body.recordId).toBe(UPSTREAM_RECORD_ID);
 
-    // And 列出过该表的现有字段恰好一次
-    expect(mock.fieldsListCalls).toHaveLength(1);
-    // The list is a GET carrying the token only on the Authorization header (§15.7).
-    expect(mock.fieldsListCalls[0].method).toBe("GET");
-    expect(mock.fieldsListCalls[0].headers.get("authorization")).toBe(
-      `Bearer ${UPSTREAM_TENANT_TOKEN}`,
-    );
+    // And 列出过该表的现有字段两次（§15.8 升级：稳态写值前的 listBitableColumns 一次 +
+    // 自愈补列前的列出一次）——都是只带 token 的 GET（§15.7）。
+    expect(mock.fieldsListCalls).toHaveLength(2);
+    for (const c of mock.fieldsListCalls) {
+      expect(c.method).toBe("GET");
+      expect(c.headers.get("authorization")).toBe(`Bearer ${UPSTREAM_TENANT_TOKEN}`);
+    }
 
-    // And 对每个缺失的列各新建字段一次（两列都缺 → 两次），各为 type 1（文本）。
+    // And 对每个缺失的列各新建字段一次（两列都缺 → 两次），各为 type 1（文本，字段声明即 text）。
     expect(mock.fieldCreateCalls).toHaveLength(2);
     const created = mock.fieldCreateCalls.map(
       (c) => (c.body as { field_name?: string; type?: number }).field_name,
@@ -408,7 +433,6 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
   it("Scenario: 自愈只新建缺失的列不重复建已存在的列", async () => {
     // Given owner + 表单，两列「姓名」「城市」。
     await configureOwner();
-    const slug = await publishFormWithLabels(["姓名", "城市"]);
 
     // And 列出现有列时「姓名」已存在、「城市」缺失 → 只该对「城市」建一次列。
     mock = installFeishuMock({
@@ -420,6 +444,9 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
       fieldsList: { status: 200, body: fieldsListBody(["姓名"]) },
       fieldCreate: { status: 200, body: FIELD_CREATE_OK_BODY },
     });
+    const slug = await publishFormWithLabels(["姓名", "城市"]);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When 提交含一个已存在列（姓名）与一个缺失列（城市）的作答
     const res = await postSubmit(
@@ -432,8 +459,9 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     // Then 200。
     expect(res.status).toBe(200);
 
-    // And 后端只对缺失的「城市」发起新建字段请求，未对已存在的「姓名」建列。
-    expect(mock.fieldsListCalls).toHaveLength(1);
+    // And 后端只对缺失的「城市」发起新建字段请求，未对已存在的「姓名」建列。§15.8 升级后
+    // 列出共两次（稳态写值前 + 自愈补列前），但建列只发生一次（只对缺的「城市」）。
+    expect(mock.fieldsListCalls).toHaveLength(2);
     expect(mock.fieldCreateCalls).toHaveLength(1);
     const created = mock.fieldCreateCalls.map(
       (c) => (c.body as { field_name?: string }).field_name,
@@ -443,17 +471,22 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     expect(mock.recordCalls).toHaveLength(2);
   });
 
-  it("Scenario: 列已存在时稳态提交不调用任何字段端点", async () => {
+  it("Scenario: 列已存在时稳态提交列出一次列类型但不建任何列", async () => {
     // Given owner + 表单。
     await configureOwner();
-    const slug = await publishFormWithLabels(["姓名"]);
 
-    // And 首写即 code 0（列已存在）。fieldsList / fieldCreate 都 OMITTED：
-    // 任何字段端点调用都会 THROW —— 这是「稳态零开销」断言的承重设计。record 只配 1 个回复。
+    // §15.8 升级（方案 a）：稳态提交现在写记录前**先** listBitableColumns 拿每列真实类型，
+    // 故会列出字段一次（不再是「零字段端点流量」）。但列已存在 → 首写即 code 0 → **不自愈、
+    // 不建任何列**。fieldsList 返回「姓名」已存在；fieldCreate OMITTED：任何建列调用都会
+    // THROW —— 这是「稳态不建列」断言的承重设计。record 只配 1 个回复。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: [{ status: 200, body: BITABLE_OK_BODY }],
+      fieldsList: { status: 200, body: fieldsListBody(["姓名"]) },
     });
+    const slug = await publishFormWithLabels(["姓名"]);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When 提交一份作答。
     const res = await postSubmit(submission(slug, [{ label: "姓名", value: "张三" }]));
@@ -464,10 +497,11 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     expect(body.ok).toBe(true);
     expect(body.recordId).toBe(UPSTREAM_RECORD_ID);
 
-    // And 没有向飞书列出字段 / 新建字段接口发起任何请求（稳态零开销）。
-    expect(mock.fieldsListCalls).toHaveLength(0);
+    // And 稳态写值前列出列类型恰好一次（§15.8 升级），但**不**触发任何建列（列已存在）。
+    expect(mock.fieldsListCalls).toHaveLength(1);
+    expect(mock.fieldsListCalls[0].method).toBe("GET");
     expect(mock.fieldCreateCalls).toHaveLength(0);
-    // And 对多维表格新增记录接口只发起一次请求。
+    // And 对多维表格新增记录接口只发起一次请求（首写即成功，无重试）。
     expect(mock.recordCalls).toHaveLength(1);
     expect(mock.tokenCalls).toHaveLength(1);
   });
@@ -475,9 +509,8 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
   it("Scenario: 新建字段遇 FieldNameDuplicated 视为成功", async () => {
     // Given owner + 表单。
     await configureOwner();
-    const slug = await publishFormWithLabels(["姓名"]);
 
-    // And 首写缺列；列出为空；建列返回 1254014（并发下别处刚建）；重试写成功。
+    // And 列出为空；首写缺列；建列返回 1254014（并发下别处刚建）；重试写成功。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: [
@@ -487,6 +520,9 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
       fieldsList: { status: 200, body: fieldsListBody([]) },
       fieldCreate: { status: 200, body: FIELD_CREATE_DUP_BODY },
     });
+    const slug = await publishFormWithLabels(["姓名"]);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When 提交一份作答。
     const res = await postSubmit(submission(slug, [{ label: "姓名", value: "张三" }]));
@@ -495,7 +531,8 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok?: boolean };
     expect(body.ok).toBe(true);
-    expect(mock.fieldsListCalls).toHaveLength(1);
+    // §15.8 升级：列出共两次（稳态写值前 + 自愈补列前）；建列一次（命中 1254014 当幂等成功）。
+    expect(mock.fieldsListCalls).toHaveLength(2);
     expect(mock.fieldCreateCalls).toHaveLength(1);
     expect(mock.recordCalls).toHaveLength(2);
   });
@@ -503,7 +540,6 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
   it("Scenario: 自愈后重试写入仍失败时返回 502 且不泄漏凭据", async () => {
     // Given owner + 表单。
     await configureOwner();
-    const slug = await publishFormWithLabels(["姓名"]);
 
     // And 两次写记录都返回 1254045（补列后仍缺，或别的原因）；列出 / 建列都成功。
     // record 只配 2 个回复：若路由发起第 3 次写，mock 会 THROW（证明只重试一次）。
@@ -516,6 +552,9 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
       fieldsList: { status: 200, body: fieldsListBody([]) },
       fieldCreate: { status: 200, body: FIELD_CREATE_OK_BODY },
     });
+    const slug = await publishFormWithLabels(["姓名"]);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When 提交一份作答。
     const res = await postSubmit(submission(slug, [{ label: "姓名", value: "张三" }]));

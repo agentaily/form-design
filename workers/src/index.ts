@@ -20,7 +20,7 @@ import {
 import { testDeepSeek, testFeishu, type ConnProbe, type ConnTestResult } from "./conntest";
 import { getFeishuTenantToken, FeishuTokenError } from "./feishu";
 import {
-  answersToFields,
+  answersToTypedFields,
   parseSubmitRequest,
   validateAnswers,
   writeRecordWithFieldEnsure,
@@ -30,6 +30,7 @@ import {
   AnswersValidationError,
   type SubmitRequest,
 } from "./submit";
+import { listBitableColumns, preCreateBitableColumnsBestEffort } from "./feishu-schema";
 import {
   parsePublishInput,
   parseUpdateInput,
@@ -708,20 +709,22 @@ app.post("/api/submit", async (c) => {
     throw err;
   }
 
-  // 5) Map answers → Feishu fields and write one record, self-healing missing
-  //    columns once (§15.8): a steady-state write hits only the add-record
-  //    endpoint; a 1254045 (列不存在) back-fills the missing columns and retries
-  //    once. The tenant_access_token rides ONLY the Authorization headers (§15.7);
-  //    any terminal failure (incl. 自愈后重试仍失败) is a BitableWriteError →
-  //    surfaces as 502 with neither token nor secret in the error.
-  const fields = answersToFields(request.answers);
+  // 5) 类型化写值（§16.8 / §15.8 升级，既有列冲突兜底方案 a）：先列出目标表现有列的**真实
+  //    类型**（listBitableColumns），再把 answers 格成 typed fields（answersToTypedFields，传
+  //    fieldsDef）——**已存在列**按列真实类型写（兜旧文本列 / 类型漂移，飞书不因类型不符整条拒）；
+  //    **缺列**按字段自身映射类型写（与自愈即将建成的列类型匹配，§16.8.4）。再写一条记录，缺列时
+  //    按字段 type 自愈建**对应类型**列后用同一份类型化值重试一次（§15.8）。列出失败 / 写失败
+  //    （含自愈后仍失败）→ BitableWriteError → 502，token / secret 绝不进错误体（§15.7）。
   let recordId: string;
   try {
+    const columnTypes = await listBitableColumns(token, feishu.appToken, feishu.tableId);
+    const fields = answersToTypedFields(request.answers, columnTypes, fieldsDef);
     ({ recordId } = await writeRecordWithFieldEnsure(
       token,
       feishu.appToken,
       feishu.tableId,
       fields,
+      fieldsDef,
     ));
   } catch (err) {
     if (err instanceof BitableWriteError) {
@@ -755,6 +758,13 @@ app.post("/api/forms", async (c) => {
   // 2) Persist one forms row owned by the logged-in owner (status 'published') → { slug }.
   const ownerId = c.get("session").sub;
   const { slug } = await saveForm(c.env.DB, ownerId, input);
+
+  // 3) best-effort 预建飞书列（§16.8）：发布即在该 owner 的飞书表里按字段 type 把**全部**列
+  //    建好（number→数字 / date→日期 / select→单选…），让 owner 发布后立刻看到完整且类型正确
+  //    的结构。在 waitUntil 后台跑、**绝不**阻塞 201：owner 未配飞书 / 飞书连不上 / token 换取
+  //    失败 / 建列失败一律静默跳过（只记 err.name，绝不记凭据，§16.8 best-effort 铁律）。
+  c.executionCtx.waitUntil(preCreateBitableColumnsBestEffort(c.env, ownerId, input.fields));
+
   return c.json({ slug }, 201);
 });
 
@@ -793,6 +803,15 @@ app.patch("/api/forms/:slug", async (c) => {
   if (updated === null) {
     return c.json({ error: "form not found" }, 404);
   }
+
+  // best-effort 增量预建（§16.8）：编辑改了 fields → 在飞书表里**增量**补建新增字段的列。
+  // 传更新后的完整 fields 即可——preCreateBitableColumns 先列出现有列、只建缺的、跳过已存在的
+  // （绝不改既有列），故传全集天然增量。仅在本次 PATCH 带了 fields 时触发；同样在 waitUntil
+  // 后台跑、失败静默跳过，不阻塞 200（§16.8 best-effort）。
+  if (input.fields !== undefined) {
+    c.executionCtx.waitUntil(preCreateBitableColumnsBestEffort(c.env, ownerId, updated.fields));
+  }
+
   return c.json(updated, 200);
 });
 

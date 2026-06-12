@@ -9,7 +9,7 @@ import {
   authHeader,
   type TestOwner,
 } from "./helpers";
-import { FEISHU_BITABLE_RECORDS_URL } from "../src/submit";
+import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Outer-loop acceptance specs for 多租户数据隔离 + 横向越权防护 — the HEAD-PRIORITY
@@ -79,13 +79,27 @@ const RECORDS_EMPTY_BODY = JSON.stringify({
   data: { total: 0, items: [] },
 });
 
-/** The exact bitable URL for a given owner's app_token / table_id. */
+/** The exact bitable record URL for a given owner's app_token / table_id. */
 function bitableUrl(feishu: { appToken: string; tableId: string }): string {
   return FEISHU_BITABLE_RECORDS_URL.replace("{app_token}", feishu.appToken).replace(
     "{table_id}",
     feishu.tableId,
   );
 }
+
+/** origin + pathname (no query) of a given owner's fields endpoint. */
+function fieldsPath(feishu: { appToken: string; tableId: string }): string {
+  const url = FEISHU_BITABLE_FIELDS_URL.replace("{app_token}", feishu.appToken).replace(
+    "{table_id}",
+    feishu.tableId,
+  );
+  const u = new URL(url);
+  return u.origin + u.pathname;
+}
+const A_FIELDS_PATH = fieldsPath(A_FEISHU);
+const B_FIELDS_PATH = fieldsPath(B_FEISHU);
+const FIELDS_LIST_BODY = JSON.stringify({ code: 0, msg: "success", data: { items: [] } });
+const FIELD_CREATE_OK_BODY = JSON.stringify({ code: 0, msg: "success" });
 
 // --- Feishu fetch mock that records WHICH bitable URL each write hit -----------
 //
@@ -106,12 +120,17 @@ interface CapturedCall {
 interface FeishuMock {
   readonly tokenCalls: CapturedCall[];
   readonly recordCalls: CapturedCall[];
+  /** list-fields (GET) / create-field (POST) calls for EITHER owner, in order. */
+  readonly fieldCalls: CapturedCall[];
+  /** Empty every captured-call array (discards the publish background pre-create). */
+  resetCalls(): void;
   restore(): void;
 }
 
 function installFeishuMock(): FeishuMock {
   const tokenCalls: CapturedCall[] = [];
   const recordCalls: CapturedCall[] = [];
+  const fieldCalls: CapturedCall[] = [];
   const realFetch = globalThis.fetch;
   const stub = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const req = new Request(input as RequestInfo, init);
@@ -137,11 +156,22 @@ function installFeishuMock(): FeishuMock {
         headers: { "content-type": "application/json" },
       });
     }
-    // Both owners' bitable URLs are accepted and recorded — the assertion is on
-    // WHICH one was hit, so we must not pre-restrict to one.
+    // Both owners' bitable record URLs are accepted and recorded — the assertion is
+    // on WHICH one was hit, so we must not pre-restrict to one.
     if (req.url === bitableUrl(A_FEISHU) || req.url === bitableUrl(B_FEISHU)) {
       recordCalls.push(captured);
       const body = req.method === "GET" ? RECORDS_EMPTY_BODY : BITABLE_OK_BODY;
+      return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+    }
+    // §15.8 升级：submit 先 listBitableColumns（GET .../fields）；§16.8 发布预建在 waitUntil
+    // 后台 list/create 列。两个 owner 各自的 fields 端点都放行（按 pathname 匹配，吞掉 query）。
+    const reqPath = (() => {
+      const u = new URL(req.url);
+      return u.origin + u.pathname;
+    })();
+    if (reqPath === A_FIELDS_PATH || reqPath === B_FIELDS_PATH) {
+      fieldCalls.push(captured);
+      const body = req.method === "GET" ? FIELDS_LIST_BODY : FIELD_CREATE_OK_BODY;
       return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
     }
     // Default-deny: any other outbound fetch is a violation (e.g. routing the
@@ -152,10 +182,30 @@ function installFeishuMock(): FeishuMock {
   return {
     tokenCalls,
     recordCalls,
+    fieldCalls,
+    resetCalls: () => {
+      tokenCalls.length = 0;
+      recordCalls.length = 0;
+      fieldCalls.length = 0;
+    },
     restore: () => {
       globalThis.fetch = realFetch;
     },
   };
+}
+
+/**
+ * Drain the publish-setup background `preCreateBitableColumnsBestEffort` (§16.8) for
+ * `n` published forms — wait until that many token exchanges have landed (one per
+ * publish's fan-out), then settle, so the caller can `resetCalls()` and assert on the
+ * submit / read traffic alone.
+ */
+async function drainBackgroundPreCreate(mock: FeishuMock, n = 1): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (mock.tokenCalls.length < n && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await new Promise((r) => setTimeout(r, 25));
 }
 
 // --- per-owner helpers --------------------------------------------------------
@@ -431,8 +481,12 @@ describe("tenant isolation + 横向越权 (workers/features/tenant-isolation.fea
     const B = await registerOwner();
     await configureOwner(A.token, { deepseek: { apiKey: A_DEEPSEEK_KEY }, feishu: A_FEISHU });
     await configureOwner(B.token, { deepseek: { apiKey: B_DEEPSEEK_KEY }, feishu: B_FEISHU });
-    const slugA = await publishForm(A.token, "A 的提交表单");
+    // 先装 mock，再让 A 发布——这样发布预建的后台扇出（§16.8）落在 mock 上；drain + reset
+    // 后，下面的 token/record 计数只反映 A 这次看提交。
     mock = installFeishuMock();
+    const slugA = await publishForm(A.token, "A 的提交表单");
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When A 拉取自己那份表单的提交列表
     const res = await getSubmissions(A.token, slugA);
@@ -462,8 +516,11 @@ describe("tenant isolation + 横向越权 (workers/features/tenant-isolation.fea
     const B = await registerOwner();
     await configureOwner(A.token, { deepseek: { apiKey: A_DEEPSEEK_KEY }, feishu: A_FEISHU });
     await configureOwner(B.token, { deepseek: { apiKey: B_DEEPSEEK_KEY }, feishu: B_FEISHU });
-    const slugSA = await publishForm(A.token, "A 的公开表单");
+    // 先装 mock，再让 A 发布，drain + reset 掉发布预建后台扇出（§16.8）。
     mock = installFeishuMock();
+    const slugSA = await publishForm(A.token, "A 的公开表单");
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When 一个匿名答题者向 slug SA 提交一份作答 (PUBLIC — no token)
     const res = await postSubmit({ formSlug: slugSA, ...SUBMISSION });
@@ -492,9 +549,12 @@ describe("tenant isolation + 横向越权 (workers/features/tenant-isolation.fea
     const B = await registerOwner();
     await configureOwner(A.token, { deepseek: { apiKey: A_DEEPSEEK_KEY }, feishu: A_FEISHU });
     await configureOwner(B.token, { deepseek: { apiKey: B_DEEPSEEK_KEY }, feishu: B_FEISHU });
+    // 先装 mock，再让 A、B 各发布一份；两份发布各触发一次后台预建（§16.8），drain n=2 + reset。
+    mock = installFeishuMock();
     const slugSA = await publishForm(A.token, "A 路由表单");
     const slugSB = await publishForm(B.token, "B 路由表单");
-    mock = installFeishuMock();
+    await drainBackgroundPreCreate(mock, 2);
+    mock.resetCalls();
 
     // When 匿名答题者分别向 SA 与 SB 各提交一份作答
     const resA = await postSubmit({ formSlug: slugSA, ...SUBMISSION });
