@@ -1,5 +1,13 @@
 # agentaily-forms
 
+## 0.5.1
+
+### Patch Changes
+
+- [#28](https://github.com/agentaily/form-design/pull/28) [`d26b2b2`](https://github.com/agentaily/form-design/commit/d26b2b2fb3b31aa2391f1fa52feece54df505bec) Thanks [@yarnovo](https://github.com/yarnovo)! - fix(auth): 验证邮件确认链接指向 worker 自身 origin,而非前端域
+
+  注册 / 重发的验证邮件里 `verify-email/confirm` 链接此前拼成 `APP_BASE_URL`(前端域 `form-design.agentaily.com`)+ `/api/...`,但该确认端点在 worker 上、前端站不 serve `/api`,点开是死链(落到 SPA fallback、验证不了)。改用请求自身 origin(`new URL(c.req.url).origin`)——链接 host 必须是浏览器能到达本 API 的那个 host,将来绑自定义域也自动跟随。reset 邮件指向前端落地页,仍用 `APP_BASE_URL`(正确)。加回归断言锁住验证链接 host。
+
 ## 0.5.0
 
 ### Minor Changes
