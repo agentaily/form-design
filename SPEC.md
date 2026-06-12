@@ -802,12 +802,12 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 |---|---|---|---|
 | 换 token | `POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal` | body `{ app_id, app_secret }`（JSON） | 上游 `200` 且 body `code === 0` → 拿到 `tenant_access_token`；否则视为换 token 失败 |
 | 新增记录 | `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records` | `Authorization: Bearer <tenant_access_token>`，body `{ fields: { <label>: <value>, ... } }` | 上游 `2xx` 且 body `code === 0` → 取 `data.record.record_id`；否则视为写记录失败（`code === 1254045` `FieldNameNotFound` 是其中一种特例，触发 §15.8 自愈）|
-| 列出字段 | `GET https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields?page_size=100` | `Authorization: Bearer <tenant_access_token>`，无 body | 上游 `2xx` 且 body `code === 0` → 取 `data.items[].field_name`；仅在 §15.8 自愈分支调用 |
-| 新建字段 | `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields` | `Authorization: Bearer <tenant_access_token>`，body `{ field_name, type: 1 }`（`type 1` = 文本） | 上游 `2xx` 且 body `code === 0` → 建成；`code === 1254014` `FieldNameDuplicated` 视为**已存在即成功**（幂等）；其它 `code≠0` → 建列失败。仅在 §15.8 自愈分支调用 |
+| 列出字段 | `GET https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields?page_size=100` | `Authorization: Bearer <tenant_access_token>`，无 body | 上游 `2xx` 且 body `code === 0` → 取 `data.items[].field_name` **+ `data.items[].type`**（列名 → 真实列类型，`listBitableColumns`）。**每次提交**写值前调用（既有列冲突兜底方案 a，§16.8.4）+ §15.8 自愈、§16.8 发布预建分支 |
+| 新建字段 | `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields` | `Authorization: Bearer <tenant_access_token>`，body `{ field_name, type: toBitableFieldType(field.type), property?: buildFieldProperty(field) }`（按字段 `type` 映射列类型，单选 / 多选带 `property.options`，§16.8.2） | 上游 `2xx` 且 body `code === 0` → 建成；`code === 1254014` `FieldNameDuplicated` 视为**已存在即成功**（幂等）；其它 `code≠0` → 建列失败。在 §15.8 自愈分支 + §16.8 发布 / 编辑预建分支调用 |
 
 - 飞书的约定是 HTTP `200` 也可能带非 0 业务错误码，所以每步都**必须看 body 的 `code`**，`code === 0` 才算成功（与 §14.2 一致，复用 `FEISHU_OK_CODE`）。
 - `{app_token}` / `{table_id}` 用 `getOwnerConfig` 解出的 `feishu.appToken` / `feishu.tableId` 填充。
-- 稳态下只走「换 token + 新增记录」两步；后两个「字段」端点**只在**新增记录返回 `1254045`（列不存在）时由 §15.8 触发，正常提交不调用。
+- 稳态提交走「换 token + 列出字段 + 新增记录」三步（列出字段用于按列真实类型写值，§16.8.4 方案 a）；**新建字段**端点仍是反应式的——只在新增记录返回 `1254045`（列不存在）时由 §15.8 自愈触发，或由 §16.8 发布 / 编辑预建在后台 best-effort 调用，正常提交的 happy path 不建列。
 
 ### 15.6 错误响应（状态码 + `{ error }`）
 
@@ -836,23 +836,23 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 
 写记录时，飞书要求 `fields` 里每个列名（= answer 的 `label`，§15.3）**在目标表里已存在**，否则整条写入失败并返回 `code 1254045` `FieldNameNotFound`（不产生记录，无副作用）。本期不要求 owner 预先在飞书表里手动建好与表单字段同名的列——后端在写入遇到这个特定码时**自愈**：补建缺失的列、再重试一次。
 
-**触发与流程（仅在需要时发生，稳态零开销）：**
+**触发与流程（自愈建列仅在需要时发生；列出列改为每次提交都做，见 §16.8.4 方案 a）：**
 
 1. 正常写记录（§15.5）。返回 `code === 0` → 照常 `200 { ok, recordId }`，**不触发**任何字段端点。
 2. 若返回 `code === 1254045`（列不存在）→ 进入自愈：
    a. `GET .../fields`（§15.5）列出该表现有列名集合。
-   b. 对「本次要写入的列名（`Object.keys(fields)`）里、现有列名集合中没有的」每一个，`POST .../fields` 以 `type 1`（文本）新建；建列遇 `code 1254014` `FieldNameDuplicated`（并发下别处刚建）视为**成功**（幂等）。
+   b. 对「本次要写入的列名（`field.label`）里、现有列名集合中没有的」每一个，`POST .../fields` 以**该字段 `type` 对应的飞书列类型**（`toBitableFieldType(field.type)`，单选 / 多选带 `property.options`，§16.8.2）新建——**不再一律文本**；建列遇 `code 1254014` `FieldNameDuplicated`（并发下别处刚建）视为**成功**（幂等）。
    c. 列补齐后**重试一次**写记录。重试成功 → `200 { ok, recordId }`；重试仍失败 / 自愈过程中列出或建列失败 → `502 { error }`（§15.6，错误体不含凭据）。
 3. **只重试一次**：自愈是「补缺列」，不是无限循环；重试后仍 `1254045` 或其它 `code≠0` 一律落 `502`。
 
 **设计要点（合约约束，给 implementer）：**
 
-- **反应式、非预检**：稳态（列已存在）下每次提交仍只打「换 token + 写记录」两步，**不**额外 `GET fields`——只有真的 `1254045` 才付出列出/建列成本。失败的首次写入无副作用（飞书 `1254045` 不产生记录），故重试安全。
-- **列名真相 = 本次写入的 `fields` 键**：自愈只保证「这次要写的列」存在，不强行把整份表单 schema 的所有字段都建成列（未填的可选字段在被首次提交时才出现对应列）。列类型一律文本（`type 1`），多值答案（§15.3 的字符串数组）按现有 §15.3 约定原样写入，本节不改值映射。
-- **凭据边界不变（§15.7）：** 新增的两个字段端点同样只在 `Authorization: Bearer <tenant_access_token>` 头里带 token；列出/建列的失败 `{ error }` 绝不含 `tenant_access_token` / `app_secret`。
+- **反应式自愈非预检，但写值前先列一次列**：§16.8.4 选了「既有列冲突兜底方案 a」——提交时**写记录前**先 `listBitableColumns` 列出目标表**现有每列的真实类型**，用列真实类型（而非字段声明 `type`）格式化值（`answersToTypedFields`），以兜住旧文本列 / 类型漂移。故稳态每次提交是「换 token + 列出列 + 写记录」三步（比早期 §15.8 多一次 `GET fields`，这是 a 方案换正确性的成本，§16.8.4 取舍已拍）。**自愈建列**仍是反应式的：只有写记录真的 `1254045` 才付出建列成本。失败的首次写入无副作用（飞书 `1254045` 不产生记录），故重试安全。
+- **列名真相 = 本次写入的 `fields` 键**：自愈只保证「这次要写的列」存在，不强行把整份表单 schema 的所有字段都建成列（未填的可选字段由 §16.8 发布预建覆盖，或在被首次提交时才出现对应列）。**列类型 = 字段 `type` 经 `FIELD_TYPE_TO_BITABLE` 映射**（§16.8.2，与发布预建共用同一张表），多选答案（§15.3 的字符串数组）按目标列类型格式化（§16.8.3）后写入。自愈据 `fieldDefs` 算「要补建哪些列」时**先 `flattenLeafFields` 摊平 `group`**（与发布预建对齐）再按写入键过滤——否则 `group` 容器自身 label 不是写入键会被过滤掉、其子字段 label 又埋在 `children` 里，导致分组子字段的缺列被漏建、重试仍失败。
+- **凭据边界不变（§15.7）：** 列出 / 建列两个字段端点同样只在 `Authorization: Bearer <tenant_access_token>` 头里带 token；列出/建列的失败 `{ error }` 绝不含 `tenant_access_token` / `app_secret`。
 - **幂等与并发：** 自愈先列后建、只建缺失列；`1254014` 当成功，确保两个并发首提交不会因「列已被另一个建好」而失败。
 
-> **后续（不在本期）：** 发布表单时即在飞书表预建列（让 owner 发布后立刻在飞书看到完整列结构）、列类型按字段 `type` 精确映射（数字列 / 单选列 / 日期列而非一律文本）。本期只做「提交不再因缺列而失败」这一最小自愈。
+> **与 §16.8 的关系（本期已升级）：** 早期 §15.8 自愈只把缺列建成**文本列**、且发布完全不碰飞书。§16.8 已把两件事补齐：①**发布 / 编辑即预建**全部列（best-effort）；②建列与写值都改走 `feishu-schema.ts` 的**类型映射单一真相源** `FIELD_TYPE_TO_BITABLE`（数字 / 单选 / 日期列而非一律文本），自愈也升级为「按字段 `type` 建对应类型列」。本节的自愈自此退居**兜底**角色——覆盖发布预建漏掉的列、未重新发布的旧表、或可选字段首次被填到的列。值格式化 / 既有列冲突兜底见 §16.8.3 / §16.8.4。
 
 ---
 
@@ -1002,6 +1002,68 @@ CREATE TABLE IF NOT EXISTS forms (
 - 表只存表单的展示 `meta` 与字段定义，**绝不**存任何凭据（凭据全在 `owner_config`，§16.4）。
 - 公开拉取只投影 `meta_json` + `schema_json` + `slug`；`owner_id` / `status` / `created_at` 不回给答题者。
 - 多租户：`owner_id` 是真实 user id（`users.id`，§17.11）；owner-only 端点按 `owner_id` 过滤（列表 / 编辑 / 删除 / 看提交），公开 submit 按 slug 反查 `owner_id`（§17.9）。公开拉取的投影始终不含 `owner_id`，不受 owner 维度影响。
+
+### 16.8 发布即在飞书预建带类型的列（best-effort）
+
+> **解决什么：** §15.8 自愈让「提交不再因缺列而失败」，但列只在**首次提交**撞缺列时一列列懒建、且**一律文本列**（`type 1`）。结果 owner 发布后在飞书看不到完整结构，且 `number` / `date` / `select` 等字段全落成文本列。本节让**发布 / 编辑即按字段 `type` 把对应类型的列在飞书表里建好**，owner 发布完立刻看到**完整且类型正确**的表结构。
+
+#### 16.8.1 建列时机
+
+- **发布（`POST /api/forms`）：** 落库成功后，在 `c.executionCtx.waitUntil(...)` 里**后台**对该 owner 的飞书表**预建全部列**（`preCreateBitableColumnsBestEffort(env, ownerId, input.fields)`）。
+- **编辑（`PATCH /api/forms/:slug` 改了 `fields`）：** 仅当请求体带了 `fields` 时，对**更新后的完整 `fields`** 后台预建。预建内部「先列出现有列、只建缺的、跳过已存在的」，故传全集天然**增量**（只补新增字段的列）。
+- **不在本期：** 改字段标签仍**新建**列（沿用现有 label 匹配，§15.3）；字段 id ↔ 列的稳定映射、改名 / 删列同步留后续。
+
+#### 16.8.2 字段 `type` → 飞书 Bitable 列类型映射（单一真相源）
+
+映射集中在 `workers/src/feishu-schema.ts` 的常量表 `FIELD_TYPE_TO_BITABLE`（**预建建列与提交写值共用同一张表**，绝不各写一份）：
+
+| 表单字段 `type`（§3.2） | 飞书列类型 | 建列 property | 提交写值格式 |
+|---|---|---|---|
+| `text` / `file` / `group` / 未知 | 文本(1) | 无 | `string`（`string[]` 合并） |
+| `number` | 数字(2) | 无 | JS `number`（非数字 → 跳过该格） |
+| `date` | 日期(5) | 无 | **毫秒**时间戳（解析失败 → 跳过该格） |
+| `select` / `radio` | 单选(3) | `property.options`（取字段 `options[].label`） | 选项字符串 |
+| `checkbox` | 多选(4) | `property.options` | 选项字符串数组（与 §15.3「多选=数组」对齐） |
+
+- **列名 = `field.label`**（§15.3 label 对位约定，沿用，不引入字段 id ↔ 列映射）。
+- §3.2 的 `FieldType` 没有独立的 `textarea` / `email` / `phone`——那是前端 UI 层（`designerTools.ts` 的 `UiFieldType`），发布管线已归一到 §3.2 的 `text`，统一进文本列。
+- **未知 / 越界 `type` 一律兜底文本(1)**，`toBitableFieldType` 永不抛、永不返回 `undefined`，防一个坏字段拖垮整次预建。
+
+#### 16.8.3 值格式化（按目标列类型，`formatValueForBitable`）
+
+兜底策略（已拍定）：
+
+- **文本(1)：** `string` 原样；`string[]` 合并成一个字符串。
+- **数字(2)：** `Number(value)`；**解析失败（NaN / 空串 / 非数字串）→ 跳过该字段**（不写该格），宁可少写一格也不让一个脏值整条记录被飞书拒。
+- **日期(5)：** 解析成**毫秒时间戳**；**解析失败 → 跳过**。
+- **单选(3)：** 取选项字符串（给了数组取第一项）；空 → 跳过。
+- **多选(4)：** `string[]` 原样（滤空项）；单 `string` 包成 `[value]`；空 → 跳过。
+- **「跳过」语义：** 返回 `undefined` 表示「这一格无法安全写入，省略它」——调用方（`answersToTypedFields`）据此**不把该键放进 `fields`**。必填已在 §20.3 `validateAnswers` 拦过，走到这里的空值都是可选字段未填，跳过最安全。
+
+#### 16.8.4 既有列类型冲突的兜底（已选方案 a：提交时按列真实类型写值）
+
+预建只对**缺列**生效、**绝不改既有列**。那么提交写值时某列可能**已存在但类型与字段声明不符**（如本 feature 前 §15.8 自愈建的旧文本列、而字段现在是 `number`；或未重新发布的旧表）。按字段声明类型写值可能被飞书拒。两个候选方案：
+
+- **方案 a（已选）：** 提交时先 `listBitableColumns` 列出目标表**现有每列的真实类型**，再用列的**真实类型**（而非字段声明 `type`）格式化值（`answersToTypedFields(answers, columnTypes)`）。
+- **方案 b（弃）：** 乐观按字段声明类型写、失败再回退文本重试。
+
+**取舍：** 选 a 不选 b。a 在 happy path 多一次 `GET .../fields`，但**一次列出就拿到全部列的真实类型**、一致且无重试风暴；b 省那一次调用，但每个类型不符的字段都要触发一轮「写失败 + 回退文本 + 重试」，多字段表上调用数与延迟反而更差，且回退成文本会**丢类型**。a 用「一次列出」换「正确性 + 可预测的调用成本」，更稳。
+
+**缺列的值格式化（已修订）：** `answersToTypedFields(answers, columnTypes, fieldDefs)` 对**未命中** `columnTypes` 的列（列还不存在，预建漏了 / 可选字段首次被填）**按字段自身映射类型** `toBitableFieldType(field.type)` 格式化（而非按文本）——因为 §15.8 自愈正会把该缺列**建成那个映射类型**（如 `number` → 数字列）。这样**首次写**就带上类型化值（`95` 而非 `"95"`），自愈建好类型列后用**同一份值**重试天然命中；若缺列退化成文本，自愈把列建成数字 / 日期 / 多选列后，文本值会被飞书因类型不符拒掉 → `502`（本 feature 为非文本字段而生，这条路径上恰对非文本字段失效）。`fieldDefs` 内部经 `flattenLeafFields` 摊平，故分组（`group`）子字段也按其类型格式化。仅当列缺失**且** `fieldDefs` 里也无此 label（异常态）才退化为文本兜底。
+
+#### 16.8.5 best-effort 失败策略（绝不拖垮发布）
+
+owner **未配飞书 / 飞书连不上 / token 换取失败 / 建列失败** → **发布仍成功**（照常写 D1、返回 `201`；编辑返回 `200`），预建**静默跳过**。`preCreateBitableColumnsBestEffort` 吞掉整段预建（读配置 → 换 token → 列出 → 建列）的**任何**失败，只记一条**不含凭据**的日志（`err.name` 级别），与 §22.2 / §23.2 既有 best-effort 发信同纪律。
+
+- owner 未配飞书（`owner.feishu === null`）→ 直接 return，**不打任何上游**。
+- 换 token / 列出 / 建列失败 → 吞掉、return；建列遇 `1254014`（并发下别处刚建）视为**幂等成功**。
+- **绝不**把 `app_secret` / `tenant_access_token` 或明文写进日志（§15.7）。
+
+#### 16.8.6 可观察契约
+
+- 发布仍 `201 { slug }`、编辑仍 `200`——**无论**飞书有没有配、预建成没成。
+- 提交成功语义不变：`200 { ok, recordId }`（§15.4）；类型化只改写入飞书的值形态，不改对外响应。
+- 凭据（`app_secret` / `tenant_access_token`）绝不进任何响应 / HTTP 头 / 日志。
 
 ---
 

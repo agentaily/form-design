@@ -1,7 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { applySchema, resetConfig, resetForms, testEnv, login, authHeader } from "./helpers";
-import { FEISHU_BITABLE_RECORDS_URL } from "../src/submit";
+import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Outer-loop acceptance specs for the §20 submit gates (status gate + required-
@@ -41,6 +41,17 @@ const BITABLE_URL = FEISHU_BITABLE_RECORDS_URL.replace(
   OWNER_FEISHU_APP_TOKEN,
 ).replace("{table_id}", OWNER_FEISHU_TABLE_ID);
 
+// The fields endpoint (§15.8 升级：稳态提交先 GET 列出列真实类型；预建 / 自愈 POST 建列）。
+const BITABLE_FIELDS_URL = FEISHU_BITABLE_FIELDS_URL.replace(
+  "{app_token}",
+  OWNER_FEISHU_APP_TOKEN,
+).replace("{table_id}", OWNER_FEISHU_TABLE_ID);
+function pathKey(url: string): string {
+  const u = new URL(url);
+  return u.origin + u.pathname;
+}
+const BITABLE_FIELDS_PATH = pathKey(BITABLE_FIELDS_URL);
+
 const FEISHU_TOKEN_OK_BODY = JSON.stringify({
   code: 0,
   msg: "ok",
@@ -52,6 +63,14 @@ const BITABLE_OK_BODY = JSON.stringify({
   msg: "success",
   data: { record: { record_id: UPSTREAM_RECORD_ID } },
 });
+// List-fields reply: 姓名(text) already exists as a column, so the steady-state
+// listBitableColumns writes the submitted text value by its real type — no self-heal.
+const FIELDS_LIST_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { items: [{ field_name: "姓名", type: 1 }] },
+});
+const FIELD_CREATE_OK_BODY = JSON.stringify({ code: 0, msg: "success" });
 
 // --- Two-stage Feishu fetch mock (default-deny, ordered) ----------------------
 // Same shape as submit-api.test.ts: omit a stage ⇒ any call to it THROWS, which
@@ -66,6 +85,9 @@ interface UpstreamReply {
 interface FeishuMockOpts {
   token?: UpstreamReply;
   record?: UpstreamReply;
+  /** list-fields GET reply (§15.8 升级). Defaults to FIELDS_LIST_BODY; `null` forbids. */
+  fieldsList?: UpstreamReply | null;
+  fieldCreate?: UpstreamReply;
 }
 interface CapturedCall {
   url: string;
@@ -77,12 +99,23 @@ interface CapturedCall {
 interface FeishuMock {
   readonly tokenCalls: CapturedCall[];
   readonly recordCalls: CapturedCall[];
+  readonly fieldsListCalls: CapturedCall[];
+  readonly fieldCreateCalls: CapturedCall[];
+  resetCalls(): void;
   restore(): void;
 }
 
 function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
   const tokenCalls: CapturedCall[] = [];
   const recordCalls: CapturedCall[] = [];
+  const fieldsListCalls: CapturedCall[] = [];
+  const fieldCreateCalls: CapturedCall[] = [];
+  const fieldsListReply: UpstreamReply | null =
+    opts.fieldsList === undefined ? { status: 200, body: FIELDS_LIST_BODY } : opts.fieldsList;
+  const fieldCreateReply: UpstreamReply = opts.fieldCreate ?? {
+    status: 200,
+    body: FIELD_CREATE_OK_BODY,
+  };
   const realFetch = globalThis.fetch;
   const stub = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const req = new Request(input as RequestInfo, init);
@@ -120,18 +153,59 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
         headers: opts.record.headers ?? { "content-type": "application/json" },
       });
     }
+    if (pathKey(req.url) === BITABLE_FIELDS_PATH) {
+      if (req.method === "GET") {
+        if (!fieldsListReply) {
+          throw new Error(`unexpected list-fields upstream call to ${req.url} (forbidden)`);
+        }
+        fieldsListCalls.push(captured);
+        return new Response(fieldsListReply.body, {
+          status: fieldsListReply.status,
+          headers: fieldsListReply.headers ?? { "content-type": "application/json" },
+        });
+      }
+      if (req.method === "POST") {
+        fieldCreateCalls.push(captured);
+        return new Response(fieldCreateReply.body, {
+          status: fieldCreateReply.status,
+          headers: fieldCreateReply.headers ?? { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected method ${req.method} on fields endpoint ${req.url}`);
+    }
     throw new Error(
-      `unexpected outbound fetch to ${req.url} (only the Feishu token + ${BITABLE_URL} are mocked)`,
+      `unexpected outbound fetch to ${req.url} (only the Feishu token + records + fields are mocked)`,
     );
   };
   globalThis.fetch = stub as typeof fetch;
   return {
     tokenCalls,
     recordCalls,
+    fieldsListCalls,
+    fieldCreateCalls,
+    resetCalls: () => {
+      tokenCalls.length = 0;
+      recordCalls.length = 0;
+      fieldsListCalls.length = 0;
+      fieldCreateCalls.length = 0;
+    },
     restore: () => {
       globalThis.fetch = realFetch;
     },
   };
+}
+
+/**
+ * Drain the publish-triggered background `preCreateBitableColumnsBestEffort` (§16.8)
+ * — wait for its token exchange to land on the mock, then settle so any list/create
+ * follow-ups also land, so the caller can `resetCalls()` and assert on the submit alone.
+ */
+async function drainBackgroundPreCreate(mock: FeishuMock): Promise<void> {
+  const deadline = Date.now() + 800;
+  while (mock.tokenCalls.length === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await new Promise((r) => setTimeout(r, 25));
 }
 
 // Owner-only setup token (§17.1) for POST /api/config + POST /api/forms.
@@ -215,12 +289,14 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
   it("Scenario: 向已发布表单提交满足必填的作答正常写入", async () => {
     // Given 完整飞书凭据 + 含必填字段且 published 的表单
     await configureOwner({ feishu: true });
-    const slug = await publishForm([REQUIRED_NAME]);
-    // 上游两段都 OK
+    // 上游两段都 OK。先装 mock 再发布，drain 掉发布预建后台扇出（§16.8）。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: { status: 200, body: BITABLE_OK_BODY },
     });
+    const slug = await publishForm([REQUIRED_NAME]);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When 提交填齐了所有必填字段的作答
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "姓名", value: "张三" }] });
@@ -231,6 +307,9 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
     expect(body.ok).toBe(true);
     expect(mock.tokenCalls).toHaveLength(1);
     expect(mock.recordCalls).toHaveLength(1);
+    // §15.8 升级：稳态提交先列出列真实类型一次（姓名 已存在 → 不自愈建列）。
+    expect(mock.fieldsListCalls).toHaveLength(1);
+    expect(mock.fieldCreateCalls).toHaveLength(0);
   });
 
   it("Scenario: 向已关闭表单提交返回 409 且不打飞书上游", async () => {
@@ -316,11 +395,14 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
   it("Scenario: 非必填字段缺失不影响提交", async () => {
     // Given 完整飞书凭据 + 一个必填字段 + 一个非必填字段，published
     await configureOwner({ feishu: true });
-    const slug = await publishForm([REQUIRED_NAME, OPTIONAL_AGE]);
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: { status: 200, body: BITABLE_OK_BODY },
     });
+    // 表单含 number 字段「年龄」→ 发布预建会按数字列建它；drain 掉这股后台扇出。
+    const slug = await publishForm([REQUIRED_NAME, OPTIONAL_AGE]);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When 只填了必填字段（缺非必填的「年龄」）
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "姓名", value: "张三" }] });
