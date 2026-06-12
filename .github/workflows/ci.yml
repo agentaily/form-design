@@ -8,6 +8,21 @@ on:
 permissions:
   contents: read
 
+# The changesets "Version Packages" PR (head branch `changeset-release/main`) only
+# bumps package.json versions + CHANGELOG — it touches no source. Running the full
+# build/test suite on it is pure waste, and lets a flaky test needlessly block the
+# auto-merge that ships the release. So on that PR we SKIP the heavy steps while the
+# jobs themselves still run and report success.
+#
+# Why skip the *steps* and not the *jobs*: `verify` / `e2e` / `workers` are REQUIRED
+# status checks on `main`. A required check that never reports — a job skipped via a
+# job-level `if:`, or a workflow skipped via a path filter — sits "pending" forever
+# and DEADLOCKS the Version PR's auto-merge. Keeping the jobs running and only
+# no-op'ing their work makes each required context report green within seconds. Do
+# NOT "simplify" this into a job-level skip or a path/branch filter.
+env:
+  RELEASE_PR: ${{ github.head_ref == 'changeset-release/main' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -17,11 +32,16 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npx prettier --check .
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      - if: env.RELEASE_PR != 'true'
+        run: npm ci
+      - if: env.RELEASE_PR != 'true'
+        run: npx prettier --check .
+      - if: env.RELEASE_PR != 'true'
+        run: npm run typecheck
+      - if: env.RELEASE_PR != 'true'
+        run: npm test
+      - if: env.RELEASE_PR != 'true'
+        run: npm run build
 
   e2e:
     runs-on: ubuntu-latest
@@ -31,17 +51,21 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - if: env.RELEASE_PR != 'true'
+        run: npm ci
       # CI has no system Chrome → use Playwright's bundled chromium.
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
+      - if: env.RELEASE_PR != 'true'
+        run: npx playwright install --with-deps chromium
+      - if: env.RELEASE_PR != 'true'
+        run: npm run test:e2e
         env:
           PW_USE_BUNDLED: "1"
 
   # workers/ is an independent npm subpackage (Cloudflare Workers backend) with
   # its own lockfile, typecheck, and vitest (real workerd via
-  # @cloudflare/vitest-pool-workers). Gate it on every PR — no path filter — so
-  # it always reports status for branch protection.
+  # @cloudflare/vitest-pool-workers). Gated on every PR — no path filter — so it
+  # always reports status for branch protection (see the top-of-file note on the
+  # Version PR skip).
   workers:
     runs-on: ubuntu-latest
     defaults:
@@ -54,6 +78,9 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: workers/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+      - if: env.RELEASE_PR != 'true'
+        run: npm ci
+      - if: env.RELEASE_PR != 'true'
+        run: npm run typecheck
+      - if: env.RELEASE_PR != 'true'
+        run: npm test
