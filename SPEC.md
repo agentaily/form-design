@@ -550,7 +550,7 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
 - 空串 / 未配置的密钥字段映射为 `null`，而非掩码串——`null` 表示「没配过」，掩码串表示「配过、这是脱敏预览」。
 - 掩码作用于**解密后的明文**（首尾可见、中间隐藏），所以 owner 认得出配的是哪把 key，且同一 key 多次保存的掩码稳定一致；它只服务 UI 回显，从掩码无法还原完整原值。
 
-### 12.5 D1 表结构（`workers/schema.sql`）
+### 12.5 D1 表结构（`workers/migrations/0001_initial_schema.sql`）
 
 多租户设计：主键 `owner_id` 是 owner 的真实 user id（`users.id`，§17.11），每个 owner 一行配置；按 `owner_id` 整行 upsert（同一 owner 重复保存覆盖自己那行）。
 
@@ -984,7 +984,7 @@ Worker 内部流程（在 §15.1 的步骤前插入校验）：
 
 - 错误体一律 `application/json` 的 `{ error }`，与成功体（`201 { slug }` / `200 PublicForm` / §15 的 `200 { ok, recordId }`）区分。
 
-### 16.7 D1 表结构（`workers/schema.sql`）
+### 16.7 D1 表结构（`workers/migrations/0001_initial_schema.sql`）
 
 多租户设计：与 `owner_config` 同约定，`owner_id` 是发布它的 owner 的真实 user id（`users.id`，§17.11）。slug 仍全局唯一（作主键）。
 
@@ -1148,7 +1148,7 @@ Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以�
 - **用途：** 供 `verifyPassword`（§17.4）比对 PBKDF2 派生出的密码哈希值（重算后的派生 hash 与存储 hash）。`AUTH_SECRET` 的验签由 `hono/jwt` 的 HMAC 负责（已抗时序），不走本 helper。
 - **安全：** 入参与返回都不含也不回显任何 secret；本 helper 只返回布尔，绝不把密码 / secret 写进日志或响应。
 
-### 17.11 D1 表结构（`workers/schema.sql`）
+### 17.11 D1 表结构（`workers/migrations/0001_initial_schema.sql`）
 
 新增 `users` 表（每个注册账号一行）：
 

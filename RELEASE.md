@@ -2,7 +2,7 @@
 
 面向**发布/上线**的手册:CI/CD 全景、数据库迁移、运行时 secret、以及每次重大变更的发布清单。日常运维(hooks、本地开发、故障排查、vault 凭据取法)见 [OPERATIONS.md](./OPERATIONS.md);产品/架构规格见 [SPEC.md](./SPEC.md)。
 
-> **一句话**:前端与后端**独立部署**,都靠 push `main` 自动上线;数据库 schema 是声明式真相,数据迁移走 `workers/migrations/` 手动执行。
+> **一句话**:前端与后端**独立部署**,都靠 push `main` 自动上线;schema 迁移(`workers/migrations/`)随部署由 `wrangler d1 migrations apply` 自动上,一次性数据 backfill(`workers/runbooks/`)手动跑。
 
 ---
 
@@ -27,7 +27,7 @@
 | ----------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ci.yml`                | push `main` / **PR**                    | 三个 job:`verify`(`prettier --check` → `typecheck` → `test` 前端 Vitest → `build`)、`e2e`(Playwright bundled chromium,`PW_USE_BUNDLED=1`)、`workers`(后端子包 `typecheck` + vitest;**无 path filter,每个 PR 都跑**,#20 起) |
 | `deploy-cloudflare.yml` | push `main` / 手动                      | `build`(`DEPLOY_BASE=/`、`VITE_API_BASE=线上后端`)→ `pages deploy`。用 secret `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`                                                                                             |
-| `deploy-workers.yml`    | push `main` 且 `workers/**` 变更 / 手动 | `cd workers && wrangler deploy`。用 secret `CLOUDFLARE_WORKERS_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`                                                                                                                        |
+| `deploy-workers.yml`    | push `main` 且 `workers/**` 变更 / 手动 | **先** `d1 migrations apply --remote`(自动建/改表)**再** `wrangler deploy`。用 secret `CLOUDFLARE_WORKERS_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`                                                                             |
 | `deploy.yml`            | push `main` / 手动                      | 构建发布到 GitHub Pages(见 §0 的双部署说明)                                                                                                                                                                                |
 | `release.yml`           | push `main`                             | Changesets:开/更新「Version Packages」PR,或合并后打 tag + 建 GitHub Release                                                                                                                                                |
 
@@ -44,7 +44,7 @@
 1. **开 PR** → `ci.yml` 跑绿(prettier/typecheck/test/build/e2e)。
 2. **合并到 `main`** → 自动:
    - 前端 → CF Pages(+ GitHub Pages)重新构建上线;
-   - 若改了 `workers/**` → 后端 `wrangler deploy` 上线。
+   - 若改了 `workers/**` → 后端先 `d1 migrations apply` 自动迁移 schema,再 `wrangler deploy` 上线。
 3. **版本/Release**(可选但建议):`npm run changeset` 写一条变更集随代码提交 → 合并后 `release.yml` 开「Version Packages」PR → 合并它 → 自动打 tag + GitHub Release。
 
 > 不手改版本号/CHANGELOG —— 加 changeset 让机器人来做。详见 OPERATIONS.md §7。
@@ -53,32 +53,36 @@
 
 ## 3. 数据库迁移(D1)
 
-D1 库 `form-design-db`(id `9666fb73-…`)。两类「迁移」分清楚:
+D1 库 `form-design-db`(id `9666fb73-…`)。**Schema 演进走 wrangler 迁移(自动),数据 backfill 走 runbook(手动)**,两类分清楚。
 
-### 3.1 Schema(声明式真相)— `workers/schema.sql`
+### 3.1 Schema 迁移 — `workers/migrations/*.sql`(自动)
 
-- 全是 `CREATE TABLE IF NOT EXISTS`,**幂等**:重复执行安全,只建缺的表。
-- 表:`users`(多用户账号)、`owner_config`(BYOK 凭据,按 owner 隔离)、`forms`(已发布表单,按 owner 隔离)。
-- **何时跑**:新增表/列后,对线上库执行一次。
+- **机制**:wrangler 官方 `d1 migrations`。`migrations/` 下按编号排序的 `.sql`(如 `0001_initial_schema.sql`),由 `wrangler d1 migrations apply` 按序、幂等应用,并在 `d1_migrations` 表里记「哪些跑过了」—— 重复 apply 是 no-op。
+- **自动**:`deploy-workers.yml` 在每次部署**前**自动 `wrangler d1 migrations apply --remote`(expand-first:schema 就绪了新代码才上)。「代码上了、表没建」那种洞由此堵死。
+- **当前迁移**:`0001_initial_schema.sql` —— `users` / `owner_config` / `forms` 三表(均 `CREATE TABLE IF NOT EXISTS`,故首次 apply 到已有表也安全)。
+- **加一条迁移**(含改列):
   ```bash
   cd workers
-  npx wrangler d1 execute form-design-db --remote --file=schema.sql -y
+  npx wrangler d1 migrations create form-design-db "add xxx column"  # 生成 migrations/000N_add_xxx_column.sql
+  # 编辑该文件写 ALTER TABLE …(改列也走这里,不再受 CREATE TABLE IF NOT EXISTS 改不了已存在表的限制)
+  npx wrangler d1 migrations apply form-design-db --local            # 本地验证
+  # push → CI 在部署前自动 apply --remote
   ```
-- ⚠️ `IF NOT EXISTS` **不会改已存在的表结构**。给已存在的表**加列**,得手写 `ALTER TABLE` 放进 `workers/migrations/`(见下),不能指望改 `schema.sql` 自动生效。
+- **测试**:`workers/test/helpers.ts` 把 `migrations/*.sql` 灌进 miniflare D1(与 prod 同一份 schema)。新增 schema 迁移后,在该文件的 `SCHEMA_MIGRATIONS` 数组追加一行 import。
 
-### 3.2 数据迁移 — `workers/migrations/`
+### 3.2 数据 backfill — `workers/runbooks/*.sql`(手动)
 
-有序、一次性的数据/结构变更脚本(命名 `NNN-描述.sql`,`001` 隐含 = 初始 `schema.sql`)。手动按序执行,执行后记录在 CHANGELOG / 本节。
+一次性的**数据**搬迁(非 schema)。**不**进 `migrations/`、**不**被 CI 自动跑 —— 它们常依赖运行时参数(如某账号的 user id)、且只跑一次。手动按 runbook 执行,执行后在文件头标注状态。
 
-| 脚本                            | 何时                            | 作用                                                                                          |
-| ------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
-| `002-migrate-default-owner.sql` | 单租户 → 多用户上线时**一次性** | 把历史 `owner_id='default'` 的 `owner_config` / `forms` 数据转给首个注册的真实 owner(详见 §5) |
+| runbook                     | 何时                                         | 作用                                                                                       |
+| --------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `migrate-default-owner.sql` | 单租户 → 多用户上线(✅ 已于 2026-06-12 执行) | 把历史 `owner_id='default'` 的 `owner_config` / `forms` 转给首个注册 owner(`yarnb@qq.com`) |
 
-执行:
+执行(模板,把占位换成真实 user id 后):
 
 ```bash
 cd workers
-npx wrangler d1 execute form-design-db --remote --file=migrations/002-migrate-default-owner.sql -y
+npx wrangler d1 execute form-design-db --remote --file=runbooks/<name>.sql -y
 ```
 
 > 本地 dev 同理,把 `--remote` 换 `--local`。本地起站见 §6。
@@ -101,14 +105,12 @@ npx wrangler d1 execute form-design-db --remote --file=migrations/002-migrate-de
 
 ## 5. 本次发布清单:单租户 → 多用户(一次性)
 
-> 这是把多租户改造推上线的**专属一次性流程**。务必按序,因为迁移脚本要先有真实 user id。
+> ✅ **已于 2026-06-12 完成**(首个账号 `yarnb@qq.com`,迁了 1 config + 4 forms)。留作记录 + 同类 bootstrap 的模板。按序执行,因为数据 backfill 要先有真实 user id。
+>
+> 注:**当时 schema 是手动 `wrangler d1 execute --file=schema.sql` 建的**;本 PR 起 schema 已改由 `deploy-workers.yml` 的 `d1 migrations apply` 自动建,下面第 1 步已更新为新方式。
 
-1. **部署后端**(建 `users` 表)。合并到 `main` 自动跑 `deploy-workers.yml`;或手动:
-   ```bash
-   cd workers && npx wrangler deploy
-   npx wrangler d1 execute form-design-db --remote --file=schema.sql -y   # 建 users 表(幂等)
-   ```
-2. **注册首个账号**(成为承接历史数据的 owner):
+1. **部署后端** → 合并到 `main` 自动跑 `deploy-workers.yml`:**先** `wrangler d1 migrations apply --remote`(建 `users` 表等 schema)**再** `wrangler deploy`。无需手动建表。
+2. **注册首个账号**(成为承接历史数据的 owner)—— 直接在 `form-design.agentaily.com` 注册,或:
    ```bash
    curl -X POST https://form-design-api.agentaily.workers.dev/api/auth/register \
      -H 'content-type: application/json' \
@@ -119,9 +121,9 @@ npx wrangler d1 execute form-design-db --remote --file=migrations/002-migrate-de
    npx wrangler d1 execute form-design-db --remote \
      --command "SELECT id, email FROM users ORDER BY created_at LIMIT 1"
    ```
-4. **填进迁移脚本并执行**:把 `migrations/002-migrate-default-owner.sql` 里的 `REPLACE_WITH_REAL_USER_ID` 换成第 3 步的真实 UUID,然后:
+4. **填进 runbook 并执行**:把 `runbooks/migrate-default-owner.sql` 里的 `REPLACE_WITH_REAL_USER_ID` 换成第 3 步的真实 UUID,然后:
    ```bash
-   npx wrangler d1 execute form-design-db --remote --file=migrations/002-migrate-default-owner.sql -y
+   npx wrangler d1 execute form-design-db --remote --file=runbooks/migrate-default-owner.sql -y
    ```
 5. **验证**:用首个账号登录前端 → 「我的表单」应看到历史已发表单;「集成设置」应看到历史 DeepSeek/飞书配置(掩码回显);旧的 `/f/:slug` 公开链接仍可填。
 6. **(可选)清理**:`npx wrangler secret delete OWNER_PASSWORD`。
@@ -139,7 +141,7 @@ npm run format && npm run typecheck && npm test && npm run build   # 全绿
 npm run test:e2e                                                   # 真实浏览器(本地需系统 Chrome)
 ```
 
-后端改动(CI 不自动跑,务必本地跑):
+后端改动(CI 的 `workers` job 也会跑,本地先自查更快):
 
 ```bash
 cd workers && npx vitest run && npx tsc --noEmit                   # 全绿
@@ -150,8 +152,8 @@ cd workers && npx vitest run && npx tsc --noEmit                   # 全绿
 ```bash
 # 后端
 cd workers
-npx wrangler d1 execute form-design-db --local --file=schema.sql -y   # 首次:灌本地 schema
-npx wrangler dev --port 8787 --local                                 # 读 .dev.vars
+npx wrangler d1 migrations apply form-design-db --local   # 首次:按迁移建本地 schema
+npx wrangler dev --port 8787 --local                      # 读 .dev.vars
 # 前端(另开一个 shell,仓库根)
 VITE_API_BASE=http://localhost:8787 npx vite --port 5173
 ```
@@ -164,7 +166,7 @@ VITE_API_BASE=http://localhost:8787 npx vite --port 5173
 
 - **前端**:`git revert` 那次提交 → push `main`,CF Pages/GH Pages 自动重建。或 CF dashboard 里把 Pages 回退到上一个 deployment。
 - **后端**:重新部署上一个绿的提交(`git revert` 后自动触发,或本地 `wrangler deploy` 旧代码)。Workers 也支持 `wrangler rollback`(回退到上一个版本)。
-- **数据库**:迁移是**单向前进**的,无自动回滚。`002` 只是改 `owner_id`,真要回退需手写反向 `UPDATE`(把对应 owner 的行改回 `'default'`)—— 谨慎,且仅在确无第二个 owner 写入时安全。
+- **数据库**:迁移是**单向前进**的,无自动回滚。schema 迁移要回退需写一条新的反向迁移(如 `DROP COLUMN`);数据 backfill(如 `runbooks/migrate-default-owner.sql` 把 `owner_id` 从 `default` 改走)要回退需手写反向 `UPDATE` —— 谨慎,且仅在确无新 owner 写入时安全。
 
 ---
 

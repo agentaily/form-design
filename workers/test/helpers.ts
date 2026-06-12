@@ -7,12 +7,18 @@
 //   - `CONFIG_KEY`: throwaway base64 256-bit AES key, injected as a miniflare
 //                   binding in vitest.config.ts.
 //
-// schema.sql is the single source of truth for the table shape — we import it
-// raw and apply it here rather than duplicating the DDL.
+// The schema lives in wrangler D1 migrations (migrations/*.sql), applied to prod
+// via `wrangler d1 migrations apply`. Tests apply the same schema migration(s) to
+// the miniflare D1 here. One-time DATA backfills live in runbooks/ (out of the
+// migrations dir) and are NOT applied in tests.
 
 import { env, SELF } from "cloudflare:test";
 import { vi } from "vitest";
-import schemaSql from "../schema.sql?raw";
+import initialSchema from "../migrations/0001_initial_schema.sql?raw";
+
+// Schema migrations applied to the test D1, in order — mirrors what prod gets via
+// `wrangler d1 migrations apply`. Append future schema migrations to this list.
+const SCHEMA_MIGRATIONS = [initialSchema];
 
 /** The bindings the owner-config + owner-auth features rely on, surfaced for the tests. */
 export interface TestEnv {
@@ -47,12 +53,14 @@ function toStatements(sql: string): string[] {
 }
 
 /**
- * Apply schema.sql to the test D1 (idempotent — schema uses
+ * Apply the schema migrations to the test D1 (idempotent — each migration uses
  * `CREATE TABLE IF NOT EXISTS`). Call in `beforeAll`.
  */
 export async function applySchema(): Promise<void> {
-  for (const stmt of toStatements(schemaSql)) {
-    await testEnv.DB.exec(stmt);
+  for (const migration of SCHEMA_MIGRATIONS) {
+    for (const stmt of toStatements(migration)) {
+      await testEnv.DB.exec(stmt);
+    }
   }
 }
 
@@ -66,9 +74,9 @@ export async function resetConfig(): Promise<void> {
  * The form-publish outer-loop counts rows / re-publishes per scenario, so each
  * one must start from a clean `forms` table.
  *
- * `applySchema` already builds this table: it runs every statement in
- * schema.sql?raw, which now includes the `CREATE TABLE IF NOT EXISTS forms`
- * block — so no change to `applySchema` is needed, only this reset.
+ * `applySchema` already builds this table: it runs every statement in the schema
+ * migration(s), which include the `CREATE TABLE IF NOT EXISTS forms` block — so no
+ * change to `applySchema` is needed, only this reset.
  */
 export async function resetForms(): Promise<void> {
   await testEnv.DB.exec("DELETE FROM forms");
