@@ -85,49 +85,64 @@ describe("rateLimitKeyFor (SPEC.md §25.3 计数键设计，不存原始 IP)", (
   const IP = "203.0.113.7";
   const bucket: RateLimitBucket = "submit";
 
-  it("is shaped rl:<bucket>:<hash>:<windowStart>", async () => {
-    const key = await rateLimitKeyFor(IP, bucket, 1200);
+  it("is shaped rl:<bucket>:<hash>:<windowStart>:<windowSeconds>", async () => {
+    const key = await rateLimitKeyFor(IP, bucket, 1200, 60);
     const parts = key.split(":");
     expect(parts[0]).toBe("rl");
     expect(parts[1]).toBe("submit");
     expect(parts[2].length).toBeGreaterThan(0); // the hash segment
     expect(parts[3]).toBe("1200"); // the windowStart
+    expect(parts[4]).toBe("60"); // the windowSeconds — separates a bucket's minute vs hour windows
   });
 
   it("NEVER embeds the raw IP plaintext in the key", async () => {
-    const key = await rateLimitKeyFor(IP, bucket, 1200);
+    const key = await rateLimitKeyFor(IP, bucket, 1200, 60);
     expect(key).not.toContain(IP);
   });
 
   it("is deterministic: same (ip, bucket, windowStart) → same key", async () => {
-    const a = await rateLimitKeyFor(IP, bucket, 1200);
-    const b = await rateLimitKeyFor(IP, bucket, 1200);
+    const a = await rateLimitKeyFor(IP, bucket, 1200, 60);
+    const b = await rateLimitKeyFor(IP, bucket, 1200, 60);
     expect(a).toBe(b);
   });
 
   it("hashes the IP one-way (key looks nothing like the IP, stable SHA-256)", async () => {
-    const key = await rateLimitKeyFor(IP, bucket, 1200);
+    const key = await rateLimitKeyFor(IP, bucket, 1200, 60);
     // The hash segment is a hex SHA-256 digest — fixed width, hex alphabet only.
     const hash = key.split(":")[2];
     expect(hash).toMatch(/^[0-9a-f]+$/);
   });
 
   it("different IPs land in different keys (no collision in the same window/bucket)", async () => {
-    const a = await rateLimitKeyFor("198.51.100.1", bucket, 1200);
-    const b = await rateLimitKeyFor("198.51.100.2", bucket, 1200);
+    const a = await rateLimitKeyFor("198.51.100.1", bucket, 1200, 60);
+    const b = await rateLimitKeyFor("198.51.100.2", bucket, 1200, 60);
     expect(a).not.toBe(b);
   });
 
   it("different buckets give different keys for the same IP+window (no cross-bucket leak)", async () => {
-    const a = await rateLimitKeyFor(IP, "login", 1200);
-    const b = await rateLimitKeyFor(IP, "register", 1200);
+    const a = await rateLimitKeyFor(IP, "login", 1200, 60);
+    const b = await rateLimitKeyFor(IP, "register", 1200, 60);
     expect(a).not.toBe(b);
   });
 
-  it("same bucket but different windowStart → different keys (minute vs hour)", async () => {
-    const minute = await rateLimitKeyFor(IP, "submit", 1200);
-    const hour = await rateLimitKeyFor(IP, "submit", 0);
-    expect(minute).not.toBe(hour);
+  it("same bucket but different windowStart → different keys (window rollover)", async () => {
+    const w1 = await rateLimitKeyFor(IP, "submit", 1200, 60);
+    const w2 = await rateLimitKeyFor(IP, "submit", 1260, 60);
+    expect(w1).not.toBe(w2);
+  });
+
+  // REGRESSION (§25.3, fixes the flaky submit 429): submit's minute (60s) and hour (3600s)
+  // windows COLLIDE on windowStart at the top of every hour — when now % 3600 < 60,
+  // floor(now/60)*60 === floor(now/3600)*3600 (both equal the hour boundary). If the key
+  // omitted windowSeconds, the minute and hour buckets would share ONE counter, every submit
+  // would be counted twice, and the minute limit (10) would trip at the ~5th real submit →
+  // a premature 429 (the ~1.67%-of-the-hour flake). The key MUST embed windowSeconds so the
+  // two windows stay on separate counters even when their windowStart is identical.
+  it("same bucket + SAME windowStart but different windowSeconds → different keys (hour-boundary collision)", async () => {
+    const HOUR_BOUNDARY = 3600; // floor(3600/60)*60 === floor(3600/3600)*3600 === 3600
+    const minuteWindow = await rateLimitKeyFor(IP, "submit", HOUR_BOUNDARY, 60);
+    const hourWindow = await rateLimitKeyFor(IP, "submit", HOUR_BOUNDARY, 3600);
+    expect(minuteWindow).not.toBe(hourWindow);
   });
 });
 

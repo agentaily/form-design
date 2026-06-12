@@ -27,7 +27,7 @@
 // Layering（测试 seam）：
 //   - 纯 / 可 mock 原语（inner-loop 单测目标，给定 KV double + 固定 now 即可驱动窗口数学）：
 //       windowStartFor   —— 纯函数：now + windowSeconds → 窗口起点（无副作用）。
-//       rateLimitKeyFor  —— 纯函数：hash(ip) + bucket + windowStart → KV 键（不含原始 IP）。
+//       rateLimitKeyFor  —— 纯函数：hash(ip) + bucket + windowStart + windowSeconds → KV 键（不含原始 IP）。
 //       checkRateLimit   —— 在 KV 之上做「读计数 → 判 → 自增」+ fail-open 的固定窗口原语。
 //   - Hono 中间件（outer-loop seam，SELF.fetch 经挂了限流的公开端点驱动）：
 //       rateLimit        —— 中间件工厂：取 IP → checkRateLimit → 超限 429 + Retry-After / 放行。
@@ -41,7 +41,8 @@ import type { MiddlewareHandler } from "hono";
 /**
  * 限流端点类别（§25.3）。挂载方按端点传入，让不同端点的计数互不串桶——刷 register 不该
  * 消耗 login 的配额。同端点的多窗口（submit 的分钟 + 小时）共用同一 bucket、靠 windowSeconds
- * 区分（键里含 windowStart，分钟桶与小时桶的 windowStart 不同，§25.3）。
+ * 区分——**键里必须含 windowSeconds**：分钟桶与小时桶的 windowStart 在整点边界会撞成同一个
+ * （`floor(now/60)*60 == floor(now/3600)*3600`），只有 windowSeconds 把它们分开（§25.3）。
  */
 export type RateLimitBucket = "submit" | "register" | "pwreset" | "login";
 
@@ -192,27 +193,33 @@ async function hashIp(ip: string): Promise<string> {
  * 派生一个**不含原始 IP 明文**的 KV 计数键（§25.3）。
  *
  * 契约（实现在合约内）：
- * - 键 = `rl:<bucket>:<hash(ip)>:<windowStart>`（具体分隔 / 前缀由实现定，但全表统一）。
+ * - 键 = `rl:<bucket>:<hash(ip)>:<windowStart>:<windowSeconds>`（具体分隔 / 前缀由实现定，但全表统一）。
  * - `hash(ip)` 是 IP 的**单向哈希**（如 SHA-256 截断的十六进制串）；**绝不**把原始 IP 明文写进
  *   键（KV 里只留「某匿名标识在某窗口的计数」，隐私最小化，§25.3）。哈希仅为分桶去重、不需抗
- *   碰撞强度，但必须**确定性**（同 ip 同 bucket 同 windowStart 恒得同键）。
- * - 同端点多窗口（submit 分钟 + 小时）用同一 bucket、不同 windowSeconds → 不同 windowStart →
- *   不同键，自然区分（§25.3）。
+ *   碰撞强度，但必须**确定性**（同 ip 同 bucket 同 windowStart 同 windowSeconds 恒得同键）。
+ * - 同端点多窗口（submit 分钟 + 小时）用同一 bucket、不同 windowSeconds：**键里必须含 windowSeconds**
+ *   把两个窗口分开。**不能只靠 windowStart 区分**——当 now 落在整点后头一分钟内（`now % 3600 < 60`），
+ *   `floor(now/60)*60` 与 `floor(now/3600)*3600` 都等于该整点时刻，分钟窗与小时窗的 windowStart 会
+ *   撞成同一个值；若键不含 windowSeconds，两窗口就共用同一计数键 → 每次提交被双计 → 分钟限额在第
+ *   ~5 次提交就被提前打满、误回 429（线上墙钟落到整点头一分钟时偶发，§25.3 回归点）。
  *
  * @param ip 客户端标识（CF-Connecting-IP，或缺失时的 {@link UNKNOWN_IP_BUCKET}）。
  * @param bucket 端点类别。
  * @param windowStart 窗口起点（来自 {@link windowStartFor}）。
+ * @param windowSeconds 固定窗口长度（秒）；编进键以分开同端点的多个窗口（分钟 vs 小时），见上。
  * @returns KV 计数键（不含原始 IP 明文）。
  */
 export async function rateLimitKeyFor(
   ip: string,
   bucket: RateLimitBucket,
   windowStart: number,
+  windowSeconds: number,
 ): Promise<string> {
-  // hash(ip)（SHA-256 hex，确定性、单向）→ 拼 `rl:<bucket>:<hash>:<windowStart>`（§25.3）。
-  // 绝不把原始 IP 明文写进键——KV 里只留「某匿名标识在某窗口的计数」。
+  // hash(ip)（SHA-256 hex，确定性、单向）→ 拼 `rl:<bucket>:<hash>:<windowStart>:<windowSeconds>`（§25.3）。
+  // 绝不把原始 IP 明文写进键——KV 里只留「某匿名标识在某窗口的计数」。windowSeconds 在键里，确保
+  // 分钟桶与小时桶即便在整点边界（windowStart 相同）也落不同键、互不串计。
   const hash = await hashIp(ip);
-  return `rl:${bucket}:${hash}:${windowStart}`;
+  return `rl:${bucket}:${hash}:${windowStart}:${windowSeconds}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +258,7 @@ export async function checkRateLimit(
   try {
     // 窗口对齐 → 计数键 → 到窗口重置的剩余秒数（§25.2）。
     const windowStart = windowStartFor(nowSeconds, windowSeconds);
-    const key = await rateLimitKeyFor(ip, bucket, windowStart);
+    const key = await rateLimitKeyFor(ip, bucket, windowStart, windowSeconds);
     const retryAfter = windowStart + windowSeconds - nowSeconds;
 
     // 读当前计数（缺键 / 非数视为 0）。

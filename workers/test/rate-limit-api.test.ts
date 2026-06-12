@@ -556,7 +556,7 @@ describe("公开端点限流 / 防刷 — 隐私 (workers/features/rate-limit.fe
     const keys = listed.keys.map((k) => k.name);
     expect(keys.length).toBeGreaterThan(0); // 确有计数键被写
 
-    // Then 写入 KV 的键由 IP 的单向哈希加端点类别加窗口起点组成 (rl:<bucket>:<hash>:<windowStart>)
+    // Then 写入 KV 的键由 IP 的单向哈希加端点类别加窗口起点组成 (rl:<bucket>:<hash>:<windowStart>:<windowSeconds>)
     const loginKey = keys.find((k) => k.startsWith("rl:login:"));
     expect(loginKey).toBeDefined();
     const parts = loginKey!.split(":");

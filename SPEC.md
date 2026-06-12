@@ -1793,8 +1793,8 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 
 - **取客户端 IP：** 读 `CF-Connecting-IP` 请求头——Cloudflare 在 Workers 上注入的**真实访客 IP**（不可被客户端伪造，平台填充）。**不**信任 `X-Forwarded-For`（可伪造）。
 - **IP 缺失兜底：** 若 `CF-Connecting-IP` 缺失（本地 dev / 测试 / 异常），归一到一个**常量兜底桶**（如 `"unknown"`）。该兜底策略下**仍然限流**（所有无 IP 请求共享一个桶，宁可误伤也不开天窗），但因此本地 / 测试环境多个无 IP 客户端会共享配额——这是有意为之的保守选择，写清以免实现误以为「无 IP 就放行」。
-- **键格式（不存原始 IP）：** 计数键 = `hash(ip)` + 端点类别（`bucket`）+ 窗口起点，形如 `rl:<bucket>:<hash(ip)>:<windowStart>`。其中 `hash(ip)` 是 IP 的单向哈希（如 SHA-256 截断的十六进制串），**绝不**把原始 IP 明文写进 KV 键 / 值——KV 里只留「某个匿名标识在某窗口的计数」，不留可回指到具体人的原始 IP（隐私最小化）。哈希用途仅为分桶去重、不需抗碰撞强度，但必须确定性（同 IP 同 bucket 同窗口恒得同键）。
-- **`bucket`（端点类别）：** 由挂载方按端点传入（如 `"submit"` / `"register"` / `"pwreset"` / `"login"`），让不同端点的计数互不串桶——刷 register 不该消耗 login 的配额。多窗口同端点用同一 `bucket` + 不同 `windowSeconds` 自然区分（键里含 windowStart，分钟桶与小时桶的 windowStart 不同）。
+- **键格式（不存原始 IP）：** 计数键 = `hash(ip)` + 端点类别（`bucket`）+ 窗口起点 + **窗口长度**，形如 `rl:<bucket>:<hash(ip)>:<windowStart>:<windowSeconds>`。其中 `hash(ip)` 是 IP 的单向哈希（如 SHA-256 截断的十六进制串），**绝不**把原始 IP 明文写进 KV 键 / 值——KV 里只留「某个匿名标识在某窗口的计数」，不留可回指到具体人的原始 IP（隐私最小化）。哈希用途仅为分桶去重、不需抗碰撞强度，但必须确定性（同 IP 同 bucket 同 windowStart 同 windowSeconds 恒得同键）。
+- **`bucket`（端点类别）：** 由挂载方按端点传入（如 `"submit"` / `"register"` / `"pwreset"` / `"login"`），让不同端点的计数互不串桶——刷 register 不该消耗 login 的配额。多窗口同端点用同一 `bucket` + 不同 `windowSeconds`，靠**键里编进 `windowSeconds`** 区分。⚠️ **不能只靠 `windowStart` 区分**：当 `now` 落在整点后头一分钟内（`now % 3600 < 60`），分钟窗的 `floor(now/60)*60` 与小时窗的 `floor(now/3600)*3600` 都等于该整点时刻、`windowStart` 撞成同一个；若键不含 `windowSeconds`，分钟桶与小时桶就共用一个计数 → 每次提交被双计 → 分钟限额提前打满、误回 429（线上墙钟落到整点头一分钟时偶发，约 1.67% 概率）。`windowSeconds` 进键即根治。
 
 ### 25.4 各端点限额（默认常量，可在合约内调）
 
