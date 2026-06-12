@@ -12,5 +12,13 @@ test-results
 # design-sync baseline (working snapshot of the last Claude Design handoff)
 .design-baseline
 
+# wrangler 本地 dev 密钥（throwaway，绝不进 git）
+workers/.dev.vars
+.dev.vars
+
+# wrangler 本地状态（miniflare D1/KV、临时 bundle）—— 绝不进 git
+.wrangler/
+workers/.wrangler/
+
 # claude-fleet worktrees (parallel CLI instances; not source)
 .claude/worktrees/

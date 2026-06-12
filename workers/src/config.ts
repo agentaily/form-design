@@ -1,9 +1,15 @@
 // config.ts — owner config orchestration: D1 read/write + encryption + masking.
 // See SPEC.md §12 (后端 · owner 集成配置存取).
 //
+// 多租户（§17.9 第 7 条）：owner_config 由「单行单 owner」升级为「按 owner_id 多行」——
+// 每个 owner（真实 user id，§17.11）拥有自己的一行配置。saveConfig / getMaskedConfig /
+// getOwnerConfig 均带 `ownerId` 参数（owner-only handler 从 c.get('session').sub 取），
+// 所有读 / 写按 ownerId 隔离；A 永远读不到 / 改不到 B 的配置。
+//
 // This module wires together the pieces:
-//   - saveConfig: validate input → encrypt secret fields → upsert the single row,
-//   - getMaskedConfig: read the single row → mask secrets → shape the read-back.
+//   - saveConfig: validate input → encrypt secret fields → upsert THIS owner's row,
+//   - getMaskedConfig: read THIS owner's row → mask secrets → shape the read-back,
+//   - getOwnerConfig: read + decrypt THIS owner's row → in-Worker plaintext view.
 //
 // The DOM-free / network-free decisions here (validation, masking, the masked
 // shape, the empty skeleton) are inner-loop unit-test targets. The Hono routes
@@ -13,8 +19,13 @@
 import type { SealedSecret } from "./crypto";
 import { decryptSecret, encryptSecret, maskSecret } from "./crypto";
 
-/** Fixed single-owner key for the MVP single-row config (SPEC.md §12, §12.5). */
-export const DEFAULT_OWNER_ID = "default";
+/**
+ * 迁移期兜底 owner id（'default'）。多租户改造后**不再硬编码**进任何读 / 写——`saveConfig`
+ * / `getMaskedConfig` / `getOwnerConfig` 都用传入的 `ownerId`（真实 user id）。保留此常量
+ * 仅为迁移脚本 `002-migrate-default-owner.sql` 的字面量参照（把现有 owner_id='default' 的
+ * 配置迁给首个注册账号，§17 引言）。本常量的最终去留交 implementer（可删）。
+ */
+export const LEGACY_DEFAULT_OWNER_ID = "default";
 
 /**
  * Thrown by {@link saveConfig} when the input fails validation (e.g. a missing /
@@ -115,20 +126,27 @@ export interface SecretCrypto {
 }
 
 /**
- * Validate + persist the owner config as the single row (upsert on
- * {@link DEFAULT_OWNER_ID}), refreshing `updated_at`.
+ * Validate + persist THIS owner's config as its own row (upsert keyed on
+ * `ownerId`, §17.9 第 7 条), refreshing `updated_at`.
  *
+ * - `ownerId` 是当前登录 owner 的真实 user id（owner-only handler 从
+ *   `c.get('session').sub` 取，§17.5）；写入只影响**这一个 owner** 的行，绝不碰别的 owner。
  * - Encrypts DeepSeek `apiKey` and (when `feishu` present) `appSecret` with
  *   `key`, each under its own fresh iv; stores cipher/iv pairs. Non-secret
  *   fields are stored as plaintext.
  * - Rejects a missing / empty DeepSeek `apiKey` (the route surfaces this as
  *   `400` and nothing is written). See SPEC.md §12.3.
  *
+ * @param db D1 binding.
+ * @param key AES-GCM master key (from CONFIG_KEY).
+ * @param ownerId 当前 owner 的真实 user id（隔离键，§17.9）。
+ * @param input 待保存的配置。
  * @throws if validation fails (e.g. DeepSeek apiKey empty).
  */
 export async function saveConfig(
   db: D1Database,
   key: CryptoKey,
+  ownerId: string,
   input: OwnerConfigInput,
 ): Promise<void> {
   // DeepSeek apiKey is the only required field; empty / whitespace-only counts as
@@ -163,7 +181,7 @@ export async function saveConfig(
 
   const updatedAt = new Date().toISOString();
 
-  // Single-row upsert keyed on the fixed owner id (SPEC.md §12.5).
+  // Upsert THIS owner's row, keyed on the real user id (SPEC.md §12.5 / §17.9).
   await db
     .prepare(
       `INSERT INTO owner_config (
@@ -184,7 +202,7 @@ export async function saveConfig(
          updated_at = excluded.updated_at`,
     )
     .bind(
-      DEFAULT_OWNER_ID,
+      ownerId,
       deepseekKey.ciphertext,
       deepseekKey.iv,
       deepseekModel,
@@ -219,17 +237,26 @@ interface ConfigRow {
 }
 
 /**
- * Read the single config row and shape it into the masked read-back view.
+ * Read THIS owner's config row and shape it into the masked read-back view.
  *
+ * - `ownerId` 是当前登录 owner 的真实 user id（§17.5 / §17.9）；只读**这一个 owner** 的行。
  * - Secret fields (DeepSeek key, Feishu secret) are decrypted with `key`, then
  *   masked (head/tail kept, middle hidden) — the response carries only the mask,
  *   never the full plaintext. So the owner recognizes which key is set (e.g.
  *   `sk-…wxyz`) and the mask is deterministic across re-saves of the same key.
  * - Non-secret fields are echoed in plaintext.
- * - When the row does not exist, returns the all-`null` skeleton (a valid,
+ * - When this owner's row does not exist, returns the all-`null` skeleton (a valid,
  *   non-error "never configured" state). See SPEC.md §12.3, §12.4.
+ *
+ * @param db D1 binding.
+ * @param key AES-GCM master key (from CONFIG_KEY).
+ * @param ownerId 当前 owner 的真实 user id（隔离键，§17.9）。
  */
-export async function getMaskedConfig(db: D1Database, key: CryptoKey): Promise<MaskedConfig> {
+export async function getMaskedConfig(
+  db: D1Database,
+  key: CryptoKey,
+  ownerId: string,
+): Promise<MaskedConfig> {
   const row = await db
     .prepare(
       `SELECT
@@ -238,7 +265,7 @@ export async function getMaskedConfig(db: D1Database, key: CryptoKey): Promise<M
          updated_at
        FROM owner_config WHERE owner_id = ?`,
     )
-    .bind(DEFAULT_OWNER_ID)
+    .bind(ownerId)
     .first<ConfigRow>();
 
   // Never configured → the all-null skeleton (a valid 200 "never configured" state).
@@ -268,9 +295,15 @@ export async function getMaskedConfig(db: D1Database, key: CryptoKey): Promise<M
 }
 
 /**
- * Read the single config row and decrypt it into the in-Worker {@link OwnerConfig}
- * view — the **plaintext** form, for later features that actually call upstream
- * (the LLM proxy `POST /api/chat`, write-to-Feishu). See SPEC.md §13.1.
+ * Read a specific owner's config row and decrypt it into the in-Worker
+ * {@link OwnerConfig} view — the **plaintext** form, for features that actually
+ * call upstream (the LLM proxy `POST /api/chat`, write-to-Feishu). See SPEC.md §13.1.
+ *
+ * **`ownerId` 是哪个 owner（§17.9）取决于调用方：**
+ * - owner-only 端点（`/api/chat`、`/api/config/test`、看提交）：传**当前登录 owner**
+ *   的真实 user id（`c.get('session').sub`）——读该 owner 自己的配置（§17.9 第 4/7 条）。
+ * - 公开 `POST /api/submit`（无登录 owner）：传按 `formSlug` 用 `getFormOwner(db, slug)`
+ *   **反查出的 form 所属 owner_id**——把作答写进这张表所属那个 owner 的飞书（§16.5 / §17.9 第 5 条）。
  *
  * - Secret fields (DeepSeek key, Feishu secret) are **decrypted** with `key` to
  *   their full plaintext (NOT masked — the proxy needs the real key for the
@@ -279,13 +312,20 @@ export async function getMaskedConfig(db: D1Database, key: CryptoKey): Promise<M
  * - A block is `null` when its secret was never configured (no cipher/iv): an
  *   unconfigured DeepSeek block → `deepseek: null` (the proxy turns this into a
  *   `409`); an unconfigured Feishu block → `feishu: null`.
- * - When the row does not exist at all, every block is `null` and `updatedAt` is
- *   `null` (the never-configured state).
+ * - When this owner's row does not exist at all, every block is `null` and
+ *   `updatedAt` is `null` (the never-configured state).
  *
+ * @param db D1 binding.
+ * @param key AES-GCM master key (from CONFIG_KEY).
+ * @param ownerId 目标 owner 的真实 user id（当前 owner 或 form 所属 owner，见上）。
  * @throws if a stored cipher/iv fails to authenticate under `key`
  *   (tampering / wrong CONFIG_KEY) — surfaced by {@link decryptSecret}.
  */
-export async function getOwnerConfig(db: D1Database, key: CryptoKey): Promise<OwnerConfig> {
+export async function getOwnerConfig(
+  db: D1Database,
+  key: CryptoKey,
+  ownerId: string,
+): Promise<OwnerConfig> {
   const row = await db
     .prepare(
       `SELECT
@@ -294,7 +334,7 @@ export async function getOwnerConfig(db: D1Database, key: CryptoKey): Promise<Ow
          updated_at
        FROM owner_config WHERE owner_id = ?`,
     )
-    .bind(DEFAULT_OWNER_ID)
+    .bind(ownerId)
     .first<ConfigRow>();
 
   // Never configured at all → every block null (the never-configured state).

@@ -467,7 +467,7 @@ fetch('https://api.anthropic.com/v1/messages', {
 >
 > **不在本节：** DeepSeek/飞书的「测试连接」（真实外呼）、LLM 代理转发、提交写飞书多维表格——都是后续 feature。
 >
-> **MVP 单 owner：** 不做登录鉴权、不做多租户。D1 里固定单行配置（单 owner id），后续接入鉴权时再扩成多行。
+> **多租户（§17）：** 系统是开放注册的多用户（§17）。每个 owner 用其真实 user id（`users.id`，即 session JWT 的 `sub`）拥有**自己的一行**配置。本节的所有读 / 写都按当前登录 owner 的 `ownerId` 隔离：`saveConfig` / `getMaskedConfig` / `getOwnerConfig` 均带 `ownerId` 参数（owner-only handler 从 `c.get('session').sub` 取），`owner_config` 由「单行单 owner」升级为「按 `owner_id` 多行」（§12.5）。A 永远读不到 / 改不到 B 的配置（§17.9 第 7 条）。
 
 ### 12.1 owner 配置的两块凭据
 
@@ -552,11 +552,11 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
 
 ### 12.5 D1 表结构（`workers/schema.sql`）
 
-单行单 owner 设计：固定主键 `owner_id`（MVP 恒为 `'default'`），整行 upsert。
+多租户设计：主键 `owner_id` 是 owner 的真实 user id（`users.id`，§17.11），每个 owner 一行配置；按 `owner_id` 整行 upsert（同一 owner 重复保存覆盖自己那行）。
 
 ```sql
 CREATE TABLE IF NOT EXISTS owner_config (
-  owner_id              TEXT PRIMARY KEY,   -- MVP 恒为 'default'（单 owner）
+  owner_id              TEXT PRIMARY KEY,   -- owner 的真实 user id（users.id，§17.11）；每 owner 一行
   -- DeepSeek
   deepseek_key_cipher   TEXT,               -- AES-GCM 密文 (base64)
   deepseek_key_iv       TEXT,               -- 该密文的 iv (base64)，与 cipher 成对
@@ -572,7 +572,7 @@ CREATE TABLE IF NOT EXISTS owner_config (
 ```
 
 - 密文/iv 成对：`*_cipher` 与对应 `*_iv` 要么同时有值、要么同时为 `NULL`。
-- 单行约束靠固定主键实现；后续接鉴权时把 `owner_id` 换成真实租户键即可平滑扩成多行。
+- 多租户：`owner_id` 是真实 user id（`users.id`，§17.11），每 owner 一行；所有读 / 写按 `owner_id` 隔离（§17.9 第 7 条）。
 
 ---
 
@@ -584,7 +584,7 @@ CREATE TABLE IF NOT EXISTS owner_config (
 >
 > **本节范围（第一刀，仅 Worker 端）：** `POST /api/chat` 的请求形状、SSE 流式响应、用 owner key 直连、model 默认、未配置/上游错误的状态码与体、安全约束。
 >
-> **不在本节：** 多轮 Agent loop / 工具执行编排仍在客户端（§4），本代理只负责「一次 LLM 调用的转发」。鉴权 / 多租户仍按 §12 的 MVP 单 owner 假设（固定 `owner_id`）。
+> **不在本节：** 多轮 Agent loop / 工具执行编排仍在客户端（§4），本代理只负责「一次 LLM 调用的转发」。**多租户（§17）：** 本端点 owner-only，用**当前登录 owner**的 DeepSeek key——`getOwnerConfig(env.DB, key, ownerId)` 带 `ownerId=c.get('session').sub`，读该 owner 自己那行配置（§17.9 第 7 条）。
 >
 > **前端接入（已完成）：** 前端已接入本代理替换写死脚本——`src/core/designerChat` 用 `POST /api/chat` 流式拉 DeepSeek（OpenAI 协议透传），`src/core/designerLoop` 在客户端跑单回合 ReAct（§4）并就地执行 `src/core/designerTools` 里的 UI 字段模型工具，结果实时渲染到预览。对话引擎对测试可注入（`<App chat={…} />`）。
 
@@ -733,7 +733,9 @@ Worker 内部流程：
 >
 > **本节范围（第一刀，仅 Worker 端）：** `POST /api/submit` 的请求形状、写入流程（换 token → 新增记录）、`answers` → 飞书 `fields` 的映射约定、响应/错误的状态码与体、安全（token/secret 不出网）。
 >
-> **不在本节：** 建多维表格本身、字段类型的精确映射（select 选项 id、日期/数字/附件等结构化转换）、防刷 / 限流 / 校验答案是否符合 schema、公开填写页前端。鉴权 / 多租户仍按 §12 的 MVP 单 owner 假设（固定 `owner_id`）。
+> **不在本节：** 建多维表格本身、字段类型的精确映射（select 选项 id、日期/数字/附件等结构化转换）、防刷 / 限流 / 校验答案是否符合 schema、公开填写页前端。
+>
+> **多租户（§16.5 / §17.9 第 5 条）：** 本端点**公开**、没有「当前登录 owner」。`formSlug`（§16 在请求体加入）通过 `formExists` 后，须用 `getFormOwner(db, slug)` **反查该 form 所属 owner 的 `owner_id`**，再用该 `ownerId` 调 `getOwnerConfig(env.DB, key, ownerId)` 读**那个 owner**的飞书配置写入——陌生人匿名提交某 slug，落进这张表所属那个 owner 的飞书租户，而非固定 / 任意 owner。下面 §15.1 的裸流程是早期单 owner 形态，按 §16.5 / §20 已演化为「先 formExists / 状态门 / 必填校验 → getFormOwner → 读该 owner 飞书」。
 
 ### 15.1 端点职责
 
@@ -743,10 +745,12 @@ Worker 内部流程：
 
 ```
 1) parseSubmitRequest(body)                          ← 校验请求体；空 answers → 400 不打上游
+   （§16.5/§20：formExists / 状态门 / 必填校验 在此之后、读 owner 配置之前）
 2) importConfigKey(env.CONFIG_KEY)                    ← AES-GCM 主密钥（§12.2）
-3) getOwnerConfig(env.DB, key)                         ← 读单行 + 解密 → OwnerConfig 内部视图
+2.5) ownerId = getFormOwner(env.DB, formSlug)         ← 按 slug 反查 form 所属 owner（§16.5 / §17.9 第 5 条）
+3) getOwnerConfig(env.DB, key, ownerId)               ← 读**该 owner**那行 + 解密 → OwnerConfig 内部视图
 4) 若 owner.feishu === null（未配飞书）              → 409 { error }，不打上游
-5) getFeishuTenantToken(appId, appSecret)             ← 用 owner 凭据换 tenant_access_token（§15.5 共享 helper）
+5) getFeishuTenantToken(appId, appSecret)             ← 用该 owner 凭据换 tenant_access_token（§15.5 共享 helper）
 6) answersToFields(answers)                           ← answers 直转飞书 fields（§15.3 映射约定）
 7) writeToBitable(token, appToken, tableId, fields)   ← POST 多维表格新增记录
 8) 上游 code === 0    → 200 { ok:true, recordId }
@@ -858,15 +862,17 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 >
 > **本节范围（仅 Worker 端）：** `POST /api/forms`（发布）、`GET /api/forms/:slug`（公开拉取）、以及 §15 `POST /api/submit` 增加 `formSlug` 的关联约定。
 >
-> **不在本节：** owner 鉴权 / 多租户、owner 的表单列表 / 编辑 / 删除、数据后台 / 统计、防刷 / 限流、`answers` 与 `fields` 的字段级一致性校验（本节从简，见 §16.5）、发布态前端渲染器。鉴权 / 多租户仍按 §12 的 MVP 单 owner 假设（固定 `owner_id`）。
+> **不在本节：** owner 鉴权（§17）、owner 的表单列表 / 编辑 / 删除（§21）、数据后台 / 统计（§18）、防刷 / 限流、`answers` 与 `fields` 的字段级一致性校验（本节从简，见 §16.5）、发布态前端渲染器。
+>
+> **多租户（§17）：** 发布时 `forms.owner_id` 写**当前登录 owner 的真实 user id**（`saveForm` 带 `ownerId` 参数，从 `c.get('session').sub` 取），不再恒 `'default'`。公开拉取 `GET /api/forms/:slug` 仍只按全局唯一 slug（无 owner 维度）。`POST /api/submit` 按 slug **反查 form 所属 owner** 再写该 owner 的飞书（§16.5 / §17.9 第 5 条）。
 
 ### 16.1 端点职责
 
 | 端点 | 谁调 | 鉴权 | 职责 |
 |---|---|---|---|
-| `POST /api/forms` | owner（设计器） | MVP 无（单 owner） | 提交表单定义 → 生成公开 `slug` → 存 D1 `forms` 表 → 返回 `{ slug }` |
+| `POST /api/forms` | owner（设计器） | **owner-only**（§17） | 提交表单定义 → 生成公开 `slug` → 存 D1 `forms`（`owner_id`=当前 owner）→ 返回 `{ slug }` |
 | `GET /api/forms/:slug` | 答题者（公开填写页） | **无鉴权（公开）** | 按 `slug` 返回该表单的 `meta` + `fields` 用于渲染；**绝不返回任何 owner 凭据 / 配置** |
-| `POST /api/submit` | 答题者 | 无 | （§15 基础上）body 增加 `formSlug`：先校验 form 存在再写飞书（见 §16.5） |
+| `POST /api/submit` | 答题者 | 无 | （§15 基础上）body 增加 `formSlug`：先校验 form 存在再写**该 form 所属 owner**的飞书（见 §16.5 / §17.9 第 5 条） |
 
 > **公开拉取是闭环里唯一对陌生人开放、无凭据的读端点**，因此它的「不泄漏」保证是本节的安全核心（§16.4）。
 
@@ -892,7 +898,7 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 
 - 成功：`201`，`{ "slug": "f8Kq2pXa" }`（实现可附 `url` 字段给出可直接访问的公开填写页地址）。
 - 缺 `meta.title`（空 / 缺失）、或 `fields` 非数组、或某 field 缺 `id`/`type`/`label` / `type` 非法 → `400 { error }`，**不落库**（§16.5）。
-- owner_id **不在请求体里**：MVP 由后端恒填 `'default'`（§16.3）。
+- owner_id **不在请求体里**：由后端从 `c.get('session').sub`（当前登录 owner 的真实 user id）填入（§16.3 / §17.9 第 1 条）。
 - **字段嵌套深度上限（防深 payload，安全 nit）：** `fields` 支持 `group` 字段的 `children` 递归嵌套。`parsePublishInput` / `parseField` 必须给递归**设一个深度上限**（实现在合约内定一个合理常量，建议 ≤ 8 层），超过上限即视为形状非法 → `400 { error }`，**不落库**。这是为了挡住「深度爆栈 / 资源耗尽」的恶意或畸形 payload——一份正常表单的 group 嵌套远到不了这个量级。上限值由 implementer 在合约内固定，但**必须**存在且对超限输入返回 `400`（而非栈溢出 / 5xx）。
 
 #### `GET /api/forms/:slug` — 公开拉取（无鉴权）
@@ -920,7 +926,7 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 - **公开标识 + 主键：** `slug` 既是公开访问标识，也是 `forms` 表主键。
 - **不可枚举 / 不可猜：** 用足够熵的随机串（如 crypto 随机字节编码成 URL 安全的 base32/base36），**不**用自增序号——否则答题者能枚举出别人的表单。
 - **唯一性：** 靠随机串的高熵 + `slug` 作主键的插入约束保证；插入冲突时的重试策略由 implementer 在合约内决定（重新生成再插）。
-- **单 owner：** MVP `forms.owner_id` 恒为 `'default'`；slug 全局唯一即可，无需 owner 维度去重。后续接鉴权时把 `owner_id` 换成真实租户键，slug 仍全局唯一。
+- **多租户：** `forms.owner_id` 是发布它的 owner 的真实 user id（`users.id`，§17.11）；slug 仍**全局唯一**（跨 owner 唯一，作主键），公开 URL `/f/:slug` 不带 owner 维度。owner-only 的按 slug 操作（PATCH / DELETE / 看提交）须 `WHERE slug=? AND owner_id=?` 校验归属（§17.9 第 2/3/4 条）；公开 submit 按 slug 反查 `owner_id` 定位该写哪个 owner 的飞书（§16.5 / §17.9 第 5 条）。
 
 ### 16.4 公开拉取不泄漏凭据的保证
 
@@ -963,8 +969,8 @@ Worker 内部流程（在 §15.1 的步骤前插入校验）：
 
 - **`formSlug` 缺失 / 空：** `400 { "error": "formSlug is required" }`，不打上游（与 §15.2 的形状级校验同级）。
 - **`formSlug` 对应 form 不存在：** `404 { error }`，**不换 token、不写记录**（提前拒绝，避免把陌生 slug 的作答写进 owner 的表）。
-- **字段级一致性从简：** 本期**不**校验 `answers` 的 `label` 是否对得上该 form 的 `fields`、是否漏填必填项、value 是否满足 `validation`——只校验「form 存在」。`answers` 仍按 §15.3 原样映射成飞书 `fields`。字段级一致性校验留后续 feature。
-- **多 owner 预留：** MVP 飞书凭据仍取自单 owner 的 `getOwnerConfig`；`formSlug` 此期主要用于「校验 form 存在」，并为将来「按 form 的 `owner_id` 定位该写哪个 owner 的飞书表」预留接口（届时用 `forms.owner_id` 去查对应 owner 的配置）。
+- **字段级一致性从简：** 本期**不**校验 `answers` 的 `label` 是否对得上该 form 的 `fields`、是否漏填必填项、value 是否满足 `validation`——只校验「form 存在」（必填校验在 §20 补上）。`answers` 仍按 §15.3 原样映射成飞书 `fields`。
+- **多租户：写进 form 所属 owner 的飞书（§17.9 第 5 条）：** `POST /api/submit` 是**公开端点**，没有「当前登录 owner」。`formExists` 通过后，须按 `formSlug` 用 `getFormOwner(db, slug)` **反查该 form 的 `owner_id`**，再用该 `ownerId` 调 `getOwnerConfig(db, key, ownerId)` 读**那个 owner**（form 所属 owner）的飞书配置写入——绝不写进固定 / 当前 / 任意别的 owner 的表。陌生人匿名提交某 slug，必须落进这张表所属那个 owner 的飞书租户。`getFormOwner` 命中返回 `owner_id`，不存在返回 `null`（流程里 `formExists` 已先挡掉不存在的 slug）。
 
 ### 16.6 错误响应（状态码 + `{ error }`）
 
@@ -980,12 +986,12 @@ Worker 内部流程（在 §15.1 的步骤前插入校验）：
 
 ### 16.7 D1 表结构（`workers/schema.sql`）
 
-单 owner 设计：与 `owner_config` 同约定，`owner_id` 恒为 `'default'`。
+多租户设计：与 `owner_config` 同约定，`owner_id` 是发布它的 owner 的真实 user id（`users.id`，§17.11）。slug 仍全局唯一（作主键）。
 
 ```sql
 CREATE TABLE IF NOT EXISTS forms (
-  slug          TEXT PRIMARY KEY,   -- 公开 slug：对外标识 + 主键。不可枚举 / 不可猜（§16.3）
-  owner_id      TEXT NOT NULL,      -- MVP 恒为 'default'（单 owner）
+  slug          TEXT PRIMARY KEY,   -- 公开 slug：对外标识 + 主键。全局唯一、不可枚举 / 不可猜（§16.3）
+  owner_id      TEXT NOT NULL,      -- 发布它的 owner 的真实 user id（users.id，§17.11）
   meta_json     TEXT NOT NULL,      -- 序列化的 FormMeta（title / description），展示用
   schema_json   TEXT NOT NULL,      -- 序列化的 Field[]（数据真相），公开拉取原样回
   status        TEXT NOT NULL,      -- 'published' | 'draft' | 'closed'；MVP 发布即 'published'
@@ -995,76 +1001,112 @@ CREATE TABLE IF NOT EXISTS forms (
 
 - 表只存表单的展示 `meta` 与字段定义，**绝不**存任何凭据（凭据全在 `owner_config`，§16.4）。
 - 公开拉取只投影 `meta_json` + `schema_json` + `slug`；`owner_id` / `status` / `created_at` 不回给答题者。
-- 单 owner 约束靠 `owner_id` 恒 `'default'`；后续接鉴权时换成真实租户键即可平滑扩成多行，公开拉取的投影不变。
+- 多租户：`owner_id` 是真实 user id（`users.id`，§17.11）；owner-only 端点按 `owner_id` 过滤（列表 / 编辑 / 删除 / 看提交），公开 submit 按 slug 反查 `owner_id`（§17.9）。公开拉取的投影始终不含 `owner_id`，不受 owner 维度影响。
 
 ---
 
-## 17. 后端 · owner 鉴权（方案 A：owner 密码 → session JWT）
+## 17. 后端 · owner 鉴权（多用户：邮箱 + 密码注册登录 → session JWT）
 
-> **与第 12–16 节的关系：** §12–§16 落地了发布型 BYOK 的完整后端闭环，但所有端点**当前全无鉴权**（MVP 单 owner 假设）。本节补上最后一块：把 **owner-only**（设计态 / 管理态）端点用一道轻量鉴权门保护起来，公开端点（答题者用）保持开放。这样 owner 的配置存取、表单发布、连接测试、数据后台只对持有 owner 密码的人开放，而答题者拉表单 / 提交作答仍无需任何凭据。
+> **与第 12–16 节的关系：** §12–§16 落地了发布型 BYOK 的完整后端闭环，但所有端点**当前全无鉴权**（早期 MVP 单 owner 假设）。本节补上最后一块、并把系统从**单租户**升级为**开放注册的多用户**：任何人用邮箱 + 密码自助注册即成为 owner，各自独立拥有自己的 BYOK 配置（DeepSeek + 飞书）、表单、提交数据，彼此严格隔离（隔离规范见 §17.9）。owner-only（设计态 / 管理态）端点用一道鉴权门保护，且**按登录 owner 的真实 user id 过滤数据**；公开端点（答题者用）保持开放。
 >
-> **方案 A（owner 密码 → session JWT）：** owner 用一个预置的 owner 密码（Worker secret `OWNER_PASSWORD`）登录，后端校验后签发一个短期 session JWT（用 Worker secret `AUTH_SECRET` 签名）；后续 owner-only 端点凭 `Authorization: Bearer <jwt>` 通行。**单 owner**：登录后 JWT 的 `sub` 恒为 `'default'`（与 `owner_config.owner_id` / `forms.owner_id` 同约定）。
+> **方案（邮箱 + 密码 → session JWT）：** owner 用邮箱 + 密码**注册**（注册即登录）或**登录**，后端校验后签发一个短期 session JWT（用 Worker secret `AUTH_SECRET` 以 `HS256` 签名）；后续 owner-only 端点凭 `Authorization: Bearer <jwt>` 通行。**多 owner**：JWT 的 `sub` 是该用户的**真实 user id**（`users.id`，`crypto.randomUUID()`），不再钉死 `'default'`；它既是 session 主体，也是数据隔离键（对齐 `owner_config.owner_id` / `forms.owner_id`）。
 >
-> **本节范围（仅 Worker 端）：** `POST /api/auth/login`（密码 → token）、auth 中间件（验签 + 未过期）、owner-only 端点保护清单、env secret 约定、安全。
+> **邮箱 + 密码，先不验证邮箱：** 邮箱仅作**唯一标识 + 登录名**。`users.email_verified` 字段**预留（恒 0）**、发信钩子**预留但不启用**——以后接 Resend 是增量、不重构。忘密码暂靠运维手动重置（找回流程留后续 feature）。
 >
-> **不在本节：** 多 owner（登录后恒 `sub='default'`，不区分租户）、注册 / 改密 / 找回密码、刷新 token / 登出黑名单、限流 / 防爆破、RBAC / 细粒度权限、前端登录页 UI。这些留后续 feature。
+> **本节范围（仅 Worker 端）：** `POST /api/auth/register`（注册即登录）、`POST /api/auth/login`（邮箱 + 密码 → token）、users 表、密码哈希约定、auth 中间件（验签 + 未过期）、owner-only 端点保护清单 + **按 owner 隔离数据**、横向越权约束（§17.9）、env secret 约定、安全。
+>
+> **不在本节：** 邮箱验证 / 发信（预留不启用）、改密 / 找回密码、刷新 token / 登出黑名单、限流 / 防爆破 / 验证码、RBAC / 细粒度权限、前端登录注册页 UI。这些留后续 feature。
+>
+> **数据迁移（运维一次性，不在本节细化）：** 现有线上 `owner_config` / `forms` 各有一行 `owner_id='default'`。部署新代码 + 建 `users` 表后，由运维用真实邮箱注册首个账号，再跑一次性 SQL 把 `owner_id='default'` 的行 `UPDATE` 成该账号的 `users.id`（脚本 `workers/migrations/002-migrate-default-owner.sql`，user id 部署时填）。这是运维动作，不属本节契约。
 
 ### 17.1 端点职责与鉴权矩阵
 
 | 端点 | 谁调 | 鉴权 | 说明 |
 |---|---|---|---|
-| `POST /api/auth/login` | owner | **公开**（鉴权入口自身不保护） | body `{ password }` → 校验 `OWNER_PASSWORD` → 200 `{ token }`；密码错 / 缺 → 401 |
-| `GET /api/config` | owner | **owner-only** | 读掩码配置（§12） |
-| `POST /api/config` | owner | **owner-only** | 保存配置（§12） |
-| `POST /api/config/test` | owner | **owner-only** | 连接测试（§14） |
-| `POST /api/chat` | owner（设计态） | **owner-only** | LLM 代理（§13）——只供 owner 在设计器里用，归 owner-only |
-| `POST /api/forms` | owner（设计器） | **owner-only** | 发布表单（§16） |
-| `GET /api/forms/:slug/submissions` | owner（数据后台） | **owner-only** | 提交列表（§18） |
-| `GET /api/forms/:slug` | 答题者 | **公开** | 公开拉取表单（§16）——不变 |
-| `POST /api/submit` | 答题者 | **公开** | 答题落库（§15）——不变 |
+| `POST /api/auth/register` | 任意访客 | **公开**（注册入口自身不保护） | body `{ email, password }` → 创建 user（注册即登录）→ 201 `{ token }`（`sub`=新 user.id）；邮箱占用 → 409；非法 email / 弱密码(<8) → 400 |
+| `POST /api/auth/login` | owner | **公开**（登录入口自身不保护） | body `{ email, password }` → 查 user + 校验密码 → 200 `{ token }`（`sub`=user.id）；失败**统一 401** |
+| `GET /api/config` | owner | **owner-only** | 读**当前 owner**的掩码配置（§12） |
+| `POST /api/config` | owner | **owner-only** | 保存**当前 owner**的配置（§12） |
+| `POST /api/config/test` | owner | **owner-only** | 测**当前 owner**的连接（§14） |
+| `POST /api/chat` | owner（设计态） | **owner-only** | LLM 代理（§13），用**当前 owner**的 DeepSeek key |
+| `POST /api/forms` | owner（设计器） | **owner-only** | 发布表单，归属**当前 owner**（§16） |
+| `GET /api/forms` | owner（管理台） | **owner-only** | 只列**当前 owner**的表单（§21） |
+| `PATCH /api/forms/:slug` | owner | **owner-only** | 改表单，须属**当前 owner**，否则 404（§17.9 / §21） |
+| `DELETE /api/forms/:slug` | owner | **owner-only** | 删表单，须属**当前 owner**，否则 404（§17.9 / §21） |
+| `GET /api/forms/:slug/submissions` | owner（数据后台） | **owner-only** | 提交列表，须属**当前 owner**，否则 404；读**该 owner**飞书（§17.9 / §18） |
+| `GET /api/forms/:slug` | 答题者 | **公开** | 公开拉取表单（§16）——不变（按 slug，无 owner 维度）|
+| `POST /api/submit` | 答题者 | **公开** | 答题落库（§15 / §16）——按 slug **反查 form 所属 owner**，写**该 owner**飞书（§17.9）|
 | `GET /health` | 任意 | **公开** | 健康检查——不变 |
 
-> **划分原则：** owner 的设计态 / 管理态（持有或操作 owner 凭据、私有数据）一律 owner-only；答题者面向的公开读 / 写（拉表单、交作答）保持无鉴权。`POST /api/chat` 虽不直接落库，但它消费 owner 的 DeepSeek 额度、且只在设计器里用，故归 owner-only，防止陌生人盗刷 owner 的 key。
+> **划分原则：** owner 的设计态 / 管理态（持有或操作 owner 凭据、私有数据）一律 owner-only，且**只能看见 / 操作自己 `sub` 名下的数据**（§17.9）；答题者面向的公开读 / 写（拉表单、交作答）保持无鉴权（按全局唯一 slug 定位，不带 owner 维度）。`POST /api/chat` 虽不直接落库，但它消费 owner 的 DeepSeek 额度、且只在设计器里用，故归 owner-only，防止陌生人盗刷某 owner 的 key。
 
-### 17.2 `POST /api/auth/login` 契约
+### 17.2 `POST /api/auth/register` 契约（注册即登录）
 
 请求体（JSON）：
 
 ```jsonc
-{ "password": "owner 的登录密码" }
+{ "email": "owner@example.com", "password": "至少 8 位的密码" }
 ```
 
-- 成功（密码与 `OWNER_PASSWORD` 一致）：`200`，`{ "token": "<jwt>" }`。
-- 密码错 / 缺 `password` / body 非合法 JSON：`401`，`{ "error": "..." }`（**统一 401**，不区分「密码错」与「缺字段」，避免给爆破者额外信号；body 非 JSON 也按鉴权失败处理）。
-- 服务端未配置 `OWNER_PASSWORD` / `AUTH_SECRET`（部署疏漏）：`500`，`{ "error": "..." }`（这是部署错误，不是鉴权失败，不能误判成 401 把所有人放进来或全部锁死的歧义态）。
-- 校验只比对 owner 密码本身，**不**触碰 D1 / 飞书 / DeepSeek——登录是纯 secret 比对 + 签名。
-- **密码比对走常量时间（安全 nit）：** 提交的密码与 `OWNER_PASSWORD` 的比对**不**用朴素的 `===` / `!==`（朴素短路比较会因「第几位开始不匹配」泄漏时序信号，给计时攻击逐位猜密码的可乘之机）。用一个**常量时间等长比较**（见 §17.7）：先把两侧编码成等长字节再逐字节累积异或，比较耗时只与长度有关、与「哪一位不同」无关。长度不同时仍判失败，但同样不短路。无论匹配与否，可观察行为不变（匹配 → `200 { token }`，不匹配 → 统一 `401`）。
+- 成功（邮箱合法、密码 ≥ 8 位、邮箱未被占用）：`201`，`{ "token": "<jwt>" }`——**注册即登录**，token 的 `sub` 是新建 user 的 id。后端流程：校验 email 形状 + 密码强度 → `hashPassword`（§17.4）→ `INSERT` 一行 `users`（`id=crypto.randomUUID()`、`email_verified=0`）→ `signSession(AUTH_SECRET, { sub: user.id })`。
+- 邮箱已被占用（`users.email` UNIQUE 冲突）：`409`，`{ "error": "..." }`（如「邮箱已注册」），**不**新建 user、**不**签发 token。
+- 非法 email（形状不符）/ 弱密码（长度 < 8）/ 缺字段 / body 非合法 JSON：`400`，`{ "error": "..." }`，**不**落库。
+- 明文密码**绝不入库**：只存 PBKDF2 派生的 `password_hash` + per-user `password_salt` + `iterations`（§17.4）。
+- 注册**不**触碰飞书 / DeepSeek——只校验 + 建 user + 签 token。
+- **邮箱占用检测的并发约定：** 唯一性以 `users.email` 的 UNIQUE 约束为**最终裁决**——实现可先 `findUserByEmail` 预检，但**必须**靠 `INSERT` 的 UNIQUE 冲突兜底（两个并发注册同一邮箱时，先到者 201、后到者 409），不能只靠预检（有 TOCTOU 竞态）。
 
-### 17.3 session JWT 约定
+### 17.3 `POST /api/auth/login` 契约
+
+请求体（JSON）：
+
+```jsonc
+{ "email": "owner@example.com", "password": "owner 的登录密码" }
+```
+
+- 成功（邮箱存在且密码正确）：`200`，`{ "token": "<jwt>" }`，token 的 `sub` 是该 user 的 id。后端流程：`findUserByEmail` → `verifyPassword(提交密码, hash, salt, iterations)`（§17.4）→ 通过则 `signSession(AUTH_SECRET, { sub: user.id })`。
+- 失败（邮箱不存在 **或** 密码错 **或** 缺字段 / body 非合法 JSON）：`401`，`{ "error": "..." }`——**统一 401**，**不区分**「邮箱不存在」与「密码错」，避免给爆破者「这个邮箱注册过没有」的枚举信号。
+- **防时序枚举 email（安全 nit）：** 当邮箱不存在时，**仍跑一次假的密码哈希**（对一个固定的占位 hash 跑 `verifyPassword`）再统一返回 401，使「邮箱存在但密码错」与「邮箱根本不存在」两条路径的耗时不可区分——否则攻击者能靠响应时延区分一个邮箱是否注册过。这条约束封装在 `authenticateUser`（§17.4 / `users.ts`）里：用户不存在也走一次等价开销的 hash，再返回 `null`。
+- 登录只查 `users` 表 + 比对密码哈希，**不**触碰飞书 / DeepSeek。
+- 密码哈希比对走常量时间（PBKDF2 重算 + `timingSafeEqualStr` 比对派生值，§17.4 / §17.8）。
+
+### 17.4 密码哈希约定（PBKDF2-HMAC-SHA256，`password.ts` / `users.ts`）
+
+明文密码**绝不入库**；只存可校验、不可逆的派生值。约定如下：
+
+- **算法：** WebCrypto 原生 `crypto.subtle` 的 **PBKDF2-HMAC-SHA256**（workerd 唯一原生 KDF，无 scrypt/bcrypt；不引第三方依赖）。
+- **per-user 随机 salt：** 每个用户注册时生成一个**新的随机 salt**（`crypto.getRandomValues`），与派生 hash、`iterations` 一并落库。绝不全局共用一个 salt。
+- **记录 iterations：** 迭代数随用户记录落库（起步 `100_000`，权衡 workerd CPU 上限）；记录进列是为了**将来调高迭代数不破坏旧 hash**——校验时用该用户存的 `iterations` 重算。
+- **编码：** `hash` / `salt` 以 base64 字符串落库（复用 `crypto.ts` 的 base64 helper 风格）。
+- **比对常量时间：** `verifyPassword` 用存的 `salt` + `iterations` 把提交密码重新派生一遍，再用**常量时间等长比较**（`auth.ts` 的 `timingSafeEqualStr`，§17.8）比对派生值，而非朴素 `===`。
+- **接口位置：**
+  - `password.ts`：`hashPassword(plaintext) → { hash, salt, iterations }`、`verifyPassword(plaintext, hash, salt, iterations) → boolean`。
+  - `users.ts`：`createUser` / `findUserByEmail` / `authenticateUser`（含 §17.3 的「用户不存在跑一次假 hash」约束）+ `UserRow` + `EmailTakenError` + email 形状 / 密码强度校验约定。
+
+### 17.5 session JWT 约定
 
 - **签名：** HMAC（`HS256`），密钥取自 Worker secret `AUTH_SECRET`。复用 Hono 内置的 `hono/jwt`（`sign` / `verify`）。
 - **payload：** 至少含
-  - `sub`: 恒 `'default'`（MVP 单 owner，对齐 `owner_config.owner_id` / `forms.owner_id`）。
+  - `sub`: 该 owner 的**真实 user id**（`users.id`，`crypto.randomUUID()`）——既是 session 主体，也是数据隔离键（对齐 `owner_config.owner_id` / `forms.owner_id`）。**不再**恒为 `'default'`。
   - `exp`: 过期时间（Unix 秒）。签发时设一个合理的短期窗口（建议 ≤ 24h；具体时长由 implementer 在合约内定，但**必须**带 `exp`）。
   - 可选 `iat`。
-- **token 里绝不放敏感物：** `OWNER_PASSWORD` / `AUTH_SECRET` / 任何 owner 凭据都不进 payload；payload 是可被客户端解码的（JWT 仅签名、非加密）。
+- **token 里绝不放敏感物：** `AUTH_SECRET` / 密码 / `password_hash` / 任何 owner 凭据都不进 payload；payload 是可被客户端解码的（JWT 仅签名、非加密）。`email` 是否放进 payload 由实现定（非敏感），但隔离只认 `sub`。
 - **无状态：** 不维护服务端 session 表 / 黑名单；token 一经签发，在 `exp` 前一直有效（登出 / 吊销留后续 feature）。
 
-### 17.4 auth 中间件
+### 17.6 auth 中间件
 
 owner-only 端点统一挂一道 auth 中间件，校验 `Authorization: Bearer <jwt>`：
 
 - **取 token：** 从 `Authorization` 头解析 `Bearer <jwt>`；缺头 / 格式不对（非 `Bearer ` 前缀）→ `401 { error }`，**不进入** route handler。
 - **验签 + 未过期：** 用 `AUTH_SECRET` 验签且校验 `exp` 未过；验签失败 / 过期 / payload 非法 → `401 { error }`。
-- **放行：** 校验通过则把解出的 session（至少 `sub`）挂到请求上下文（如 `c.set('session', ...)`），交给 route handler。
+- **放行 + 挂 session：** 校验通过则把解出的 session（至少 `sub` = 真实 user id）挂到请求上下文（`c.set('session', ...)`），交给 route handler。**owner-only handler 据此 `const ownerId = c.get('session').sub` 过滤数据**（§17.9）。
 - **错误体不泄漏：** 401 的 `{ error }` 只表「未授权」语义，**绝不**包含 `AUTH_SECRET`、被拒 token 的内容、或任何可辅助伪造 / 爆破的细节。
 - **实现选型：** 可直接用 `hono/jwt` 的 `jwt({ secret })` 中间件，或在 `auth.ts` 里基于 `verify` 写一个薄中间件（统一 401 文案 + 把 session 挂上下文）。两者皆可；implementer 在合约内择一并保持上面的可观察行为。
 
-### 17.5 index.ts 如何挂载（cross-cutting）
+### 17.7 index.ts 如何挂载（cross-cutting）
 
 鉴权是**横切关注点**，在 `index.ts` 路由层统一挂，不渗进各 route handler 的业务体：
 
-- **公开端点先注册 / 或显式豁免：** `GET /health`、`POST /api/auth/login`、`GET /api/forms/:slug`、`POST /api/submit` 不挂 auth 中间件。
+- **公开端点先注册 / 或显式豁免：** `GET /health`、`POST /api/auth/register`、`POST /api/auth/login`、`GET /api/forms/:slug`、`POST /api/submit` 不挂 auth 中间件。
 - **owner-only 端点挂中间件：** 推荐用 Hono 的路径前缀中间件 / 分组，对 owner-only 路径前缀套 `requireAuth`，例如：
   - `app.use('/api/config', requireAuth)` 与 `app.use('/api/config/*', requireAuth)`（覆盖 `GET/POST /api/config`、`POST /api/config/test`）。
   - `app.use('/api/chat', requireAuth)`。
@@ -1072,32 +1114,61 @@ owner-only 端点统一挂一道 auth 中间件，校验 `Authorization: Bearer 
   - `app.get('/api/forms/:slug/submissions', requireAuth, handler)`（数据后台，§18）。
 - **关键陷阱：** `/api/forms/:slug`（公开）与 `POST /api/forms`、`/api/forms/:slug/submissions`（owner-only）共享 `/api/forms` 前缀。**不能**用一句 `app.use('/api/forms/*', requireAuth)` 把公开拉取也保护了。挂载方式以「精确匹配 owner-only 的 method + 路径」为准，公开的 `GET /api/forms/:slug` 必须不受影响。implementer 在合约内决定具体挂法（method 级中间件 / 精确路径），但**必须**满足 §17.1 的矩阵：公开端点无鉴权、owner-only 端点缺 / 坏 token 一律 401。
 
-### 17.6 env secret 约定
+### 17.8 env secret 约定
 
 | secret | 用途 | 来源 |
 |---|---|---|
-| `OWNER_PASSWORD` | owner 登录密码（与提交密码做**常量时间**比对，§17.8） | 生产 `wrangler secret put OWNER_PASSWORD`；测试由 `vitest.config.ts` 注入固定值 |
-| `AUTH_SECRET` | session JWT 的 HMAC 签名密钥 | 生产 `wrangler secret put AUTH_SECRET`；测试由 `vitest.config.ts` 注入固定值 |
+| `AUTH_SECRET` | session JWT 的 HMAC 签名密钥（注册 / 登录签发、中间件验签） | 生产 `wrangler secret put AUTH_SECRET`；测试由 `vitest.config.ts` 注入固定值 |
+| `CONFIG_KEY` | owner 配置加密主密钥（§12，不变） | 生产 `wrangler secret put CONFIG_KEY`；测试由 `vitest.config.ts` 注入固定值 |
+| `OWNER_PASSWORD` | **已废弃（多用户改造后不再用于登录）** | 登录改为查 `users` 表 + 密码哈希校验；本 secret 可保留不删（线上 `wrangler secret delete OWNER_PASSWORD` 清理是可选运维动作），**implementer 不再读它做鉴权** |
 
-- 二者均为 Worker secret，**绝不**入 git、不进任何响应 / 日志。与 §12 的 `CONFIG_KEY` 同等对待。
-- `Env` 接口（`index.ts`）需扩展出这两个绑定（`OWNER_PASSWORD: string`、`AUTH_SECRET: string`）。
+- `AUTH_SECRET` / `CONFIG_KEY` 均为 Worker secret，**绝不**入 git、不进任何响应 / 日志。
+- `Env` 接口（`index.ts`）至少需 `AUTH_SECRET: string`、`CONFIG_KEY: string`、`DB: D1Database`；`OWNER_PASSWORD` 绑定的去留交 implementer（保留亦无害，但不得用于鉴权）。
 
-### 17.7 安全
+### 17.9 多租户数据隔离 + 横向越权（头等约束）
 
-- **统一 401：** 登录失败与中间件拒绝都回 `401`，文案只表「未授权」，不泄漏「密码长度 / 是否存在 / 验签为何失败」等可被利用的信号。
-- **secret 不出网：** `OWNER_PASSWORD` / `AUTH_SECRET` 只在 Worker 内用于比对 / 签名验签，绝不进 token payload、响应体、HTTP 头、日志。
-- **token 非加密：** JWT payload 可被任何持有者解码，故 payload 里只放 `sub='default'` + `exp` 这类非敏感物。
-- **密码比对常量时间（防计时攻击）：** owner 密码与 `OWNER_PASSWORD` 的比对用一个**常量时间等长比较** helper（`auth.ts` 的 `timingSafeEqualStr`，§17.8），而非 `===`。这样比对耗时不随「第几位开始不同」变化，攻击者无法靠测响应时延逐位还原密码。这是一个就近的安全 nit，不改变任何可观察 HTTP 行为。
-- **保护半径：** 加上鉴权后，owner 的配置、表单发布、连接测试、LLM 代理、数据后台都需 token；这道门也是后续多 owner（把 `sub` 换成真实租户键，按 `sub` 过滤数据）的接入点。
+加 users 表是机械活；真正危险的是「owner-only 的按 slug 操作」原先**没有 owner 维度**——多租户下若不收紧，owner A 能操作 owner B 的数据，构成**横向越权**。本节把约束钉成规范条款，implementer 必须逐条满足、outer-tester 必须逐条验证：
 
-### 17.8 常量时间密码比较（`timingSafeEqualStr`）
+1. **所有 owner-only 端点按 `c.get('session').sub` 过滤数据。** 每个 owner-only handler 取 `const ownerId = c.get('session').sub`（真实 user id），传进数据层；数据层的 `WHERE` / `INSERT` 用它替换原先恒 `'default'` 的常量。owner 只能看见 / 操作自己名下的行。
+2. **`PATCH /api/forms/:slug`：** 必须校验该 slug **属于当前登录 owner**（`WHERE slug=? AND owner_id=?`）。跨 owner（slug 存在但不属于当前 owner）→ **404**（与「slug 不存在」同码），**不暴露存在性**——不能回 403，因为 403 会泄漏「这张表确实存在、只是不归你」。
+3. **`DELETE /api/forms/:slug`：** 同上，`WHERE slug=? AND owner_id=?`；跨 owner → **404**，不删任何行、不暴露存在性。
+4. **`GET /api/forms/:slug/submissions`：** 必须先校验该 slug **属于当前登录 owner**（跨 owner / 不存在 → **404**，不打任何飞书上游）；归属通过后读**该 owner 自己**的飞书配置（按 `ownerId` 的 `getOwnerConfig`）去拉记录——绝不用别的 owner 的飞书凭据。
+5. **`POST /api/submit`（公开）：** 必须按 `formSlug` **反查该 form 的 `owner_id`**（`getFormOwner(db, slug)`），再读**该 owner**（form 所属 owner，不是「当前登录 owner」——这是公开端点，没有登录 owner）的飞书配置写入。这是公开端点里唯一需要「按 slug 反查 owner」的地方：陌生人匿名提交某 slug，必须落进这张表**所属那个 owner** 的飞书租户，而非任意 / 固定 owner。
+6. **`GET /api/forms`（列表）：** 只列当前 owner（`WHERE owner_id=?`）的表单；绝不把别的 owner 的表单泄漏进列表。
+7. **`GET/POST /api/config`、`POST /api/config/test`、`POST /api/chat`：** 均按当前 `ownerId` 读 / 写 / 测**当前 owner 自己**的那一行配置（`owner_config` 由单行升级为按 `owner_id` 多行，§12.5）；A 永远读不到 / 改不到 B 的配置。
+
+> **「跨 owner → 404 不暴露存在性」是本节的安全核心。** owner-only 的按 slug 操作，对「slug 不存在」与「slug 存在但不属于你」必须返回**同一个 404**——任何能区分二者的响应（403 / 不同文案 / 不同耗时）都会把别人表单的存在性泄漏给攻击者，使高熵 slug 的「不可枚举」保证形同虚设。
+
+### 17.10 常量时间字符串比较（`timingSafeEqualStr`）
 
 Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以在 `auth.ts` 里提供一个纯函数 helper 做常量时间字符串比较：
 
 - **签名：** `timingSafeEqualStr(a: string, b: string): boolean`——两个字符串「内容是否相等」，比对耗时只与输入长度有关、与首个不同位的位置无关。
 - **实现思路（合约内）：** 用 `TextEncoder` 把两侧编码成字节；逐字节做异或累积（`acc |= ai ^ bi`），**全程不短路**（不在第一个不同字节就 `return false`）；最后用 `acc === 0` 且长度相等判等。长度不同时返回 `false`，但仍跑完固定步数、不提前 return。绝不使用朴素 `a === b` / 提前短路的逐字符比较。
-- **用途：** 仅供 `POST /api/auth/login` 比对提交密码与 `OWNER_PASSWORD`（§17.2）。`AUTH_SECRET` 的验签由 `hono/jwt` 的 HMAC 负责（HMAC 验签本身已抗时序），不走本 helper。
+- **用途：** 供 `verifyPassword`（§17.4）比对 PBKDF2 派生出的密码哈希值（重算后的派生 hash 与存储 hash）。`AUTH_SECRET` 的验签由 `hono/jwt` 的 HMAC 负责（已抗时序），不走本 helper。
 - **安全：** 入参与返回都不含也不回显任何 secret；本 helper 只返回布尔，绝不把密码 / secret 写进日志或响应。
+
+### 17.11 D1 表结构（`workers/schema.sql`）
+
+新增 `users` 表（每个注册账号一行）：
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+  id             TEXT PRIMARY KEY,            -- crypto.randomUUID()；也是 owner_config / forms 的 owner_id
+  email          TEXT NOT NULL UNIQUE,        -- 登录名 + 唯一约束（注册去重的最终裁决）
+  password_hash  TEXT NOT NULL,               -- PBKDF2-HMAC-SHA256 派生值 (base64)
+  password_salt  TEXT NOT NULL,               -- per-user 随机 salt (base64)
+  iterations     INTEGER NOT NULL,            -- PBKDF2 迭代数（起步 100000，记录以便日后调参不破旧 hash）
+  email_verified INTEGER NOT NULL DEFAULT 0,  -- 预留，先恒 0（邮箱验证留后续 feature）
+  created_at     TEXT NOT NULL                -- ISO-8601
+);
+```
+
+- **`users.id` 是隔离键：** 它即 session JWT 的 `sub`，也即 `owner_config.owner_id` / `forms.owner_id` 写入的真实 user id（§17.5 / §17.9）。
+- **`email` UNIQUE 是注册去重的最终裁决：** 并发注册同一邮箱时靠 UNIQUE 冲突兜底（先到者成功、后到者 409），不能只靠 `findUserByEmail` 预检（§17.2）。
+- **明文密码绝不入库：** 只存 `password_hash` / `password_salt` / `iterations`（§17.4）。
+- **`email_verified` 预留恒 0：** 本期不写入 / 不读取它做任何门控；它与发信钩子都为将来接邮箱验证（Resend 等）预留，先不启用。
+- **`owner_config` / `forms` 的 `owner_id` 升级为多租户键：** 二表的 `owner_id` 由「恒 `'default'`」改为「真实 user id」；`owner_config` 由单行升级为按 `owner_id` 多行（每 owner 一行配置，§12.5）。schema 列不变，只更新表头注释。
 
 ---
 
@@ -1107,7 +1178,9 @@ Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以�
 >
 > **本节范围（仅 Worker 端）：** `GET /api/forms/:slug/submissions`（owner-only）的契约、读飞书记录的上游流程、响应形状（提交列表 + count）、错误码、安全（不返回 owner 凭据）。
 >
-> **不在本节：** 分页 / 游标（MVP 一次性拉，或拉上游一页即可，见 §18.4）、筛选 / 排序 / 搜索、字段级聚合 / 图表统计、导出 CSV、删除 / 编辑提交、跨 owner 数据隔离（MVP 单 owner，`sub='default'`）。这些留后续 feature。
+> **不在本节：** 分页 / 游标（MVP 一次性拉，或拉上游一页即可，见 §18.4）、筛选 / 排序 / 搜索、字段级聚合 / 图表统计、导出 CSV、删除 / 编辑提交。这些留后续 feature。
+>
+> **多租户 + 横向越权（§17.9 第 4 条）：** 本端点 owner-only。`formExists` 必须升级为**归属校验**：该 slug 须属于当前登录 owner（`WHERE slug=? AND owner_id=?`）——跨 owner（slug 存在但不归当前 owner）/ 不存在均 → **404**（同码、不暴露存在性），不打任何飞书上游。归属通过后读**当前 owner 自己**的飞书配置（`getOwnerConfig(db, key, ownerId)`，`ownerId=c.get('session').sub`）去拉记录，绝不用别的 owner 的飞书凭据。
 >
 > **第 6 步前端接入（已落桩）：** owner 侧「数据后台」是「我的表单」(`src/forms-panel.jsx`) 每份表单行下的「看提交」入口——打开后按该 `slug` 调本端点。前端契约见 `src/core/submissionsClient.ts`（`listSubmissions(slug)` + `Submission` / `SubmissionsResult`，**owner-only**，复用 `apiClient` 的 Bearer 注入 `auth:true`），视图见 `src/submissions-view.jsx`（`SubmissionsView`）。空态友好、`401` → `onNeedLogin` 引导先登录（复用 §17 模式）、`409` 未配飞书 → 引导去集成设置。
 
@@ -1116,18 +1189,19 @@ Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以�
 `GET /api/forms/:slug/submissions`（**owner-only**，挂 §17 的 auth 中间件）：
 
 ```
-0) requireAuth                       ← 缺 / 坏 token → 401（§17.4），不进入下面
-1) formExists(db, slug)              ← 查 forms 表：不存在 → 404 { error }，不打飞书上游
-2) importConfigKey(env.CONFIG_KEY)   ← AES-GCM 主密钥（§12.2）
-3) getOwnerConfig(env.DB, key)        ← 读单行 + 解密 → OwnerConfig 内部视图
-4) 若 owner.feishu === null（未配飞书）→ 409 { error }，不打上游
-5) getFeishuTenantToken(appId, appSecret)        ← 换 tenant_access_token（§15.5 共享 helper）
-6) listSubmissions(token, appToken, tableId)     ← GET 多维表格记录列表（§18.3）
-7) 上游 code === 0 → 200 { submissions: [...], count }
+0) requireAuth                       ← 缺 / 坏 token → 401（§17.6），不进入下面；ownerId = c.get('session').sub
+0.5) 归属校验（§17.9 第 4 条）        ← 该 slug 属于当前 owner？（WHERE slug=? AND owner_id=?）
+                                        跨 owner / 不存在 → 404 { error }（同码、不暴露存在性），不打飞书上游
+1) importConfigKey(env.CONFIG_KEY)   ← AES-GCM 主密钥（§12.2）
+2) getOwnerConfig(env.DB, key, ownerId) ← 读**当前 owner**那行 + 解密 → OwnerConfig 内部视图
+3) 若 owner.feishu === null（未配飞书）→ 409 { error }，不打上游
+4) getFeishuTenantToken(appId, appSecret)        ← 换 tenant_access_token（§15.5 共享 helper）
+5) listSubmissions(token, appToken, tableId)     ← GET 多维表格记录列表（§18.3）
+6) 上游 code === 0 → 200 { submissions: [...], count }
    换 token 失败 / 读记录 code≠0 / 非 2xx → 502 { error }，不泄漏 token/secret
 ```
 
-> 复用 §15 的凭据解密 + 换 token 路径；区别只在第 6 步从「写一条记录」换成「读记录列表」。
+> 复用 §15 的凭据解密 + 换 token 路径；区别在 0.5 的**归属校验**（按 owner 过滤、跨 owner → 404）与第 5 步从「写一条记录」换成「读记录列表」。归属校验可用一个带 owner 维度的探针（如 `getFormOwner(db,slug) === ownerId`，或 `SELECT 1 ... WHERE slug=? AND owner_id=?`），由实现在合约内定。
 
 ### 18.2 响应契约
 
@@ -1169,9 +1243,9 @@ Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以�
 
 | 情况 | 状态码 | 响应体 | 说明 |
 |---|---|---|---|
-| 缺 / 坏 / 过期 token | `401` | `{ "error": "..." }` | auth 中间件拦截（§17.4），不进入 handler |
-| `slug` 对应 form 不存在 | `404` | `{ "error": "..." }` | 不打飞书上游 |
-| owner 未配飞书（`owner.feishu === null`） | `409` | `{ "error": "owner 未配置飞书" }` | 不打上游；引导去集成设置（§12） |
+| 缺 / 坏 / 过期 token | `401` | `{ "error": "..." }` | auth 中间件拦截（§17.6），不进入 handler |
+| `slug` 不存在 **或** 存在但不属于当前 owner（跨 owner） | `404` | `{ "error": "..." }` | 同码、**不暴露存在性**（§17.9 第 4 条）；不打飞书上游 |
+| owner 未配飞书（当前 owner 的 `owner.feishu === null`） | `409` | `{ "error": "owner 未配置飞书" }` | 不打上游；引导去集成设置（§12） |
 | 换 token 失败 / 读记录失败（非 2xx / `code≠0` / 不可达） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `app_secret` / `tenant_access_token`；可带飞书 `code` / HTTP 状态这类非敏感摘要 |
 
 - 错误体一律 `application/json` 的 `{ error }`。
@@ -1298,24 +1372,26 @@ Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以�
 >
 > **本节范围（仅 Worker 端）：** `GET /api/forms`（列表）、`PATCH /api/forms/:slug`（改 status，至少；可选编辑 meta/fields）、`DELETE /api/forms/:slug`（删除）。
 >
-> **不在本节：** 多租户隔离（MVP 单 owner，`owner_id='default'`，列表即该 owner 全部）、分页 / 搜索 / 排序、批量操作、版本历史 / 回滚、表单复制（已有 `duplicate_field` 是字段级、与本节无关）。
+> **不在本节：** 分页 / 搜索 / 排序、批量操作、版本历史 / 回滚、表单复制（已有 `duplicate_field` 是字段级、与本节无关）。
+>
+> **多租户 + 横向越权（§17.9 第 1/2/3/6 条）：** 三个端点全 owner-only，且**全部按当前 owner 的真实 user id（`ownerId=c.get('session').sub`）隔离**：`GET /api/forms` 只列当前 owner 的表单（`WHERE owner_id=?`）；`PATCH` / `DELETE /api/forms/:slug` 必须校验该 slug **属于当前 owner**（`WHERE slug=? AND owner_id=?`），跨 owner（slug 存在但不归当前 owner）→ **404**（与「不存在」同码、**不暴露存在性**，不改任何行）。`listForms` / `updateForm` / `deleteForm` 均带 `ownerId` 参数（§21.6）。
 
 ### 21.1 端点职责与鉴权矩阵（在 §17.1 基础上新增）
 
 | 端点 | 谁调 | 鉴权 | 职责 |
 |---|---|---|---|
-| `GET /api/forms` | owner（管理台） | **owner-only** | 列出该 owner 的所有表单（slug / meta / status / created_at），不含 fields 全量 |
-| `PATCH /api/forms/:slug` | owner | **owner-only** | 改 `status`（`published` ↔ `closed`）和/或编辑 `meta` / `fields`（至少支持改 status）|
-| `DELETE /api/forms/:slug` | owner | **owner-only** | 删除该表单 |
+| `GET /api/forms` | owner（管理台） | **owner-only** | 列出**当前 owner**的所有表单（`WHERE owner_id=?`；slug / meta / status / created_at），不含 fields 全量 |
+| `PATCH /api/forms/:slug` | owner | **owner-only** | 改 `status`（`published` ↔ `closed`）和/或编辑 `meta` / `fields`（至少改 status）；须属当前 owner，跨 owner → 404 |
+| `DELETE /api/forms/:slug` | owner | **owner-only** | 删除该表单；须属当前 owner，跨 owner → 404 |
 
-> **关键路由共存陷阱（与 §17.5 同源、本节加剧）：** `/api/forms` 前缀下现在有四条路由，鉴权与公开**交错**：
+> **关键路由共存陷阱（与 §17.7 同源、本节加剧）：** `/api/forms` 前缀下现在有四条路由，鉴权与公开**交错**：
 > - `GET  /api/forms`            → **owner-only**（列表，本节新增）
 > - `POST /api/forms`            → owner-only（发布，§16）
 > - `GET  /api/forms/:slug`      → **公开**（公开拉取，§16）——**绝不能被误伤**
 > - `PATCH/DELETE /api/forms/:slug` → owner-only（本节新增）
 > - `GET  /api/forms/:slug/submissions` → owner-only（§18）
 >
-> guard 必须按**精确 method + path** 挂（沿用 §17.5 既有做法），逐条点名 owner-only 路由，**绝不**用宽匹配 `app.use('/api/forms/*', guard)`（会把公开的 `GET /api/forms/:slug` 也罩进去）。`GET /api/forms`（无 `:slug` 段）与 `GET /api/forms/:slug`（带段）是**两条不同路由**：前者 owner-only、后者公开——挂载时务必区分，别让列表的 guard 漏到、或公开拉取的开放被收。
+> guard 必须按**精确 method + path** 挂（沿用 §17.7 既有做法），逐条点名 owner-only 路由，**绝不**用宽匹配 `app.use('/api/forms/*', guard)`（会把公开的 `GET /api/forms/:slug` 也罩进去）。`GET /api/forms`（无 `:slug` 段）与 `GET /api/forms/:slug`（带段）是**两条不同路由**：前者 owner-only、后者公开——挂载时务必区分，别让列表的 guard 漏到、或公开拉取的开放被收。
 
 ### 21.2 `GET /api/forms` — owner 列出自己的表单
 
@@ -1336,7 +1412,7 @@ Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以�
 ```
 
 - 项形状（`FormListItem`）：`{ slug, meta, status, createdAt }`。**不**含 `fields` 全量（列表只给概览，详情走 `GET /api/forms/:slug` 或 PATCH 回显）；`submissionCount`（该表单已收集条数）列为**可选**字段——拉一次飞书才能算，实现可省略或异步补，MVP 不强求。
-- `forms`：该 owner（`owner_id='default'`）的所有表单，按 `created_at` 倒序（最新在前）或不约定顺序，由实现定。空 → `[]`（正常态）。
+- `forms`：当前登录 owner（`owner_id = c.get('session').sub`）的所有表单，按 `created_at` 倒序（最新在前）或不约定顺序，由实现定。空 → `[]`（正常态）。**绝不**把别的 owner 的表单泄漏进列表（§17.9 第 6 条）。
 - **与公开拉取的区别：** 这是 owner-only 列表，**可以**回 `status` / `createdAt`（owner 自己的私有维度）；而公开 `GET /api/forms/:slug` 仍只投影 `slug + meta + fields`（§16.4 不变）。但本列表项**仍不含**任何 owner 凭据（凭据在 `owner_config`，不在 `forms` 表）。
 
 ### 21.3 `PATCH /api/forms/:slug` — 编辑表单（至少改 status）
@@ -1354,21 +1430,21 @@ Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以�
 - **至少支持改 `status`**（`published` ↔ `closed`，配合 §20 的状态门：closed → 不再接受提交）。`meta` / `fields` 的编辑为**可在合约内一并支持**的增强；若实现支持，`fields` 须复用 §16 `parseField` 的形状校验（含 §16.2 的深度上限）。
 - **部分更新语义：** 只更新请求体里出现的键，未出现的键保持原值；空请求体 `{}` 是 no-op（仍 `200`）。`status` 只接受 `'published'` / `'closed'`（**不**允许 PATCH 成 `'draft'`——草稿是发布前态，MVP 发布即 published，无回退草稿的入口）；非法 status 值 → `400 { error }`。
 - 成功（`200`，`application/json`）：回更新后的该表单视图（含 `slug` / `meta` / `status` / `fields` / `createdAt` 的 owner 视图，或至少回 `{ slug, status }` —— 由实现定，但**必须**让 owner 能确认改动已生效）。
-- `slug` 不存在 → `404 { error }`。请求体非法 JSON / 非法 status → `400 { error }`。
+- `slug` 不存在 **或** 存在但不属于当前 owner（跨 owner）→ `404 { error }`（同码、**不暴露存在性**，不改任何行，§17.9 第 2 条；`updateForm` 的 `UPDATE ... WHERE slug=? AND owner_id=?` 影响 0 行即视为 404）。请求体非法 JSON / 非法 status → `400 { error }`。
 
 ### 21.4 `DELETE /api/forms/:slug` — 删除表单
 
 - **删除语义（硬删）：** MVP 采用**硬删**——从 `forms` 表里删掉该行。删除后该 slug 的公开拉取 / submit 都变 `404`（form 不存在）。选硬删而非软删（置 `closed`）的理由：①「关闭提交」已由 §21.3 的 `status='closed'` 覆盖，软删会与之语义重叠；②MVP 不需要回收站 / 审计留痕。`DELETE` 与「PATCH 成 closed」是**两个不同动作**：closed = 表单还在、只是停止收集；delete = 表单整个移除。
 - 成功（`200`，`application/json`）：`{ "ok": true, "slug": "f8Kq2pXa" }`（或 `204 No Content`，由实现择一；选 `200 { ok }` 便于前端确认）。
-- `slug` 不存在 → `404 { error }`（删一个不存在的 form 是错误，不是幂等成功——MVP 取严格语义；若实现想做幂等 `200` 可在合约内定，但需在 feature 里有据）。
+- `slug` 不存在 **或** 存在但不属于当前 owner（跨 owner）→ `404 { error }`（同码、**不暴露存在性**，不删任何行，§17.9 第 3 条；`deleteForm` 的 `DELETE ... WHERE slug=? AND owner_id=?` 影响 0 行即视为 404）。删一个不存在 / 不归己的 form 是错误，不是幂等成功——取严格语义。
 - **不联动删提交：** 删 `forms` 行**不**触碰 owner 飞书表里已收集的记录（数据在 owner 的飞书租户里，归 owner 自管）；本端点只删后端的表单定义行。
 
 ### 21.5 错误响应（状态码 + `{ error }`）
 
 | 端点 | 情况 | 状态码 | 响应体 |
 |---|---|---|---|
-| 三者皆 | 缺 / 坏 / 过期 token | `401` | `{ "error": "未授权" }`（§17.4，guard 拦截，不进 handler）|
-| `PATCH` / `DELETE` | `slug` 不存在 | `404` | `{ "error": "..." }` |
+| 三者皆 | 缺 / 坏 / 过期 token | `401` | `{ "error": "未授权" }`（§17.6，guard 拦截，不进 handler）|
+| `PATCH` / `DELETE` | `slug` 不存在 **或** 跨 owner（存在但不归当前 owner） | `404` | `{ "error": "..." }`（同码、不暴露存在性，§17.9 第 2/3 条）|
 | `PATCH` | 请求体非法 JSON / status 非法值 | `400` | `{ "error": "..." }` |
 
 - 错误体一律 `application/json` 的 `{ error }`。
@@ -1376,5 +1452,5 @@ Workers 运行时（workerd）没有 Node 的 `crypto.timingSafeEqual`，所以�
 
 ### 21.6 D1 影响
 
-- 复用现有 `forms` 表（schema.sql / §16.7），**无需新增列**：列表读 `slug` / `meta_json` / `status` / `created_at`；PATCH 改 `status`（及可选 `meta_json` / `schema_json`）；DELETE 删行。
+- 复用现有 `forms` 表（schema.sql / §16.7），**无需新增列**：列表读 `slug` / `meta_json` / `status` / `created_at`，且 `WHERE owner_id=?`；PATCH 改 `status`（及可选 `meta_json` / `schema_json`），`WHERE slug=? AND owner_id=?`；DELETE 删行，`WHERE slug=? AND owner_id=?`。`listForms` / `updateForm` / `deleteForm` 均加 `ownerId` 参数（owner-only handler 从 `c.get('session').sub` 取），跨 owner 的 PATCH / DELETE 因 owner 维度不匹配影响 0 行 → 404（§17.9 第 1/2/3/6 条）。
 - `status` 列已存在且取值 `'published' | 'draft' | 'closed'`；本节让 `'closed'` 第一次有了写入入口（PATCH），`'draft'` 仍只是预留态（MVP 无写入入口）。

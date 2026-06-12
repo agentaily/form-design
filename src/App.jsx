@@ -127,6 +127,7 @@ export default function App({
 function DesignerApp({
   chat = streamDesignerChat,
   login,
+  register,
   logout,
   // Integration-settings client (SPEC §12/§14). Defaults to the real configClient
   // functions inside SettingsDialog; injectable here so App-level tests can drive
@@ -589,6 +590,7 @@ function DesignerApp({
         open={loginOpen}
         loggedIn={loggedIn}
         login={login}
+        register={register}
         logout={logout}
         onClose={() => setLoginOpen(false)}
         onLoggedIn={() => setLoggedIn(true)}

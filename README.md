@@ -19,9 +19,11 @@ real design-system component, so upstream changes flow through automatically.
 
 The full product blueprint (client-side Agent loop, VFS, tool executor, iframe
 rendering, BYOK, publish/collect) lives in **[`SPEC.md`](./SPEC.md)**; day-to-day
-ops (hooks, CI/CD, Pages deploy, releases) are in **[`OPERATIONS.md`](./OPERATIONS.md)**.
-How the project is **driven** — the layered R&D paradigm (roadmap → spec/BDD/contract →
-double-loop TDD by sub agents → parallel topology) — is in **[`METHODOLOGY.md`](./METHODOLOGY.md)**.
+ops (hooks, CI/CD, Pages deploy, releases) are in **[`OPERATIONS.md`](./OPERATIONS.md)**;
+the release & DB-migration playbook (CI/CD pipeline, secrets, single→multi-tenant
+migration) is in **[`RELEASE.md`](./RELEASE.md)**. How the project is **driven** — the
+layered R&D paradigm (roadmap → spec/BDD/contract → double-loop TDD by sub agents →
+parallel topology) — is in **[`METHODOLOGY.md`](./METHODOLOGY.md)**.
 
 ## Run
 

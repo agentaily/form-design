@@ -1,28 +1,51 @@
-Feature: owner 登录解锁对话设计
+Feature: owner 注册 / 登录 / 登出
   作为表单作者(owner)
-  我想用预置的 owner 密码登录拿到 session token
-  以便 owner-only 的对话代理 /api/chat 不再被 401 拒绝
+  我想用邮箱 + 密码自助注册或登录拿到 session token
+  以便 owner-only 的端点（对话代理 /api/chat、配置、发布、数据后台）不再被 401 拒绝，
+  且我只能看见自己名下的配置与表单
+
+  背景：系统开放注册（§17）——任意邮箱 + 密码（≥ 8 位）自助注册即成 owner，注册即登录。
+  邮箱仅作唯一标识 + 登录名，本期不验证邮箱。登录框是「登录 / 注册」双模，组件从
+  @agentaily/design-system 消费。错误文案区分 409（邮箱已注册）/ 401（账号或密码错）/ 弱密码。
 
   Scenario: 未登录时对话触发登录引导
     Given 设计器处于空状态且未登录
     When 作者发起一句对话且后端返回 401
     Then 对话提示需要先登录
-    And 自动弹出 owner 登录框
+    And 自动弹出 owner 登录 / 注册框
 
-  Scenario: owner 用正确密码登录
-    Given 打开了 owner 登录框
-    When 作者输入正确密码并提交
+  Scenario: 新用户用邮箱 + 密码注册即登录
+    Given 打开了 owner 登录 / 注册框并切到注册模式
+    When 作者输入一个未注册的邮箱与一个 8 位及以上的密码并提交
     Then 登录框显示已登录
     And 顶栏账户入口标记为已登录
 
-  Scenario: 密码错误时给出可读错误
-    Given 打开了 owner 登录框
-    When 作者输入错误密码并提交
-    Then 登录框显示密码错误
+  Scenario: 注册一个已被占用的邮箱给出可读错误
+    Given 打开了 owner 登录 / 注册框并切到注册模式
+    When 作者输入一个已被注册的邮箱与密码并提交
+    Then 登录框提示该邮箱已注册
+    And 顶栏账户入口仍为未登录
+
+  Scenario: 注册时密码过弱给出可读错误
+    Given 打开了 owner 登录 / 注册框并切到注册模式
+    When 作者输入一个少于 8 位的密码并提交
+    Then 登录框提示密码过弱
+    And 顶栏账户入口仍为未登录
+
+  Scenario: 已注册用户用邮箱 + 密码登录
+    Given 打开了 owner 登录 / 注册框
+    When 作者输入正确的邮箱与密码并提交
+    Then 登录框显示已登录
+    And 顶栏账户入口标记为已登录
+
+  Scenario: 邮箱或密码错误时给出可读错误
+    Given 打开了 owner 登录 / 注册框
+    When 作者输入错误的邮箱或密码并提交
+    Then 登录框提示账号或密码错误
     And 顶栏账户入口仍为未登录
 
   Scenario: 已登录后登出
     Given 作者已登录并打开账户框
     When 作者点击登出
-    Then 登录框回到密码输入态
+    Then 登录框回到邮箱 + 密码输入态
     And 顶栏账户入口回到未登录

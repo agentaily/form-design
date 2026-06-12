@@ -180,7 +180,7 @@ npm run build && npm run preview
 
 ## 12. 后端运维（Workers + D1）
 
-后端是 `workers/` 子包（Hono on Cloudflare Workers + D1），与前端**独立部署**。规格见 SPEC.md §12–§21。
+后端是 `workers/` 子包（Hono on Cloudflare Workers + D1），与前端**独立部署**。规格见 SPEC.md §12–§21；**发布/迁移流程见 [RELEASE.md](./RELEASE.md)**。
 
 ### 速查
 
@@ -190,9 +190,9 @@ npm run build && npm run preview
 | 健康检查      | `GET /health` → 200                                                                                                |
 | CF 账户       | yarnbcoder@gmail.com（account_id `e6ce8ba3…`，与前端 Pages 同账户）                                                |
 | Worker 名     | `form-design-api`（workers.dev 子域名 `agentaily`）                                                                |
-| D1 数据库     | `form-design-db`（id `9666fb73-…`，APAC，表 `owner_config` / `forms`）                                             |
+| D1 数据库     | `form-design-db`（id `9666fb73-…`，APAC，表 `users` / `owner_config` / `forms`）                                   |
 | 部署凭据      | vault `credentials/cloudflare-yarnbcoder-workers-deploy`（Workers Scripts:Edit + D1:Edit + Account Settings:Read） |
-| 运行时 secret | vault `credentials/form-design-workers-runtime`（`CONFIG_KEY` / `AUTH_SECRET` / `OWNER_PASSWORD`）                 |
+| 运行时 secret | vault `credentials/form-design-workers-runtime`（`CONFIG_KEY` / `AUTH_SECRET`；`OWNER_PASSWORD` 已废弃）           |
 | 资源台账      | vault `resources/cloudflare/worker/form-design-api`、`resources/cloudflare/d1/form-design-db`                      |
 
 ### CI/CD
@@ -217,23 +217,23 @@ npx wrangler tail                                               # 实时日志
 
 ### Secret 管理
 
-三个运行时 secret 用 `wrangler secret put`（**需 Worker 已部署存在**），值从 vault 经 stdin 灌入、不回显：
+运行时 secret 用 `wrangler secret put`（**需 Worker 已部署存在**），值从 vault 经 stdin 灌入、不回显：
 
 ```bash
 jq -r .values.config_key ~/.claude/skills/vault/data/credentials/form-design-workers-runtime.json \
   | npx wrangler secret put CONFIG_KEY
-# AUTH_SECRET / OWNER_PASSWORD 同理（vault key: auth_secret / owner_password）
+# AUTH_SECRET 同理（vault key: auth_secret）
 ```
 
 - `CONFIG_KEY`：AES-GCM 主密钥，加密 owner 的 DeepSeek/飞书凭据落 D1。**轮换会使已存密文无法解密**——换前需让 owner 重填配置。
 - `AUTH_SECRET`：session JWT（HS256）签名密钥。轮换会让所有已签发 token 失效（owner 需重新登录）。
-- `OWNER_PASSWORD`：owner 后台登录密码。
+- ~~`OWNER_PASSWORD`~~：**已废弃**（多用户改造后不再用于登录，每个 owner 是 `users` 表里的真实行）。可保留不管或 `wrangler secret delete OWNER_PASSWORD` 清理。详见 [RELEASE.md](./RELEASE.md) §4。
 
 ### 故障排查
 
-| 症状                                  | 多半是                       | 处理                                                                                  |
-| ------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------- |
-| 部署报 `workers.dev subdomain` 未注册 | 账户首次用 Workers           | dashboard 打开 Workers & Pages 落地页自动建，或 `PUT /accounts/:id/workers/subdomain` |
-| `secret put` 报 script not found      | Worker 还没部署              | 先 `wrangler deploy` 再设 secret                                                      |
-| owner-only 端点 401                   | 缺/过期 JWT                  | 先 `POST /api/auth/login` 拿 token，再带 `Authorization: Bearer`                      |
-| 提交不写飞书                          | 表单未发布 / 必填缺 / 配置缺 | 查表单 status、必填项、owner `/api/config`（app_token/table_id）                      |
+| 症状                                  | 多半是                       | 处理                                                                                                                 |
+| ------------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 部署报 `workers.dev subdomain` 未注册 | 账户首次用 Workers           | dashboard 打开 Workers & Pages 落地页自动建，或 `PUT /accounts/:id/workers/subdomain`                                |
+| `secret put` 报 script not found      | Worker 还没部署              | 先 `wrangler deploy` 再设 secret                                                                                     |
+| owner-only 端点 401                   | 缺/过期 JWT                  | 先 `POST /api/auth/login`（`{email,password}`）拿 token，再带 `Authorization: Bearer`；无账号先 `/api/auth/register` |
+| 提交不写飞书                          | 表单未发布 / 必填缺 / 配置缺 | 查表单 status、必填项、owner `/api/config`（app_token/table_id）                                                     |

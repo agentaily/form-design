@@ -1,18 +1,43 @@
 import { test, expect } from "@playwright/test";
 
-// End-to-end of the owner login flow (SPEC §17) in a real browser. We intercept
-// POST /api/auth/login so the flow is deterministic and needs no backend: a
-// matching password returns a token (→ "已登录"), anything else 401s (→ error).
-async function mockLogin(page, { password = "open-sesame" } = {}) {
+// End-to-end of the owner register / login flow (SPEC §17, open-registration
+// multi-user) in a real browser. We intercept POST /api/auth/register and
+// POST /api/auth/login so the flow is deterministic and needs no backend:
+//   - register: a fresh email → 201 { token }; an already-"taken" email → 409.
+//   - login:    the registered email + password → 200 { token }; anything else
+//               → a UNIFIED 401 (the backend never reveals 邮箱不存在 vs 密码错, §17.3).
+const KNOWN_EMAIL = "owner@example.com";
+const KNOWN_PASSWORD = "open-sesame-8chars";
+const TAKEN_EMAIL = "taken@example.com";
+
+async function mockAuth(page) {
+  await page.route("**/api/auth/register", async (route) => {
+    const body = JSON.parse(route.request().postData() || "{}");
+    if (body.email === TAKEN_EMAIL) {
+      await route.fulfill({
+        status: 409,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ error: "email already registered" }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 201,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "fake.jwt.token" }),
+    });
+  });
+
   await page.route("**/api/auth/login", async (route) => {
     const body = JSON.parse(route.request().postData() || "{}");
-    if (body.password === password) {
+    if (body.email === KNOWN_EMAIL && body.password === KNOWN_PASSWORD) {
       await route.fulfill({
         status: 200,
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ token: "fake.jwt.token" }),
       });
     } else {
+      // Unified 401 — same response for 邮箱不存在 AND 密码错 (anti-enumeration, §17.3).
       await route.fulfill({
         status: 401,
         headers: { "content-type": "application/json" },
@@ -22,31 +47,57 @@ async function mockLogin(page, { password = "open-sesame" } = {}) {
   });
 }
 
-test.describe("Agentaily Forms · owner 登录", () => {
+test.describe("Agentaily Forms · owner 注册 / 登录", () => {
   test.beforeEach(async ({ page }) => {
-    await mockLogin(page);
+    await mockAuth(page);
     await page.goto("/");
   });
 
-  test("wrong password errors, correct password logs in", async ({ page }) => {
-    // open the account dialog from the header
+  test("wrong credentials error, correct credentials log in, then logout", async ({ page }) => {
+    // Open the account dialog from the header (dual-mode 登录 / 注册, §17).
     await page.getByRole("button", { name: "登录账户" }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(page.getByText("OWNER 登录 / 注册")).toBeVisible();
 
-    // wrong password → readable error, still logged out
-    await page.getByPlaceholder("输入 owner 登录密码").fill("nope");
+    // Wrong email/password → the unified, anti-enumeration error, still logged out.
+    await page.getByPlaceholder("owner@example.com").fill(KNOWN_EMAIL);
+    await page.getByPlaceholder("输入登录密码").fill("definitely-wrong");
     await page.getByRole("button", { name: "登录", exact: true }).click();
-    await expect(page.getByText("密码错误，请重试。")).toBeVisible();
+    await expect(page.getByText("账号或密码错误，请重试。")).toBeVisible();
 
-    // correct password → logged-in panel + header marked logged in
-    await page.getByPlaceholder("输入 owner 登录密码").fill("open-sesame");
+    // Correct email + password → logged-in panel + header marked logged in.
+    await page.getByPlaceholder("owner@example.com").fill(KNOWN_EMAIL);
+    await page.getByPlaceholder("输入登录密码").fill(KNOWN_PASSWORD);
     await page.getByRole("button", { name: "登录", exact: true }).click();
     await expect(page.getByText("已登录")).toBeVisible();
     await expect(page.getByRole("button", { name: "账户已登录" })).toBeVisible();
 
-    // logout returns to the password form
+    // Logout returns to the dual-mode form (email + password inputs visible again).
     await page.getByRole("button", { name: "登出" }).click();
-    await expect(page.getByPlaceholder("输入 owner 登录密码")).toBeVisible();
+    await expect(page.getByPlaceholder("owner@example.com")).toBeVisible();
+    await expect(page.getByPlaceholder("输入登录密码")).toBeVisible();
     await expect(page.getByRole("button", { name: "登录账户" })).toBeVisible();
+  });
+
+  test("new email self-registers (注册即登录); a taken email errors", async ({ page }) => {
+    await page.getByRole("button", { name: "登录账户" }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+
+    // Switch to 注册 mode.
+    await page.getByRole("tab", { name: "注册" }).click();
+
+    // A taken email → 409 readable error, still logged out.
+    await page.getByPlaceholder("owner@example.com").fill(TAKEN_EMAIL);
+    await page.getByPlaceholder("设置一个至少 8 位的密码").fill(KNOWN_PASSWORD);
+    await page.getByRole("button", { name: "注册", exact: true }).click();
+    await expect(page.getByText("该邮箱已注册，请直接登录。")).toBeVisible();
+    await expect(page.getByRole("button", { name: "登录账户" })).toBeVisible();
+
+    // A fresh email + ≥ 8-char password → 201 注册即登录 → logged-in panel.
+    await page.getByPlaceholder("owner@example.com").fill("brand-new@example.com");
+    await page.getByPlaceholder("设置一个至少 8 位的密码").fill(KNOWN_PASSWORD);
+    await page.getByRole("button", { name: "注册", exact: true }).click();
+    await expect(page.getByText("已登录")).toBeVisible();
+    await expect(page.getByRole("button", { name: "账户已登录" })).toBeVisible();
   });
 });

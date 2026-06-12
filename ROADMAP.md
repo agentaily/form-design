@@ -36,6 +36,7 @@
 ## 🚧 进行中
 
 - 后端核心已补严完整 **且已部署上线**；下一步是待办里的 **前端接入** 与 **飞书端到端**
+- **多租户 / 开放注册（实现体 + 单测已落，outer-loop 待 re-align）**：从单 owner（`OWNER_PASSWORD` + `owner_id='default'`）改造为开放注册的多用户——邮箱 + 密码自助注册即成 owner（注册即登录、先不验证邮箱），各自 BYOK 配置 / 表单 / 提交严格隔离。头等约束是**横向越权防护**（owner-only 的按 slug 操作 `WHERE ... AND owner_id=?`，跨 owner → 404 不暴露存在性；公开 submit 按 slug 反查 form 所属 owner 写其飞书）。**已实现**：`password.ts`（PBKDF2-HMAC-SHA256 + per-user salt + 常量时间比对）、`users.ts`（createUser/findUserByEmail/authenticateUser，含假 hash 防时序枚举）、`getFormOwner`、`index.ts` 接线（公开 `POST /api/auth/register` + 改 `POST /api/auth/login` 查 users 表、所有 owner-only handler `ownerId=session.sub` 贯穿、submissions 归属门 404、submit 反查 form owner）、前端 `LoginDialog` 双模登录/注册（DS Tabs）。inner-loop 单测全绿（`password.test.ts` / `users.test.ts` / `tenant-isolation.test.ts` + 前端 `auth.test.js`）。**待 outer-tester**：把 `*-api.test.ts` + `test/helpers.ts` 的 login 从 `OWNER_PASSWORD` re-align 成注册/登录，并实现 `tenant-isolation.feature` / `auth.feature` / `owner-login.feature` 场景。详见 SPEC §17。
 
 ---
 
@@ -44,7 +45,8 @@
 ### 后端
 
 - 绑自定义域名 `api.form-design.agentaily.com`（可选；现走 `*.workers.dev` 默认域）
-- 多 owner / 注册（现恒单 owner `default`）
+- 多 owner / 注册 —— 已挪到「进行中」（spec 就绪，待实现，详见 SPEC §17）
+- 邮箱验证（`email_verified` 已预留恒 0、发信钩子预留不启用）+ 改密 / 找回密码
 - 数据后台增强：聚合统计、分页、CSV 导出
 - 公开端点限流 / 防刷
 

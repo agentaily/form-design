@@ -1,10 +1,16 @@
-// forms.ts — type contracts for 表单发布 + 公开填写拉取.
-// See SPEC.md §16 (后端 · 表单发布 + 公开填写).
+// forms.ts — type contracts for 表单发布 + 公开填写拉取 + owner 管理 CRUD.
+// See SPEC.md §16 (发布 / 公开拉取), §18 (看提交), §20 (提交校验), §21 (管理 CRUD).
 //
 // This module closes the 设计 → 发布 → 公开填写 → 写飞书 loop on the backend:
-//   - 发布表单   POST /api/forms        — owner 提交表单定义 → 生成 slug + 存 D1 → { slug }
-//   - 公开拉取   GET  /api/forms/:slug  — 答题者无鉴权拉取 meta + fields 用于渲染填写页
-//   - submit 关联 POST /api/submit      — body 增加 formSlug，先校验 form 存在再写飞书
+//   - 发布表单   POST /api/forms        — owner 提交表单定义 → 生成 slug + 存 D1（owner_id=当前 owner）→ { slug }
+//   - 公开拉取   GET  /api/forms/:slug  — 答题者无鉴权拉取 meta + fields 用于渲染填写页（按 slug，无 owner 维度）
+//   - submit 关联 POST /api/submit      — body 增加 formSlug，先校验 form 存在 → getFormOwner 反查所属 owner 再写其飞书
+//
+// 多租户 + 横向越权（§17.9，头等约束）：forms.owner_id 是发布它的 owner 的真实 user id
+// （§17.11），slug 仍全局唯一（作主键）。owner-only 的按 slug 操作——updateForm / deleteForm
+// / 看提交 / 列表——都**必须**带 ownerId 并 `WHERE ... AND owner_id=?` 过滤；跨 owner（slug
+// 存在但不归当前 owner）→ route 回 404（同码、不暴露存在性，§17.9 第 2/3/4 条）。公开 submit
+// 没有「当前 owner」，靠 getFormOwner(db, slug) 按 slug 反查 form 所属 owner（§17.9 第 5 条）。
 //
 // 安全核心（§16.4）：公开拉取走的是 PublicForm 视图，它只含 meta + fields；它与
 // owner_config（DeepSeek key / 飞书凭据）在不同的表、不同的查询路径，PublicForm 的
@@ -15,8 +21,9 @@
 // and the D1 read/write functions are the outer-loop seam:
 //   - parsePublishInput: pure shape validation (meta + fields 对齐 §3.2 Field[]),
 //   - generateSlug:      pure slug 生成（公开、不可猜、URL 安全）,
-//   - saveForm:          insert 一行 forms → { slug }（owner_id 恒 'default'）,
-//   - getPublicForm:     按 slug 读一行 → PublicForm | null（不存在 → null）.
+//   - saveForm:          insert 一行 forms → { slug }（owner_id=当前 owner）,
+//   - getPublicForm:     按 slug 读一行 → PublicForm | null（不存在 → null）,
+//   - getFormOwner:      按 slug 反查 owner_id → string | null（公开 submit 路由用，§17.9 第 5 条）.
 // The Hono routes (parse → save → 201 { slug }；读 → 200 / 404) sit on top in
 // index.ts and are exercised by the outer loop via SELF.fetch.
 
@@ -370,27 +377,38 @@ export function generateSlug(): string {
   return slug;
 }
 
-/** MVP 单 owner：forms.owner_id 恒为 'default'（同 owner_config，§16.3）。 */
-const DEFAULT_OWNER_ID = "default";
-/** MVP 发布即 'published'（§16.7）。 */
+/**
+ * 迁移期兜底 owner id（'default'）。多租户改造后**不再**写进新发布的表单——`saveForm`
+ * 写传入的 `ownerId`（真实 user id）。保留此常量仅为迁移脚本 `002-migrate-default-owner.sql`
+ * 的字面量参照（把现有 owner_id='default' 的表单迁给首个注册账号，§17 引言）。`listForms`
+ * 的默认参数也用它做兜底，但 owner-only handler 永远传真实 `ownerId`。
+ */
+const LEGACY_DEFAULT_OWNER_ID = "default";
+/** 发布即 'published'（§16.7）。 */
 const PUBLISHED_STATUS: FormStatus = "published";
 /** slug 主键冲突时的最大重试次数（高熵下几乎永不触发）。 */
 const MAX_SLUG_ATTEMPTS = 5;
 
 /**
- * 把一份发布输入落成 forms 表的一行并返回其 slug（§16.2、§16.3）。
+ * 把一份发布输入落成 forms 表的一行并返回其 slug（§16.2、§16.3、§17.9 第 1 条）。
  *
- * - owner_id 恒为 `'default'`（MVP 单 owner，见 §16.3 / schema.sql）。
- * - slug 由 {@link generateSlug} 生成；`meta` / `fields` 分别序列化进 `meta_json` /
+ * - `ownerId` 是发布它的 owner 的真实 user id（owner-only handler 从 `c.get('session').sub`
+ *   取，§17.5）——写进 `owner_id`，使这张表归属该 owner；不再恒 `'default'`。
+ * - slug 由 {@link generateSlug} 生成（全局唯一）；`meta` / `fields` 分别序列化进 `meta_json` /
  *   `schema_json`；`status` 置 `'published'`；`created_at` 为当前 ISO-8601。
  * - slug 是主键：插入冲突（极罕见）则重新生成再插，至多 {@link MAX_SLUG_ATTEMPTS} 次。
  * - 返回 `{ slug }`（route 据此回 `201 { slug }`，可附 `url`）。
  *
  * @param db D1 binding（同 owner_config 所用的 `DB`）。
+ * @param ownerId 发布它的 owner 的真实 user id（§17.9）。
  * @param input 已由 {@link parsePublishInput} 校验过的发布输入。
  * @returns `{ slug }`。
  */
-export async function saveForm(db: D1Database, input: PublishFormInput): Promise<{ slug: string }> {
+export async function saveForm(
+  db: D1Database,
+  ownerId: string,
+  input: PublishFormInput,
+): Promise<{ slug: string }> {
   const metaJson = JSON.stringify(input.meta);
   const schemaJson = JSON.stringify(input.fields);
   const createdAt = new Date().toISOString();
@@ -404,9 +422,7 @@ export async function saveForm(db: D1Database, input: PublishFormInput): Promise
   for (let attempt = 0; attempt < MAX_SLUG_ATTEMPTS; attempt++) {
     const slug = generateSlug();
     try {
-      await stmt
-        .bind(slug, DEFAULT_OWNER_ID, metaJson, schemaJson, PUBLISHED_STATUS, createdAt)
-        .run();
+      await stmt.bind(slug, ownerId, metaJson, schemaJson, PUBLISHED_STATUS, createdAt).run();
       return { slug };
     } catch (err) {
       // A PRIMARY KEY collision means the random slug已存在 → regenerate + retry.
@@ -480,6 +496,40 @@ export async function formExists(db: D1Database, slug: string): Promise<boolean>
     .bind(slug)
     .first<{ one: number }>();
   return row !== null;
+}
+
+/**
+ * 按 slug **反查该 form 所属 owner 的 `owner_id`**（§16.5 / §17.9 第 5 条）——
+ * 公开 `POST /api/submit` 路由到正确 owner 的关键。
+ *
+ * `POST /api/submit` 是公开端点、没有「当前登录 owner」：`formExists` 通过后用本函数拿到
+ * 该 form 的 `owner_id`，再用它调 `getOwnerConfig(db, key, ownerId)` 读**那个 owner**
+ * （form 所属 owner）的飞书配置写入——确保陌生人匿名提交某 slug，落进这张表所属那个 owner
+ * 的飞书租户，而非固定 / 任意 owner。
+ *
+ * - 命中：返回该行的 `owner_id`（真实 user id）。
+ * - 未命中（slug 不存在）：返回 `null`（流程里 `formExists` 通常已先挡掉不存在的 slug）。
+ *
+ * 本函数也可被 owner-only 端点（看提交 §18、PATCH/DELETE §21）复用作归属校验的探针
+ * （`getFormOwner(db, slug) === ownerId`），由实现在合约内定（亦可直接用带 owner 维度的
+ * `WHERE slug=? AND owner_id=?` 查询，二者皆满足「跨 owner → 404、不暴露存在性」）。
+ *
+ * @param db D1 binding。
+ * @param slug 来自 submit 请求体的 `formSlug`（或 owner-only 端点的 `:slug`）。
+ * @returns 该 form 的 `owner_id`，或 `null`（不存在）。
+ */
+export async function getFormOwner(db: D1Database, slug: string): Promise<string | null> {
+  // Reverse-lookup the owning owner_id by slug. Only the owner_id column is read —
+  // the public submit path uses it to route the answer to THAT owner's Feishu
+  // tenant (§17.9 第 5 条); owner-only paths may use it as an ownership probe.
+  const row = await db
+    .prepare(`SELECT owner_id FROM forms WHERE slug = ?`)
+    .bind(slug)
+    .first<{ owner_id: string }>();
+  if (row === null) {
+    return null;
+  }
+  return row.owner_id;
 }
 
 // ---------------------------------------------------------------------------
@@ -613,20 +663,21 @@ export interface DeleteFormResult {
 }
 
 /**
- * 列出某 owner 的所有表单（§21.2）——owner-only。
+ * 列出**当前登录 owner** 的所有表单（§21.2 / §17.9 第 6 条）——owner-only。
  *
- * - MVP 单 owner：`owner_id` 恒 `'default'`（{@link DEFAULT_OWNER_ID}），列表即该 owner 全部。
+ * - `ownerId` 是当前登录 owner 的真实 user id（owner-only handler 从 `c.get('session').sub`
+ *   取，§17.5）；`WHERE owner_id=?` 只列该 owner 的表单，**绝不**把别的 owner 的表单泄漏进列表。
  * - 只投影 `slug` / `meta_json` / `status` / `created_at`，组装成 {@link FormListItem}[]；
  *   **不**读 `schema_json` 全量（列表不带 fields），更不碰 owner_config（§21.2）。
  * - 排序（按 created_at 倒序 / 不约定）由实现定。空 → `[]`。
  *
  * @param db D1 binding。
- * @param ownerId owner 维度键（MVP 恒 'default'，可由实现默认填）。
+ * @param ownerId 当前 owner 的真实 user id（隔离键，§17.9）。
  * @returns 该 owner 的表单概览数组（route 据此组 `{ forms, count }`）。
  */
 export async function listForms(
   db: D1Database,
-  ownerId: string = DEFAULT_OWNER_ID,
+  ownerId: string = LEGACY_DEFAULT_OWNER_ID,
 ): Promise<FormListItem[]> {
   // 只投影列表字段：slug / meta_json / status / created_at。绝不 SELECT schema_json
   // （列表不带 fields 全量），更不碰 owner_config —— 凭据 / owner_id 永不进列表（§21.2）。
@@ -646,21 +697,27 @@ export async function listForms(
 }
 
 /**
- * 部分更新一份表单（§21.3）——owner-only。
+ * 部分更新一份表单（§21.3 / §17.9 第 2 条）——owner-only，**带横向越权防护**。
  *
+ * - `ownerId` 是当前登录 owner 的真实 user id（§17.5）；所有 `UPDATE` / 读回都
+ *   `WHERE slug=? AND owner_id=?` 过滤——只能改**自己名下**的表单。
  * - 只更新 `input` 里出现的键（`status` / `meta` / `fields`），未出现的保持原值；空 `input`
  *   为 no-op。`status` 只允许 `published` / `closed`（非法值由 route 在解析时挡成 400）。
- * - 命中并更新成功：返回更新后的 {@link UpdatedForm}。
- * - slug 不存在：返回 `null`（route → `404 { error }`）。
+ * - 命中（slug 存在**且**归当前 owner）并更新成功：返回更新后的 {@link UpdatedForm}。
+ * - slug 不存在 **或** 存在但不属于当前 owner（跨 owner）：返回 `null`（route → `404 { error }`，
+ *   同码、**不暴露存在性**，不改任何行，§17.9 第 2 条）。`UPDATE ... WHERE slug=? AND owner_id=?`
+ *   影响 0 行即视为 null。
  *
  * @param db D1 binding。
  * @param slug 目标表单 slug。
+ * @param ownerId 当前 owner 的真实 user id（隔离键，§17.9）。
  * @param input 部分更新输入（已由 route 形状校验）。
- * @returns 更新后的视图，或 `null`（不存在）。
+ * @returns 更新后的视图，或 `null`（不存在 / 跨 owner）。
  */
 export async function updateForm(
   db: D1Database,
   slug: string,
+  ownerId: string,
   input: UpdateFormInput,
 ): Promise<UpdatedForm | null> {
   // 只更新 input 里出现的键；未出现的保持原值。空 input → 跳过 UPDATE（no-op），直接读回。
@@ -680,21 +737,25 @@ export async function updateForm(
   }
 
   if (sets.length > 0) {
+    // 横向越权防护（§17.9 第 2 条）：WHERE 必带 AND owner_id=?——跨 owner（slug 存在但不归
+    // 当前 owner）的 UPDATE 影响 0 行 → null → route 404，不改任何行、不暴露存在性。
     const result = await db
-      .prepare(`UPDATE forms SET ${sets.join(", ")} WHERE slug = ?`)
-      .bind(...binds, slug)
+      .prepare(`UPDATE forms SET ${sets.join(", ")} WHERE slug = ? AND owner_id = ?`)
+      .bind(...binds, slug, ownerId)
       .run();
-    // 无行被更新 → slug 不存在 → null（route → 404）。
+    // 无行被更新 → slug 不存在或不归当前 owner → null（route → 404）。
     if (result.meta.changes === 0) {
       return null;
     }
   }
 
-  // 读回更新后的 owner 视图（含 fields / status / createdAt）。空 input 的 no-op 也走这里，
-  // 若 slug 不存在则读不到 → null。绝不读 / 回 owner_config 或任何凭据。
+  // 读回更新后的 owner 视图（含 fields / status / createdAt），同样带 owner 维度——空 input 的
+  // no-op 也走这里：slug 不存在 / 跨 owner 都读不到 → null。绝不读 / 回 owner_config 或任何凭据。
   const row = await db
-    .prepare(`SELECT meta_json, schema_json, status, created_at FROM forms WHERE slug = ?`)
-    .bind(slug)
+    .prepare(
+      `SELECT meta_json, schema_json, status, created_at FROM forms WHERE slug = ? AND owner_id = ?`,
+    )
+    .bind(slug, ownerId)
     .first<{ meta_json: string; schema_json: string; status: string; created_at: string }>();
   if (row === null) {
     return null;
@@ -775,19 +836,27 @@ export function parseUpdateInput(body: unknown): UpdateFormInput {
 }
 
 /**
- * 硬删一份表单（§21.4）——owner-only。从 `forms` 表删掉该 slug 行；删后公开拉取 / submit
- * 该 slug 都变 404。**不**联动删 owner 飞书表里已收集的记录（§21.4）。
+ * 硬删一份表单（§21.4 / §17.9 第 3 条）——owner-only，**带横向越权防护**。从 `forms` 表删掉
+ * 该 slug 行；删后公开拉取 / submit 该 slug 都变 404。**不**联动删 owner 飞书表里已收集的记录（§21.4）。
  *
- * - 命中并删除：返回 `true`。
- * - slug 不存在：返回 `false`（route → `404 { error }`，MVP 取严格语义，§21.4）。
+ * - `ownerId` 是当前登录 owner 的真实 user id（§17.5）；`DELETE ... WHERE slug=? AND owner_id=?`
+ *   只能删**自己名下**的表单。
+ * - 命中（slug 存在**且**归当前 owner）并删除：返回 `true`。
+ * - slug 不存在 **或** 存在但不属于当前 owner（跨 owner）：返回 `false`（route → `404 { error }`，
+ *   同码、**不暴露存在性**，不删任何行，严格语义，§17.9 第 3 条）。
  *
  * @param db D1 binding。
  * @param slug 目标表单 slug。
+ * @param ownerId 当前 owner 的真实 user id（隔离键，§17.9）。
  * @returns 是否删除了一行。
  */
-export async function deleteForm(db: D1Database, slug: string): Promise<boolean> {
-  // 硬删（§21.4）：从 forms 表删掉该 slug 行。不联动删 owner 飞书表里已收集的记录。
-  const result = await db.prepare(`DELETE FROM forms WHERE slug = ?`).bind(slug).run();
-  // 删了一行 → true；slug 不存在（0 行受影响）→ false（route → 404，严格语义）。
+export async function deleteForm(db: D1Database, slug: string, ownerId: string): Promise<boolean> {
+  // 硬删（§21.4）+ 横向越权防护（§17.9 第 3 条）：WHERE 必带 AND owner_id=?——跨 owner 的
+  // DELETE 影响 0 行 → false → route 404，不删任何行、不暴露存在性。不联动删飞书已收集记录。
+  const result = await db
+    .prepare(`DELETE FROM forms WHERE slug = ? AND owner_id = ?`)
+    .bind(slug, ownerId)
+    .run();
+  // 删了一行 → true；slug 不存在或不归当前 owner（0 行受影响）→ false（route → 404，严格语义）。
   return result.meta.changes > 0;
 }

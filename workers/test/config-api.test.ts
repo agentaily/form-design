@@ -141,8 +141,11 @@ describe("owner config API (workers/features/owner-config.feature)", () => {
 
     // Defense in depth: the ciphertext/plaintext must not have leaked into D1's
     // plaintext columns either — the stored secret columns hold cipher, not the key.
+    // owner_id is now the registered owner's real user id (not 'default'); this
+    // suite logs in exactly one owner per scenario, so the single owner_config row
+    // is theirs — we read it back without pinning a literal owner_id.
     const row = await testEnv.DB.prepare(
-      "SELECT deepseek_key_cipher, deepseek_model, feishu_secret_cipher FROM owner_config WHERE owner_id = 'default'",
+      "SELECT deepseek_key_cipher, deepseek_model, feishu_secret_cipher FROM owner_config",
     ).first<{
       deepseek_key_cipher: string;
       deepseek_model: string;

@@ -3,10 +3,13 @@ Feature: 提交写飞书多维表格 POST /api/submit 答题落库
   我想让答题者在公开填写页提交的作答写进我自己的飞书多维表格
   以便用我自己的飞书租户收集数据，且我的 app secret 与 tenant_access_token 永不出现在客户端
 
-  背景：owner 的飞书凭据已由集成配置加密存入 D1，Worker 在内部解密后先用
-  app_id+app_secret 换 tenant_access_token，再用该 token 向「多维表格新增记录」端点
-  写一条记录。answers 的 label 直接作为飞书 fields 的列名、value 原样传（多选为字符串数组）。
-  app secret 与 tenant_access_token 全程留在 Worker 内，绝不出现在任何响应、头或日志里。
+  背景：POST /api/submit 是公开端点、没有「当前登录 owner」。多用户（§17.9 第 5 条）：route
+  按 formSlug 用 getFormOwner 反查该 form 所属 owner，再读**那个 owner**的飞书凭据写入——
+  作答落进 slug 所属 owner 的飞书租户，而非固定 / 任意 owner（路由到正确 owner 在
+  tenant-isolation.feature 覆盖）。Worker 在内部解密后先用 app_id+app_secret 换
+  tenant_access_token，再用该 token 向「多维表格新增记录」端点写一条记录。answers 的 label
+  直接作为飞书 fields 的列名、value 原样传（多选为字符串数组）。app secret 与
+  tenant_access_token 全程留在 Worker 内，绝不出现在任何响应、头或日志里。
   自 §16.5 起，/api/submit 的 body 增加必填的 formSlug：route 先校验 form 存在
   （形状级校验过后），再走以下飞书写入流程；本节 §15 的写入 / 错误 / 不泄漏行为不变，
   只是每个场景多了「已发布表单 + 带合法 slug 提交」这一前置门。

@@ -27,6 +27,18 @@ import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 const BASE = "https://api.local";
 
+/** Decode a JWT's `sub` claim (no verification — just read the payload's owner id). */
+function decodeJwtSub(token: string): string {
+  const payload = JSON.parse(
+    new TextDecoder().decode(
+      Uint8Array.from(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")), (c) =>
+        c.charCodeAt(0),
+      ),
+    ),
+  ) as { sub?: string };
+  return payload.sub ?? "";
+}
+
 // Concrete owner credential fixtures — distinctive + long so that, were any to
 // ever leak into the PUBLIC form-fetch response, a substring scan catches it
 // unmistakably. These are written into D1 via POST /api/config (encrypted at
@@ -289,8 +301,13 @@ describe("forms POST /api/forms + GET /api/forms/:slug (workers/features/form-pu
       .first<{ slug: string; owner_id: string; meta_json: string; schema_json: string }>();
     expect(row).not.toBeNull();
     expect(row?.slug).toBe(body.slug);
-    // owner_id 由后端恒填 'default'（§16.3）。
-    expect(row?.owner_id).toBe("default");
+    // 多用户改造后 owner_id 是发布它的 owner 的真实 user id（session.sub，§17.9 第 1 条），
+    // 不再恒填 'default'：它应是发布所用 token 的 sub（一个非空 UUID）。
+    expect(row?.owner_id).toBe(decodeJwtSub(token));
+    expect(row?.owner_id).not.toBe("default");
+    expect(row?.owner_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
     expect(JSON.parse(row!.meta_json)).toMatchObject({ title: FORM_META.title });
     expect(JSON.parse(row!.schema_json)).toHaveLength(FORM_FIELDS.length);
   });
