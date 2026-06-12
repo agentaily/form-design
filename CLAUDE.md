@@ -13,6 +13,8 @@ README(怎么跑/接线)· [SPEC.md](./SPEC.md)(产品+架构)· [ROADMAP.md](./
   每任务一 worktree + 一终端)。
 - **只在用户要求时** commit / push。commit 与 PR 标题用 conventional commits 带 scope,
   与现有历史一致(`feat(frontend): …` / `fix(e2e): …` / `ci(deploy): …`)。
+- **合并守 CI gate**:含源码的 PR **等 CI 绿了再合**(或 `gh pr merge --auto` 让它自动等);
+  只有**纯文档 / 紧急修复**才用 `--admin` 绕过 base 分支保护策略,并在汇报里讲明绕过了什么。
 - 谁 ship 或改变一个能力,**同一次改动**更新 [ROADMAP.md](./ROADMAP.md);谁改变研发流程本身,
   更新 [METHODOLOGY.md](./METHODOLOGY.md)。文档不复述,链 SPEC / agents/README。
 
