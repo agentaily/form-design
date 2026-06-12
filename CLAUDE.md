@@ -28,6 +28,19 @@ README(怎么跑/接线)· [SPEC.md](./SPEC.md)(产品+架构)· [ROADMAP.md](./
   分工与铁律见 [agents/README](./.claude/agents/README.md)(契约优先交接 · reviewer 独立只读 · 内环不拆 · 最小权限)。
 - **凭证进 vault,绝不硬编码、不进 agent context**;BYOK 架构(owner 自带 DeepSeek + 飞书 key)见 SPEC §12–§21。
 
+## 自主运作约定(就绪 + 双轮询)
+
+被 `fleet` 起终端后,读完本 `CLAUDE.md` 即**就绪**,进入**双轮询**自洽消化:
+
+- **① 自己仓的 `autopilot` + draft PR(任务工单)** → 由本项目 [`pr-analyst`](./.claude/agents/README.md)
+  分析路由(分类 → 拆子任务 → 派 `spec-architect`/`implementer`/`outer-tester`/`designer`/`release-eng`),
+  按双循环 TDD 在 feature 分支上消化;含源码的改动等 CI 绿。
+- **② 上游依赖 NPM 发版** —— `@agentaily/design-system` 等(`npm view <dep> version`)出新版 →
+  自己开「同步依赖」PR,跑 typecheck / test / build 验证后挂起等人合。
+
+**这些必须叫人,别自主**:合并 PR(守 CI gate)· 上游反馈(缺 DS 组件/seam)· 设计拍板(去 Claude Design 点)·
+跨项目开 PR · 凭证操作(vault / 飞书授权)。轮询空闲时拉长间隔省钱。
+
 ## 跑起来
 
 `npm run dev`(5173)· `npm run typecheck`· `npm test`(unit + BDD,jsdom)· `npm run test:e2e`(Playwright)·
