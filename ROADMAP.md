@@ -31,6 +31,7 @@
 - **多租户 / 开放注册（PR #22，已上线）**：单 owner（`OWNER_PASSWORD` + `owner_id='default'`）→ 开放注册多用户——邮箱 + 密码自助注册即成 owner（注册即登录），各自 BYOK 配置 / 表单 / 提交严格隔离。头等约束**横向越权防护**（owner-only 按 slug 操作 `WHERE … AND owner_id=?`，跨 owner → 404 不暴露存在性；公开 submit 按 slug 反查 form 所属 owner 写其飞书）。`password.ts`（PBKDF2 + per-user salt + 常量时间比对 + 防时序枚举）/ `users.ts` / `getFormOwner` / `index.ts` 接线 + 前端 `LoginDialog` 双模。inner + outer 全绿（`tenant-isolation.test.ts` / `tenant-isolation-api.test.ts` 管越权 · `auth-api.test.ts` 走 register/login · `tests/integration/owner-login.spec.jsx`）。详见 SPEC §17。
 - **邮箱验证 + 找回密码（PR #26 + #28，2026-06-12 已上线 + 生产端到端验证）**：真实事务邮件走 **Resend**（纯 HTTP、无 SDK，发件域 `mail.agentaily.com` 已验证；`RESEND_API_KEY` 进 Worker secret）。**邮箱软验证**（注册即 best-effort 发验证信、点链接置 `email_verified=1`、不门禁功能；注册去重改**未验证可覆盖 / 已验证锁死**防占座）+ **找回密码**（发起永远 200 防枚举、确认凭一次性 reset token）+ `GET /api/auth/me`（banner 跨刷新拿真状态）。一次性 token 只存 SHA-256、单次、限时（verify 24h / reset 1h，新表 `auth_tokens`）。前端「忘记密码」子态 + `/reset-password` / `/verify-email` 落地页 + 未验证 banner。内外环测试 + 独立评审全过；线上验证：注册→真实验证信 Resend delivered→confirm→`emailVerified=1`。详见 SPEC §22–§24 / §17.2 / §17.12；配方沉淀为全局 skill `email-auth-resend`。
 - **飞书列按字段类型预建 + 类型化写值（2026-06-12）**：发布 / 编辑表单时即在 owner 飞书表**按字段 `type` 预建对应类型的列**（数字 / 日期 / 单选 / 多选列,而非一律文本),owner 发布后立刻看到完整且类型正确的结构;**best-effort**(未配飞书 / 连不上 / 建列失败 → 发布仍 `201`、`waitUntil` 后台静默跳过、只记 `err.name` 不记凭据)。提交按列**真实**类型格式化写值(方案 a:先 `listBitableColumns`);§15.8 自愈升级为「按字段 type 建对应类型列」兜底(且缺列按字段映射类型格式化值、摊平 `group` 子字段)。单一真相源 `FIELD_TYPE_TO_BITABLE`。inner + outer 全绿(`feishu-schema.test.ts` + `feishu-typed-columns-api.test.ts` 18 场景)+ 独立评审(揪出并修了 2 个自愈类型/分组 bug)。SPEC §16.8 / §15.8 升级。
+- **公开端点限流 / 防刷（2026-06-12）**：4 个公开端点(`POST /api/submit` / `register` / `login` / `password-reset/request`)挂 Cloudflare **KV 固定窗口** per-IP 限流,超限 `429 + Retry-After`,**KV 故障 fail-open**(限流器自己挂了不拖垮正常请求)。护 owner 飞书写额度 + 共享 Resend 免费档(防被刷爆→全员收不到验证/重置信)+ 登录防爆破。键只存 `SHA256(ip)`(不存原始 IP);限额 submit 10/min·100/h、register 5/h、pwreset 4/h、login 10/min;owner-only / `/health` / OPTIONS 不限(§11 各烧自己额度的不限流)。inner + outer 全绿(`ratelimit.test.ts` + `rate-limit-api.test.ts`,证明「429 = handler 不执行」)+ 独立评审 ship。SPEC §25。**follow-up**:小时窗(100/h)429 外环补测、双窗 Retry-After 取较大值。
 
 > 后端全程双循环 TDD（spec → outer → impl → review），凭据进 vault（DeepSeek key、飞书自建应用、CF token、runtime secret、Resend key）。
 
@@ -38,8 +39,8 @@
 
 ## 🚧 进行中
 
-- 当前无活跃进行项 —— 前端 UI 全闭环（设计 / 集成设置 / 发布管理 / 公开填写 / 数据后台）+ 多租户 / 开放注册 + 邮箱鉴权（验证 / 找回密码）+ 飞书端到端 + **飞书列按字段类型预建 / 类型化写值** 均**已上线**（见「已完成」）。
-- **下一步候选（待办）**：公开端点**限流 / 防刷**（契约已起草于分支 `feat-rate-limit` —— 护 owner 飞书额度 + 共享 Resend 免费档 + 防爆破）、飞书增强剩余（改字段标签同步 / 字段 id↔列稳定映射、`listBitableColumns` >100 列分页、list 故障时降级到无类型写值而非 502、`/submissions` 按 `formSlug` 过滤）、数据后台增强（CSV 导出 / 分页 / 统计）。
+- 当前无活跃进行项 —— 前端 UI 全闭环（设计 / 集成设置 / 发布管理 / 公开填写 / 数据后台）+ 多租户 / 开放注册 + 邮箱鉴权（验证 / 找回密码）+ 飞书端到端 + 飞书列按字段类型预建 + **公开端点限流 / 防刷** 均**已上线**（见「已完成」）。
+- **下一步候选（待办）**：飞书增强剩余（改字段标签同步 / 字段 id↔列稳定映射、`listBitableColumns` >100 列分页、list 故障时降级到无类型写值而非 502、`/submissions` 按 `formSlug` 过滤）、数据后台增强（CSV 导出 / 分页 / 统计）、限流 follow-up（小时窗 429 外环补测、双窗 `Retry-After` 取较大值）。
 
 ---
 
@@ -50,7 +51,6 @@
 - 绑自定义域名 `api.form-design.agentaily.com`（可选；现走 `*.workers.dev` 默认域）
 - **表单新提交通知（未来，先不做 · 以后再说）**：owner 的表单收到新回复时给 owner 发邮件通知。**必须按天聚合 + 每表单可开关**（默认关）——「每条提交即发」量随访客流量不可控、会冲破 Resend 免费档变贵；按天聚合后量级 = 活跃表单数 × 天，基本恒在免费档内。复用已上线的 Resend 发信基建（见「已完成」邮箱验证条 / 全局 skill `email-auth-resend`），改动落在公开 submit 路径，需配通知开关等产品决策，故单独一轮做。
 - 数据后台增强：聚合统计、分页、CSV 导出
-- **公开端点限流 / 防刷（契约已起草，分支 `feat-rate-limit`，待续）**——BYOK 下保护 owner 飞书额度（被刷的 `POST /api/submit` 烧 owner 飞书写额度）+ **共享 Resend 免费档**（被刷的 `register` / `password-reset/request` 一波打满 100/天、全员发不出邮件）+ 登录防爆破;走 Cloudflare **KV** 计数器、按 IP 滑窗、超限 429 + `Retry-After`、KV 故障 fail-open。注：owner-only 的 `/api/chat` 各烧自己 DeepSeek 额度，不在限流范围（SPEC §11）。**暂让位给「飞书列类型映射 + 预建列」**（见「进行中」），契约草稿留在分支 `feat-rate-limit` 待续。
 
 ### 飞书端到端
 
