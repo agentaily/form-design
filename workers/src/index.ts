@@ -30,7 +30,11 @@ import {
   AnswersValidationError,
   type SubmitRequest,
 } from "./submit";
-import { listBitableColumns, preCreateBitableColumnsBestEffort } from "./feishu-schema";
+import {
+  listBitableColumns,
+  preCreateBitableColumnsBestEffort,
+  syncBitableColumnRenamesBestEffort,
+} from "./feishu-schema";
 import {
   parsePublishInput,
   parseUpdateInput,
@@ -811,17 +815,35 @@ app.patch("/api/forms/:slug", async (c) => {
   // a cross-owner slug updates 0 rows → null → 404 (same code as not-found, no
   // existence leak).
   const ownerId = c.get("session").sub;
+
+  // §16.8.7 改名同步定位机制：在 updateForm **落库前**读一次旧字段定义（旧 schema_json）——
+  // 因为 updateForm 一旦写入就拿不到「改名前的 label」了。改名靠「旧 label = 飞书那列现在的
+  // 名字」定位列；只有本次 PATCH 带了 fields 才需要旧 fields（否则不涉及改名）。读 slug 维度即可
+  // （归属由下面 updateForm 返回非 null 确认；读到的旧 fields 属于该 slug，与 owner 一致）。
+  const oldFields = input.fields !== undefined ? await getFormFields(c.env.DB, slug) : null;
+
   const updated = await updateForm(c.env.DB, slug, ownerId, input);
   if (updated === null) {
     return c.json({ error: "form not found" }, 404);
   }
 
-  // best-effort 增量预建（§16.8）：编辑改了 fields → 在飞书表里**增量**补建新增字段的列。
-  // 传更新后的完整 fields 即可——preCreateBitableColumns 先列出现有列、只建缺的、跳过已存在的
-  // （绝不改既有列），故传全集天然增量。仅在本次 PATCH 带了 fields 时触发；同样在 waitUntil
-  // 后台跑、失败静默跳过，不阻塞 200（§16.8 best-effort）。
+  // best-effort 飞书同步（§16.8.7 + §16.8）：仅在本次 PATCH 带了 fields 时触发；都在 waitUntil
+  // 后台跑、失败静默跳过、不阻塞 200。**顺序铁律（§16.8.7）：先改名、后预建**——
+  //   ① syncBitableColumnRenamesBestEffort(oldFields → updated.fields)：按 field.id 配对 diff，
+  //      把因 label 变更的现有列**改名**（而非按新 label 新建一列、丢下旧列与已收数据）。删 /
+  //      改类型 / 排序不同步；冲突逐项跳过（§16.8.7 范围 + 冲突表）。
+  //   ② preCreateBitableColumnsBestEffort(updated.fields)：列出现有列、只建缺的、跳过已存在的。
+  // 先改名后建：被改名的列此时已是新名，预建看到它存在即跳过，**绝不重复建一个新 label 列**；
+  // 若反过来先建，会按新 label 建出一个重复列。两段须串在**同一个 waitUntil 续体**里保证此序
+  // （而非两个独立 waitUntil——那样无法保证改名先完成）。implementer 在合约内定串接形态。
   if (input.fields !== undefined) {
-    c.executionCtx.waitUntil(preCreateBitableColumnsBestEffort(c.env, ownerId, updated.fields));
+    const newFields = updated.fields;
+    c.executionCtx.waitUntil(
+      (async () => {
+        await syncBitableColumnRenamesBestEffort(c.env, ownerId, oldFields ?? [], newFields);
+        await preCreateBitableColumnsBestEffort(c.env, ownerId, newFields);
+      })(),
+    );
   }
 
   return c.json(updated, 200);

@@ -6,6 +6,7 @@ import {
   formatValueForBitable,
   listBitableColumns,
   preCreateBitableColumns,
+  computeFieldRenames,
   FEISHU_BITABLE_FIELD_TYPE,
   type FeishuFieldType,
 } from "../src/feishu-schema";
@@ -415,6 +416,156 @@ describe("preCreateBitableColumns (SPEC.md §16.8 发布即按类型预建缺列
     expect(created).toEqual([
       { field_name: "电话", type: TEXT },
       { field_name: "年龄", type: NUMBER },
+    ]);
+  });
+});
+
+describe("computeFieldRenames (SPEC.md §16.8.7 按 field.id 配对 diff 算改名计划，纯函数无 I/O)", () => {
+  it("同 id、label 变 = 一条改名，oldLabel/newLabel/type 据此填充", () => {
+    const oldFields: Field[] = [{ id: "f_phone", type: "text", label: "电话" }];
+    const newFields: Field[] = [{ id: "f_phone", type: "text", label: "联系电话" }];
+
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([
+      { fieldId: "f_phone", oldLabel: "电话", newLabel: "联系电话", type: TEXT },
+    ]);
+  });
+
+  it("按 id 配对而非按 label 文本匹配：旧 label 用于定位列名", () => {
+    const oldFields: Field[] = [{ id: "f1", type: "text", label: "旧名" }];
+    const newFields: Field[] = [{ id: "f1", type: "text", label: "新名" }];
+
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([
+      { fieldId: "f1", oldLabel: "旧名", newLabel: "新名", type: TEXT },
+    ]);
+  });
+
+  it("type 取新字段映射类型（数字列改名带回 NUMBER 作参照）", () => {
+    const oldFields: Field[] = [{ id: "f_age", type: "number", label: "年龄" }];
+    const newFields: Field[] = [{ id: "f_age", type: "number", label: "周岁" }];
+
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([
+      { fieldId: "f_age", oldLabel: "年龄", newLabel: "周岁", type: NUMBER },
+    ]);
+  });
+
+  it("新增字段（id 只在新）不进结果——由预建建列", () => {
+    const oldFields: Field[] = [{ id: "f1", type: "text", label: "姓名" }];
+    const newFields: Field[] = [
+      { id: "f1", type: "text", label: "姓名" },
+      { id: "f2", type: "number", label: "分数" },
+    ];
+
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([]);
+  });
+
+  it("删除字段（id 只在旧）不进结果——v1 不同步删列", () => {
+    const oldFields: Field[] = [
+      { id: "f1", type: "text", label: "姓名" },
+      { id: "f2", type: "text", label: "备注" },
+    ];
+    const newFields: Field[] = [{ id: "f1", type: "text", label: "姓名" }];
+
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([]);
+  });
+
+  it("label 未变（仅改类型）不进结果——v1 只同步改名", () => {
+    const oldFields: Field[] = [{ id: "f1", type: "text", label: "分数" }];
+    const newFields: Field[] = [{ id: "f1", type: "number", label: "分数" }];
+
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([]);
+  });
+
+  it("group 子字段改名经 flattenLeafFields 摊平后一并进结果（容器自身不参与）", () => {
+    const oldFields: Field[] = [
+      {
+        id: "g",
+        type: "group",
+        label: "地址",
+        children: [{ id: "f_street", type: "text", label: "街道" }],
+      },
+    ];
+    const newFields: Field[] = [
+      {
+        id: "g",
+        type: "group",
+        label: "地址",
+        children: [{ id: "f_street", type: "text", label: "详细地址" }],
+      },
+    ];
+
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([
+      { fieldId: "f_street", oldLabel: "街道", newLabel: "详细地址", type: TEXT },
+    ]);
+  });
+
+  it("旧 schema 两个同 label 不同 id 字段，只改其中一个的 label → 恰好 emit 那一条（另一个不动）", () => {
+    // parseField 只禁空 label、不禁重复 label，故「两个字段同 label」可达。改名 diff 必须按 id 配对、
+    // **不能**按 label 去重摊平——否则去重会丢掉 f2 的 id，改 f2 名时认不出改名、当成新字段，旧列连
+    // 数据被孤立（正是改名同步要防的丢数据）。这里 f1/f2 旧 label 同为「其他」，只把 f2 改成「其他备注」。
+    const oldFields: Field[] = [
+      { id: "f1", type: "text", label: "其他" },
+      { id: "f2", type: "text", label: "其他" },
+    ];
+    const newFields: Field[] = [
+      { id: "f1", type: "text", label: "其他" },
+      { id: "f2", type: "text", label: "其他备注" },
+    ];
+
+    // 恰好一条改名:f2「其他」→「其他备注」;f1 未动不进结果。
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([
+      { fieldId: "f2", oldLabel: "其他", newLabel: "其他备注", type: TEXT },
+    ]);
+  });
+
+  it("group 内两个同 label 不同 id 子字段，只改其中一个 → 同理恰好 emit 那一条", () => {
+    // group 摊平后同样不得按 label 去重：同 label 不同 id 的两个子字段都要进 diff。
+    const oldFields: Field[] = [
+      {
+        id: "g",
+        type: "group",
+        label: "联系方式",
+        children: [
+          { id: "c1", type: "text", label: "其他" },
+          { id: "c2", type: "text", label: "其他" },
+        ],
+      },
+    ];
+    const newFields: Field[] = [
+      {
+        id: "g",
+        type: "group",
+        label: "联系方式",
+        children: [
+          { id: "c1", type: "text", label: "其他" },
+          { id: "c2", type: "text", label: "其他说明" },
+        ],
+      },
+    ];
+
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([
+      { fieldId: "c2", oldLabel: "其他", newLabel: "其他说明", type: TEXT },
+    ]);
+  });
+
+  it("空输入 → 空结果（不发任何改名调用）", () => {
+    expect(computeFieldRenames([], [])).toEqual([]);
+  });
+
+  it("多条改名一次算出（保留新字段遍历顺序）", () => {
+    const oldFields: Field[] = [
+      { id: "f1", type: "text", label: "电话" },
+      { id: "f2", type: "text", label: "邮件" },
+      { id: "f3", type: "text", label: "不变" },
+    ];
+    const newFields: Field[] = [
+      { id: "f1", type: "text", label: "联系电话" },
+      { id: "f2", type: "text", label: "电子邮箱" },
+      { id: "f3", type: "text", label: "不变" },
+    ];
+
+    expect(computeFieldRenames(oldFields, newFields)).toEqual([
+      { fieldId: "f1", oldLabel: "电话", newLabel: "联系电话", type: TEXT },
+      { fieldId: "f2", oldLabel: "邮件", newLabel: "电子邮箱", type: TEXT },
     ]);
   });
 });

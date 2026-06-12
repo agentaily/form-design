@@ -1010,8 +1010,8 @@ CREATE TABLE IF NOT EXISTS forms (
 #### 16.8.1 建列时机
 
 - **发布（`POST /api/forms`）：** 落库成功后，在 `c.executionCtx.waitUntil(...)` 里**后台**对该 owner 的飞书表**预建全部列**（`preCreateBitableColumnsBestEffort(env, ownerId, input.fields)`）。
-- **编辑（`PATCH /api/forms/:slug` 改了 `fields`）：** 仅当请求体带了 `fields` 时，对**更新后的完整 `fields`** 后台预建。预建内部「先列出现有列、只建缺的、跳过已存在的」，故传全集天然**增量**（只补新增字段的列）。
-- **不在本期：** 改字段标签仍**新建**列（沿用现有 label 匹配，§15.3）；字段 id ↔ 列的稳定映射、改名 / 删列同步留后续。
+- **编辑（`PATCH /api/forms/:slug` 改了 `fields`）：** 仅当请求体带了 `fields` 时，对该 owner 的飞书表后台跑**两步 best-effort**（同一个 `waitUntil`，**顺序见 §16.8.7**）：① **先同步改名**（把因 `label` 变更的现有列改成新名，`syncBitableColumnRenamesBestEffort`）→ ② 再对**更新后的完整 `fields`** 预建（`preCreateBitableColumnsBestEffort`）。预建内部「先列出现有列、只建缺的、跳过已存在的」，故传全集天然**增量**；改名先行后，被改名的列已是新名，预建看到它存在即跳过，**不会重复建**。
+- **改字段标签 → 同步飞书列改名（§16.8.7，本期新增）：** 编辑里把某字段的 `label` 改了（`id` 不变），系统**改名**飞书表里那一列（而非按新 label 新建一列、把旧列连同已收数据丢下）。**v1 只做改名**：删字段 / 改类型 / 排序不同步（见 §16.8.7 范围 + 留白）。
 
 #### 16.8.2 字段 `type` → 飞书 Bitable 列类型映射（单一真相源）
 
@@ -1064,6 +1064,52 @@ owner **未配飞书 / 飞书连不上 / token 换取失败 / 建列失败** →
 - 发布仍 `201 { slug }`、编辑仍 `200`——**无论**飞书有没有配、预建成没成。
 - 提交成功语义不变：`200 { ok, recordId }`（§15.4）；类型化只改写入飞书的值形态，不改对外响应。
 - 凭据（`app_secret` / `tenant_access_token`）绝不进任何响应 / HTTP 头 / 日志。
+
+#### 16.8.7 改字段标签 → 同步飞书列改名（best-effort，v1 只改名）
+
+> **解决什么：** §15.3 约定「列名 = `field.label`」，列的匹配靠 label。于是 owner 在设计器里把某字段 `label` 改了再保存，编辑路径的预建（§16.8.1）会按**新 label** 找不到同名列、**新建一列**，把**旧列连同其中已收集的数据**孤零零留在表里——数据分家。本节让编辑识别出「这是同一个字段被改了名」，去把飞书里**那一列改名**，而不是新建。
+
+**定位机制 = 字段稳定 `id` 配对 + 旧 `label` 定位列（不引入持久映射表）：**
+
+- `Field` 有稳定 `id`（§3.2；改名后不变），这是「认出是同一字段」的钥匙。编辑 handler 能同时拿到**旧字段定义**（`updateForm` 落库**前**的 `schema_json`）与**新字段定义**（`UpdateFormInput.fields`）。
+- 按 `field.id` 把新旧字段**配对** diff：`id` 在新旧都有、`label` 不同 = **改名**。**旧 `label` 就是飞书那列现在的名字**——据此在飞书现有列里定位到该列（需拿到飞书列的 `field_id`，见下）→ 调飞书**改字段名 API** 改成新 `label`。
+- `group` 子字段经 `flattenLeafFields` 摊平后一并参与配对（分组里的字段改名同样同步）。
+- **不引入** 字段 id ↔ 飞书 `field_id` 的持久映射表（D1）：v1 用「旧 label 现就是列名」这一既有不变量定位，零新增存储。更稳的持久映射留 follow-up（见留白）。
+
+**纯函数 seam（inner-loop 单测靶）：** `computeFieldRenames(oldFields, newFields)` → 返回 `{ fieldId, oldLabel, newLabel, type }[]`：按 `id` 配对、`label` 变才入列；摊平 `group`；**新增 / 删除字段不在内**。这是无 I/O 的纯 diff。
+
+**飞书改名一跳：** `PUT https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields/{field_id}`，body **带回原 `type`** 一起改名（`{ field_name: <新 label>, type: <该列现有类型> }`）——**只改名、不改类型**（漏带 `type` 可能被飞书误改 / 拒；列的类型由 §16.8.4 既有列冲突兜底负责，本节不碰）。成功要求 `2xx` 且 `code === 0`。
+
+**`listBitableColumns` 升级为带 `field_id`（不破坏 §16.8.4 写值路径）：** 改名要拿飞书列的 `field_id`，而现有 `listBitableColumns` 只返回 `Map<列名, 类型>`。升级方案：底层列出多读一个 `data.items[].field_id`，新增 `listBitableColumnsDetailed` 返回 `Map<列名, { type, fieldId }>`；**`listBitableColumns` 维持原签名 `Map<列名, 类型>`**（由 detailed 投影出来或并存），§16.8.4 的提交写值路径**完全不变**。
+
+**顺序：改名先于预建（§16.8.1 已点明，此处定死）。** 同一 `waitUntil` 里先 `syncBitableColumnRenamesBestEffort`（把现有列改成新名）→ 再 `preCreateBitableColumnsBestEffort`（列出现有列、只建缺的）。先改名后建，被改名的列已是新名、预建看到它存在即跳过；**若反过来先建，会按新 label 建出一个重复列**。
+
+**冲突 / 边界（逐项跳过，绝不报错、绝不互相影响）：**
+
+- 旧 `label` 在飞书**找不到对应列**（从没建过 / 已被改过 / owner 手动删了）→ 跳过该项。
+- 新 `label` 在飞书**已存在另一个不同列**（改名会撞重名）→ **跳过 + 记一条不含凭据的日志**，**不强改**（不覆盖、不合并）。
+- 飞书改名 API **失败**（不可达 / `code≠0`）→ 跳过该项。
+- 任一项失败 / 跳过都**不影响**编辑 `200`、也**不影响**其它改名项与随后的预建。
+
+**best-effort 失败策略（与 §16.8.5 同纪律）：** owner 未配飞书（`owner.feishu === null`）/ 飞书连不上 / token 换取失败 / 列出失败 / 改名失败 → 编辑仍 `200`，改名**静默跳过**，在 `waitUntil` 后台只记 `err.name`，**绝不**把 `app_secret` / `tenant_access_token` / 列值写进日志（§15.7）。`syncBitableColumnRenamesBestEffort` 吞掉整段（读配置 → 换 token → 列出含 `field_id` → 逐个改名）的任何失败。
+
+**不触发的情形：**
+
+- 发布（`POST /api/forms`）是新表、无旧字段 → **不涉及改名**（只走预建建全部列）。
+- 编辑只改 `status` / `meta`、**没带 `fields`** → 既不预建也不改名（与 §16.8.1 一致）。
+- 编辑带了 `fields` 但**没有任何字段 `label` 变更**（仅新增 / 删除 / 改类型 / 重排）→ `computeFieldRenames` 返回空 → 不发任何改名调用（只走预建补新增列）。
+
+**v1 范围（用户已拍定）vs 已知留白（follow-up）：**
+
+| 编辑动作（按 `field.id` 配对） | v1 行为 | 备注 |
+|---|---|---|
+| `id` 同、`label` 变 = **改名** | 飞书列 **rename** | 本节 |
+| `id` 在旧不在新 = **删字段** | 飞书列 **保留不动**（连同已收数据，**绝不删**） | 同 §21.4「不联动删飞书记录」 |
+| `id` 同、`type` 变 = **改类型** | 飞书列 **不动** | 有数据的列一般不能改类型；按列真实类型写值，§16.8.4 方案 a 已兜 |
+| `id` 在新不在旧 = **新增字段** | 沿用预建（§16.8.1）**建列** | 改名先行，不与改名重复建 |
+| 字段**排序**变 | **不同步** | 飞书列序与表单序解耦 |
+
+- **留白（follow-up）：** ① **删列同步**（删字段时归档 / 隐藏对应列，权衡数据保全）；② **改类型同步**（飞书有数据列不能改类型，需迁移列）；③ **排序同步**；④ **字段 `id` ↔ 飞书 `field_id` 持久映射**（D1 存一张映射表，比「靠旧 label 定位」更稳——能扛「owner 手动改过列名 / 同表多次改名链」等 label 漂移场景）。
 
 ---
 
