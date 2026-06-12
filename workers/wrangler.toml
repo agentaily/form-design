@@ -27,7 +27,7 @@ migrations_dir = "migrations"
 #     implementer 无需在 miniflare.bindings 里手注 binding 值。
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
-id = "PLACEHOLDER_RATE_LIMIT_KV_ID" # ← 由 release-eng 填真实 id（wrangler kv namespace create RATE_LIMIT）
+id = "c0deecf24a7446fb8a3ad196ce853133" # form-design RATE_LIMIT KV（yarnbcoder 账户）。本地测试 miniflare 自动按本 binding 提供本地 KV。
 
 # CONFIG_KEY (AES-GCM master key for encrypting owner secrets) is set via
 # `wrangler secret put CONFIG_KEY` in prod, never committed. For tests it's
