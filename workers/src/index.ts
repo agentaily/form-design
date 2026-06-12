@@ -147,11 +147,24 @@ const guard: MiddlewareHandler<{ Bindings: Env; Variables: AuthVariables }> = (c
 // sendEmail。**吞** EmailSendError（best-effort，发信失败绝不拖垮主流程）；其它异常也吞（在
 // waitUntil 后台跑，不该让未捕获 promise rejection 冒泡）。明文 / RESEND_API_KEY 绝不进日志。
 
-/** 给某 user 发一封验证邮件（注册时 / owner-only 重发，§23.2 / §23.3）。失败静默吞。 */
-async function sendVerifyEmail(env: Env, userId: string, to: string): Promise<void> {
+/**
+ * 给某 user 发一封验证邮件（注册时 / owner-only 重发，§23.2 / §23.3）。失败静默吞。
+ *
+ * `apiOrigin` 是 **worker 自身**的 origin（调用方传 `new URL(c.req.url).origin`）——因为
+ * `verify-email/confirm` 端点活在 worker 上、不在前端站。链接 host 必须是浏览器能到达本 API 的
+ * 那个 host（即注册/重发请求进来的 host），所以用请求 origin 而**非** `APP_BASE_URL`（那是前端域，
+ * 不serve `/api`）；将来绑自定义域（api.form-design.agentaily.com）也自动跟随。reset 邮件不同——
+ * 它指向前端落地页 `${APP_BASE_URL}/reset-password`，故 {@link sendResetEmail} 仍用 APP_BASE_URL。
+ */
+async function sendVerifyEmail(
+  env: Env,
+  userId: string,
+  to: string,
+  apiOrigin: string,
+): Promise<void> {
   try {
     const { plaintext } = await issueToken(env.DB, userId, "verify");
-    const confirmUrl = `${env.APP_BASE_URL}/api/auth/verify-email/confirm?token=${encodeURIComponent(plaintext)}`;
+    const confirmUrl = `${apiOrigin}/api/auth/verify-email/confirm?token=${encodeURIComponent(plaintext)}`;
     const { subject, html } = buildVerifyEmail(confirmUrl);
     await sendEmail(env, { to, subject, html });
   } catch (err) {
@@ -249,7 +262,14 @@ app.post("/api/auth/register", async (c) => {
   // confirmUrl(APP_BASE_URL) → buildVerifyEmail → sendEmail。发信失败**不**让注册失败：注册
   // 结果与发信解耦（吞 EmailSendError）。用 executionCtx.waitUntil 后台发，不阻塞 201。
   // 明文密码 / RESEND_API_KEY 绝不进响应（§22.3）。
-  c.executionCtx.waitUntil(sendVerifyEmail(c.env, user.id, typeof email === "string" ? email : ""));
+  c.executionCtx.waitUntil(
+    sendVerifyEmail(
+      c.env,
+      user.id,
+      typeof email === "string" ? email : "",
+      new URL(c.req.url).origin,
+    ),
+  );
 
   // 注册即登录 (§17.2): the token's sub is the new user's real id — also the data
   // isolation key for every owner-only endpoint (§17.9). 201 Created (email_verified=0).
@@ -273,7 +293,9 @@ app.post("/api/auth/verify-email/request", async (c) => {
   const user = await findUserById(c.env.DB, ownerId);
   // 未验证才发信；已验证 / 用户不存在(异常态) → no-op。永远回中性成功。
   if (user !== null && user.emailVerified === 0) {
-    c.executionCtx.waitUntil(sendVerifyEmail(c.env, user.id, user.email));
+    c.executionCtx.waitUntil(
+      sendVerifyEmail(c.env, user.id, user.email, new URL(c.req.url).origin),
+    );
   }
   return c.json({ ok: true } satisfies NeutralOkBody, 200);
 });

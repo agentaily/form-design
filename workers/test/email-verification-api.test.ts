@@ -115,7 +115,12 @@ describe("邮箱验证 (features/email-verification.feature, §23)", () => {
     await resend.waitForSends(1);
     expect(resend.count()).toBe(1);
     expect(resend.last().to).toBe(email);
-    expect(resend.last().html).toMatch(/\/api\/auth\/verify-email\/confirm\?token=/);
+    // Regression guard (deploy bug): the verify-confirm link MUST live on the WORKER's
+    // own origin — the host the register request actually came through (AUTH_BASE here) —
+    // never APP_BASE_URL (the frontend domain, which doesn't serve /api). A wrong base
+    // ships a dead verification link that 404s / falls through to the SPA.
+    expect(resend.last().html).toContain(`${AUTH_BASE}/api/auth/verify-email/confirm?token=`);
+    expect(resend.last().html).not.toContain(`${APP_BASE_URL}/api/auth/verify-email/confirm`);
   });
 
   it("Scenario: 注册时发信失败仍不影响注册成功", async () => {
