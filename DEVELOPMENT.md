@@ -1,6 +1,6 @@
-# Agentaily Forms — 研发驱动范式
+# Agentaily Forms — 开发文档
 
-> 本项目怎么被「驱动」着造出来。不是任务清单，是方法论。
+> 这个项目怎么开发、怎么被「驱动」着造出来 —— 开发方法、流程与驱动方式。不是任务清单。
 > 能力地图见 [ROADMAP.md](./ROADMAP.md)，产品规格见 [SPEC.md](./SPEC.md)，
 > sub agent 分工见 [`.claude/agents/README.md`](./.claude/agents/README.md)。
 
@@ -70,7 +70,16 @@ intent / handoff ─► spec-architect ─► features/ + 契约 ─┐
 
 ## 第 4 层 · 外部输入适配层(驱动从哪来)
 
-- **design-sync**(`design-sync` skill + `design-syncer` agent)—— Claude Design handoff
+UI 这条输入有**两段**:先「在 Claude Design 里设计」(产出 handoff),再「把 handoff 合进代码」。
+
+- **Claude Design 设计驱动**(`design-via-claude-design` skill)—— UI 的「长什么样」**不在代码里手搓**,
+  而是先去 claude.ai/design 对应产品的**设计项目**对话设计、review,产出 handoff。注意**两个上游别搞混**:
+  「产品页面设计项目」(设计这个产品的页面) vs 「组件库(DS)项目」(组件本体)。缺组件 / 缺 seam 时按
+  「**下游定契约 → 上游照做**」反馈给**组件库**的 Claude Design 项目;它实现后,同步进组件库**代码仓库**
+  (独立 `claude` 终端 → 工作区 → PR → changesets 自动发 npm),下游升级绑定再采用、删本地兜底。
+  **对话设计走浏览器,落地代码走独立 `claude` 终端。** 反向亦然:DS 一发版,各下游产品同样走一遍
+  (产品设计项目对话 → handoff → 产品仓库的终端 `claude` → 工作区 → PR)。
+- **design-sync**(`design-sync` skill + `design-syncer` agent)—— 上一步产出的 Claude Design handoff
   → 三方 diff 合进代码、**保留本地工程改动**、冲突上报而非覆盖、刷新 `.design-baseline/`。
   把「设计交付」也变成一种**受控的驱动输入**,而不是手抄。
 
@@ -78,13 +87,15 @@ intent / handoff ─► spec-architect ─► features/ + 契约 ─┐
 
 ## 怎么挂挡(决策表)
 
-| 情况                         | 挂什么                             |
-| ---------------------------- | ---------------------------------- |
-| 改一行 / 小修                | 都不挂,直接干(主轴仍在:有测试就补) |
-| 单 feature,要审要验          | **Workflow**(同会话 fan-out)       |
-| 多 feature 互不冲突,要真并行 | **fleet**(多 worktree + 多终端)    |
-| 有 Claude Design 交付        | 走 **design-sync**                 |
-| 无设计输入                   | 跳过第 4 层                        |
+| 情况                         | 挂什么                                                                  |
+| ---------------------------- | ----------------------------------------------------------------------- |
+| 改一行 / 小修                | 都不挂,直接干(主轴仍在:有测试就补)                                      |
+| 单 feature,要审要验          | **Workflow**(同会话 fan-out)                                            |
+| 多 feature 互不冲突,要真并行 | **fleet**(多 worktree + 多终端)                                         |
+| 要做 / 改 UI(有设计项目)     | 先 **design-via-claude-design**(对话设计)→ **design-sync**(落地);别手搓 |
+| 已拿到 Claude Design handoff | 直接走 **design-sync**                                                  |
+| 缺组件 / 缺 seam             | 反馈**组件库** Claude Design 项目 → 同步组件库仓库发版 → 下游升级       |
+| 无设计输入                   | 跳过第 4 层                                                             |
 
 无论挂哪个挡,**第 1+2 层(契约优先的双循环 TDD)始终在**。它是骨架,不是选项。
 

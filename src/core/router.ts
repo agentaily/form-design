@@ -27,6 +27,12 @@ export const RESET_PASSWORD_PATH = "/reset-password";
 /** 邮箱验证 result landing page (SPEC §23.6). The backend confirm endpoint 302s here at /verify-email?status=. */
 export const VERIFY_EMAIL_PATH = "/verify-email";
 
+/** 独立登录页 (SPEC §17). Gated actions send a signed-out owner here at /signin?return=&reason=. */
+export const SIGNIN_PATH = "/signin";
+
+/** 集成设置页 (SPEC §12 + §14). The owner connects DeepSeek + 飞书 here at /settings. */
+export const SETTINGS_PATH = "/settings";
+
 /** A recognised public-fill route, carrying the slug parsed out of /f/:slug. */
 export interface PublicFormRoute {
   slug: string;
@@ -110,6 +116,34 @@ export function matchResetPassword(pathname: string, search: string): ResetPassw
 export function matchVerifyEmail(pathname: string, search: string): VerifyEmailRoute | null {
   if (!isExactPath(pathname, VERIFY_EMAIL_PATH)) return null;
   return { status: readQueryParam(search, "status") === "ok" ? "ok" : "invalid" };
+}
+
+/** A recognised /signin route. The 「登录后续跑」 intent + return target are read off
+ *  the query by the page itself (`reason` / `return`), so the match carries no params. */
+export type SignInRoute = Record<string, never>;
+
+/**
+ * Match the 独立登录页 route (SPEC §17). Pure: return `{}` when the path is `/signin`
+ * (one trailing slash tolerated), else `null` (the designer/public). The standalone
+ * sign-in page mounts <SignInScreen>, which reads `?return=` / `?reason=` itself.
+ */
+export function matchSignIn(pathname: string): SignInRoute | null {
+  return isExactPath(pathname, SIGNIN_PATH) ? {} : null;
+}
+
+/** A recognised /settings route. Like /signin it carries no params — the page reads
+ *  its config off the backend (getConfig), not off the URL. */
+export type SettingsRoute = Record<string, never>;
+
+/**
+ * Match the 集成设置页 route (SPEC §12 + §14). Pure: return `{}` when the path is
+ * `/settings` (one trailing slash tolerated), else `null` (the designer/public). The
+ * settings page mounts <SettingsScreen>, an owner-only chrome-less page that fetches +
+ * saves the masked config via configClient. App's guard sends a signed-out owner to
+ * /signin?return=/settings first, so the page only mounts for a logged-in owner.
+ */
+export function matchSettings(pathname: string): SettingsRoute | null {
+  return isExactPath(pathname, SETTINGS_PATH) ? {} : null;
 }
 
 /**

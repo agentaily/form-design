@@ -66,8 +66,10 @@ describe("App: 未验证 banner reads GET /api/auth/me (§23.6)", () => {
     await waitFor(() => expect(getCurrentUser).toHaveBeenCalled());
     // No throw, and with no authoritative "unverified" signal the soft banner stays off.
     await waitFor(() => expect(queryBanner()).not.toBeInTheDocument());
-    // The app shell still rendered (header登录 button present).
-    expect(screen.getByRole("button", { name: "账户已登录" })).toBeInTheDocument();
+    // The app shell still rendered (logged-in AccountControl avatar button present —
+    // not the signed-out 登录 text button).
+    expect(screen.getByRole("button", { name: "账户菜单" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "登录" })).not.toBeInTheDocument();
   });
 
   it("adopts the me bit even against the optimistic default (verified owner reloading → no banner)", async () => {
@@ -103,8 +105,10 @@ describe("App: 未验证 banner reads GET /api/auth/me (§23.6)", () => {
     const getCurrentUser = vi.fn(async () => ({ email: "x@y.z", emailVerified: false }));
     render(<App {...baseStubs()} getCurrentUser={getCurrentUser} />);
 
-    // The logged-out shell shows the 登录账户 button and never mounts the banner.
-    expect(screen.getByRole("button", { name: "登录账户" })).toBeInTheDocument();
+    // The logged-out shell shows the AccountControl 登录 button (no avatar menu) and
+    // never mounts the banner.
+    expect(screen.getByRole("button", { name: "登录" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "账户菜单" })).not.toBeInTheDocument();
     expect(queryBanner()).not.toBeInTheDocument();
     expect(getCurrentUser).not.toHaveBeenCalled();
   });

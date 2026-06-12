@@ -142,7 +142,7 @@ export function SubmissionsView({
   } else if (submissions.length === 0) {
     body = (
       <Empty
-        icon={<Icon name="list" size={18} />}
+        icon={<Icon name="inbox" size={18} />}
         title="还没有收到提交"
         description="这份表单还没有人填写。把公开链接分享出去，收到的提交会出现在这里。"
       />

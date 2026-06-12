@@ -23,8 +23,7 @@ test.describe("Agentaily Forms · 指向修改", () => {
     // The build streams a trailing assistant message after the 9th field, and
     // setBuilding(false) only fires once that finishes. Until then App.onSend drops
     // sends (the same `building` guard the composer uses). Wait on the 指向修改 entry:
-    // it gates on `building` too, so it's enabled exactly when the build is done — and
-    // unlike 发布 it doesn't collide with the 「发布并生成链接」suggestion chip.
+    // it gates on `building` too, so it's enabled exactly when the build is done.
     await expect(page.getByRole("button", { name: "指向修改" })).toBeEnabled({ timeout: 40_000 });
 
     // the preview marks targetable elements with data-mk-* (hero / fields / submit)
@@ -36,7 +35,7 @@ test.describe("Agentaily Forms · 指向修改", () => {
 
     // enter targeting mode from the preview toolbar
     await page.getByRole("button", { name: "指向修改" }).click();
-    await expect(page.locator(".d-markup")).toBeVisible();
+    await expect(page.locator(".ax-markup")).toBeVisible();
     await expect(page.getByText("移到要改的地方，点击它再描述修改")).toBeVisible();
 
     // hover the 提交按钮 region → highlight box + identity tag appear.
@@ -48,31 +47,31 @@ test.describe("Agentaily Forms · 指向修改", () => {
     const cx = box.x + box.width / 2;
     const cy = box.y + box.height / 2;
     await page.mouse.move(cx, cy);
-    await expect(page.locator(".d-markup__box")).toBeVisible();
-    await expect(page.locator(".d-markup__tag")).toContainText("提交按钮");
-    await expect(page.locator(".d-markup__tag")).toContainText("按钮");
+    await expect(page.locator(".ax-markup__box")).toBeVisible();
+    await expect(page.locator(".ax-markup__tag")).toContainText("提交按钮");
+    await expect(page.locator(".ax-markup__tag")).toContainText("按钮");
 
     // click to select → composer pops below, frozen highlight, identity echoed
     await page.mouse.click(cx, cy);
-    await expect(page.locator(".d-markup__box.is-selected")).toBeVisible();
-    await expect(page.locator(".d-markup__pop")).toBeVisible();
-    await expect(page.locator(".d-markup__poptag")).toContainText("提交按钮 · 按钮");
+    await expect(page.locator(".ax-markup__box.is-selected")).toBeVisible();
+    await expect(page.locator(".ax-markup__pop")).toBeVisible();
+    await expect(page.locator(".ax-markup__poptag")).toContainText("提交按钮 · 按钮");
     await expect(page.getByText("输入修改要求，发送到左侧对话")).toBeVisible();
 
     // empty note keeps the send button disabled
-    await expect(page.locator(".d-markup__done")).toBeDisabled();
+    await expect(page.locator(".ax-markup__done")).toBeDisabled();
 
     // type the modification and send to the conversation
-    await page.locator(".d-markup__ta").fill("改成『立即报名』");
-    await expect(page.locator(".d-markup__done")).toBeEnabled();
-    await page.locator(".d-markup__done").click();
+    await page.locator(".ax-markup__ta").fill("改成『立即报名』");
+    await expect(page.locator(".ax-markup__done")).toBeEnabled();
+    await page.locator(".ax-markup__done").click();
 
     // the tagged user message lands in the LEFT chat, and targeting mode exits
-    // .last() — the first .d-turn--user is the starter brief; the markup send is the latest.
-    await expect(page.locator(".d-turn--user").last()).toContainText(
+    // .last() — the first .ax-msg--user is the starter brief; the markup send is the latest.
+    await expect(page.locator(".ax-msg--user").last()).toContainText(
       "〔提交按钮 · 按钮〕改成『立即报名』",
     );
-    await expect(page.locator(".d-markup")).toHaveCount(0);
+    await expect(page.locator(".ax-markup")).toHaveCount(0);
   });
 
   test("空表单时「指向修改」入口禁用", async ({ page }) => {

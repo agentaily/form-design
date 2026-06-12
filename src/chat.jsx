@@ -1,141 +1,33 @@
-// chat.jsx — chat side, composed entirely from @agentaily/design-system components.
-// Exports: Icon, ChatThread, ChatComposer
-import React, { useRef, useEffect } from "react";
-import {
-  Message,
-  Reasoning,
-  ToolCall,
-  Composer,
-  Suggestions,
-  Alert,
-} from "@agentaily/design-system";
+// chat.jsx — chat-side rendering for the DS ConversationThread.
+//
+// Since 0.4.0 the design system ships the chat surface itself (ConversationThread,
+// pure-render + external controller) plus the unified Lucide `Icon` set, so this
+// file no longer hand-rolls a thread/composer or an icon path table. It now only:
+//   • re-exports the DS `Icon` (the local ICON_PATHS set moved upstream), so the
+//     many `import { Icon } from "./chat.jsx"` call-sites keep working unchanged;
+//   • exports `renderChatTurn`, the per-turn renderer fed to <ConversationThread
+//     renderTurn>, mapping our message model onto the DS chat/ai atoms.
+import React from "react";
+import { Message, Reasoning, ToolCall, Suggestions, Alert } from "@agentaily/design-system";
 
-// ---- Lucide-geometry icons (brand-sanctioned: copy paths, never freehand) ----
-const ICON_PATHS = {
-  send: (
-    <g>
-      <path d="M12 19V5" />
-      <path d="M5 12l7-7 7 7" />
-    </g>
-  ),
-  spark: <path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6L12 3z" />,
-  share: (
-    <g>
-      <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13" />
-    </g>
-  ),
-  sun: (
-    <g>
-      <circle cx="12" cy="12" r="4" />
-      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
-    </g>
-  ),
-  moon: <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />,
-  message: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
-  eye: (
-    <g>
-      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
-      <circle cx="12" cy="12" r="3" />
-    </g>
-  ),
-  code: <path d="m16 18 6-6-6-6M8 6l-6 6 6 6" />,
-  check: <path d="M20 6 9 17l-5-5" />,
-  layout: (
-    <g>
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-      <path d="M9 3v18" />
-    </g>
-  ),
-  phone: (
-    <g>
-      <rect x="7" y="2" width="10" height="20" rx="2" />
-      <path d="M11 18h2" />
-    </g>
-  ),
-  qr: (
-    <g>
-      <rect x="3" y="3" width="7" height="7" rx="1" />
-      <rect x="14" y="3" width="7" height="7" rx="1" />
-      <rect x="3" y="14" width="7" height="7" rx="1" />
-      <path d="M14 14h3v3M21 14v.01M14 21h.01M21 17v4" />
-    </g>
-  ),
-  x: <path d="M18 6 6 18M6 6l12 12" />,
-  arrow: <path d="M5 12h14M12 5l7 7-7 7" />,
-  "arrow-left": <path d="M19 12H5M12 19l-7-7 7-7" />,
-  mail: (
-    <g>
-      <rect x="2" y="4" width="20" height="16" rx="2" />
-      <path d="m22 7-10 6L2 7" />
-    </g>
-  ),
-  lock: (
-    <g>
-      <rect x="3" y="11" width="18" height="11" rx="2" />
-      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-    </g>
-  ),
-  user: (
-    <g>
-      <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
-      <circle cx="12" cy="7" r="4" />
-    </g>
-  ),
-  markup: (
-    <g>
-      <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-      <path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z" />
-    </g>
-  ),
-  target: (
-    <g>
-      <circle cx="12" cy="12" r="9" />
-      <circle cx="12" cy="12" r="3.5" />
-      <path d="M12 1v3M12 20v3M1 12h3M20 12h3" />
-    </g>
-  ),
-  settings: (
-    <g>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </g>
-  ),
-  list: (
-    <g>
-      <path d="M8 6h13M8 12h13M8 18h13" />
-      <path d="M3 6h.01M3 12h.01M3 18h.01" />
-    </g>
-  ),
-};
+// The local Lucide table is gone — every icon now resolves through the upstream
+// unified set (`Icon.names` lists them all). Re-exported so call-sites don't change.
+export { Icon } from "@agentaily/design-system";
 
-export function Icon({ name, size = 16, ...rest }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      {...rest}
-    >
-      {ICON_PATHS[name] || null}
-    </svg>
-  );
-}
-
-// ---- one thread turn, mapped onto DS components ----
-function Turn({ m }) {
+// One thread turn → a DS node, dispatched by role/kind. `ctx.streaming` is the
+// per-message streaming flag surfaced by ConversationThread; `onSuggest` runs a
+// suggestion-chip click (routes back through the same send/enqueue path).
+//   • user                       → <Message role="user">
+//   • assistant · reasoning      → <Reasoning> (思考块)
+//   • assistant · tool           → <ToolCall>  (add_field 等工具卡)
+//   • assistant · error          → <Alert variant="danger"> (对话失败)
+//   • assistant · text (default) → <Message role="assistant"> + optional <Suggestions>
+export function renderChatTurn(m, ctx, onSuggest) {
   if (m.role === "user") {
     return (
-      <div className="d-turn--user">
-        <Message role="user">
-          <p>{m.text}</p>
-        </Message>
-      </div>
+      <Message role="user">
+        <p>{m.text}</p>
+      </Message>
     );
   }
   if (m.kind === "reasoning") {
@@ -158,71 +50,15 @@ function Turn({ m }) {
       </Alert>
     );
   }
-  // assistant prose
+  // assistant prose (+ optional suggestion chips once the turn has settled)
   return (
-    <Message role="assistant" streaming={m.streaming}>
+    <Message role="assistant" streaming={ctx.streaming}>
       <p>{m.text}</p>
-      {m.suggestions && !m.streaming ? (
+      {m.suggestions && !ctx.streaming ? (
         <div style={{ marginTop: 12 }}>
-          <Suggestions items={m.suggestions} onSelect={(v) => m.onSuggest && m.onSuggest(v)} />
+          <Suggestions items={m.suggestions} onSelect={onSuggest} />
         </div>
       ) : null}
     </Message>
-  );
-}
-
-// ---- thread ----
-export function ChatThread({ messages, empty, onStarter, density }) {
-  const ref = useRef(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
-
-  if (empty) {
-    return (
-      <div className="d-thread ax-dotgrid" ref={ref}>
-        <div className="d-empty">
-          <div className="d-empty__inner">
-            <div className="d-empty__mark">
-              <Icon name="spark" size={22} />
-            </div>
-            <h2 className="d-empty__h">描述你想要的表单</h2>
-            <p className="d-empty__p">
-              用一句话说明用途和要收集的信息，Agent 会边想边把字段搭到右侧预览。
-            </p>
-            <div className="d-empty__chips">
-              <Suggestions
-                items={["做一个线下活动报名表", "收集一份客户满意度问卷", "招聘投递表单"]}
-                onSelect={onStarter}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className={"d-thread" + (density === "compact" ? " is-compact" : "")} ref={ref}>
-      <div className="d-thread__col">
-        {messages.map((m) => (
-          <Turn key={m.id} m={m} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ---- composer (DS) ----
-export function ChatComposer({ value, onChange, onSend, disabled, placeholder }) {
-  return (
-    <Composer
-      value={value}
-      onChange={onChange}
-      onSend={onSend}
-      disabled={disabled}
-      model="agentaily-2 · forms"
-      placeholder={placeholder}
-    />
   );
 }

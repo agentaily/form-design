@@ -1,13 +1,15 @@
 // Outer-loop acceptance for features/integration-settings.feature — the owner
-// integration-settings modal (SPEC §12 owner config + §14 connection test, §17 auth).
+// 集成设置 page (SPEC §12 owner config + §14 connection test, §17 auth).
 //
-// We render the real <SettingsDialog> (src/settings.jsx) and INJECT fake
-// getConfig/saveConfig/testConnections via its props — the same deterministic seam
-// auth.jsx uses for login/logout. That keeps these tests about the dialog's
-// observable behavior (echo, save, errors, per-block test rows, 401 → onNeedLogin)
-// without a backend or token store. The lower wire contract (path/method/payload,
-// the don't-resubmit-the-mask rule) is pinned separately in
-// tests/unit/configClient.test.js.
+// Since DS 0.6.0 dropped the all-in-one IntegrationSettings modal, 集成设置 is now a
+// standalone /settings ROUTE page (src/settings.jsx → SettingsScreen) built from two
+// pure-display DS cards (DeepSeekCard + FeishuCard) + this page's OWN save bar, backend
+// error display, and 401 → /signin handoff. We render the real <SettingsScreen> and
+// INJECT fake getConfig/saveConfig/testConnections/navigate via its props — the same
+// deterministic seam auth.jsx uses. That keeps these tests about the page's observable
+// behavior (echo, save, backend errors, per-block test rows, 401 → navigate) without a
+// backend or token store. The lower wire contract (path/method/payload, the
+// don't-resubmit-the-mask rule) is pinned separately in tests/unit/configClient.test.js.
 import React from "react";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,14 +18,15 @@ import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 // /pure → no auto afterEach(cleanup); @amiceli runs each Gherkin step as its own
 // test, so cleanup is per-scenario (AfterEachScenario), never per-step.
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
-import { SettingsDialog } from "../../src/settings.jsx";
+import { SettingsScreen } from "../../src/settings.jsx";
 import { ApiError } from "../../src/core/apiClient";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/integration-settings.feature"));
 
 // A fully-configured masked view as GET /api/config would return it: secret fields
-// (deepseek.apiKey, feishu.appSecret) come back MASKED; the rest plaintext (§12.3).
+// (deepseek.apiKey, feishu.appSecret) come back MASKED; the rest plaintext (§12.3). The
+// FeishuCard surfaces appToken/tableId via a Bitable share link the page reconstructs.
 const MASKED_CONFIGURED = {
   deepseek: { apiKey: "sk-…wxyz", model: "deepseek-chat" },
   feishu: {
@@ -53,14 +56,12 @@ function fakeClient(overrides = {}) {
   };
 }
 
-// Render the dialog open with injected fakes; getConfig fires on open, so wait for
-// the form to settle (the save action is present once the fetch resolves).
+// Render the settings page with injected fakes; getConfig fires on mount, so wait for
+// the form to settle (the Save action is present once the fetch resolves).
 function openSettings(client, extra = {}) {
   render(
-    <SettingsDialog
-      open
-      onClose={extra.onClose ?? vi.fn()}
-      onNeedLogin={extra.onNeedLogin}
+    <SettingsScreen
+      navigate={extra.navigate ?? vi.fn()}
       getConfig={client.getConfig}
       saveConfig={client.saveConfig}
       testConnections={client.testConnections}
@@ -68,12 +69,14 @@ function openSettings(client, extra = {}) {
   );
 }
 
-// The Save button is the natural anchor for "the form is rendered and ready".
+// The Save button is the natural anchor for "the page is rendered and ready". (The
+// TestRows also render a "测试连接" button per card, so scope Save by exact name.)
 function saveButton() {
-  return screen.getByRole("button", { name: /保存/ });
+  return screen.getByRole("button", { name: "保存" });
 }
-function testButton() {
-  return screen.getByRole("button", { name: /测试|连接/ });
+// Each card renders its own TestRow "测试连接" button — the first is DeepSeek's.
+function testButtons() {
+  return screen.getAllByRole("button", { name: /测试连接|重新测试/ });
 }
 
 describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
@@ -88,24 +91,30 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     When("owner 打开集成设置", async () => {
       openSettings(client);
       await waitFor(() => expect(client.getConfig).toHaveBeenCalled());
-      await screen.findByRole("dialog");
+      await waitFor(() => expect(saveButton()).toBeInTheDocument());
     });
-    Then("弹窗用掩码值回显 DeepSeek key 与飞书 app_secret", async () => {
-      // Secret fields surface their masked echo (placeholder/hint/value) — never
-      // the real key. The mask strings are contract-fixed (§12.3/§12.4).
+    Then("设置页用掩码值回显 DeepSeek key 与飞书 app_secret", async () => {
+      // A stored secret surfaces as the card's MASKED affordance (placeholder "已保存…留空
+      // 则保持不变") — the editable value stays empty so the real key is never shown nor
+      // re-submitted. Both secret fields (DeepSeek key + 飞书 app_secret) show it.
       await waitFor(() => {
-        expect(screen.getByText("sk-…wxyz", { exact: false })).toBeInTheDocument();
-        expect(screen.getByText("yy…yy", { exact: false })).toBeInTheDocument();
+        const masked = screen.getAllByPlaceholderText(/已保存.*留空则保持不变/);
+        expect(masked.length).toBe(2);
+        masked.forEach((el) => expect(el.value).toBe(""));
       });
     });
     And("非密字段（model / app_id / app_token / table_id）以明文回显", () => {
-      const dialog = screen.getByRole("dialog");
-      const inputs = dialog.querySelectorAll("input");
-      const values = Array.from(inputs).map((el) => el.value);
-      expect(values).toContain("deepseek-chat");
-      expect(values).toContain("cli_a1b2c3");
-      expect(values).toContain("bascnTOKEN");
-      expect(values).toContain("tblTABLE");
+      // model echoes in the DeepSeek <Select>; app_id in its input; app_token + table_id
+      // are surfaced (plaintext) via the FeishuCard's parsed share-link read-out.
+      const inputs = Array.from(document.querySelectorAll("input"));
+      const values = inputs.map((el) => el.value);
+      expect(values).toContain("cli_a1b2c3"); // app_id input
+      // model lives in a <select>
+      const selectVals = Array.from(document.querySelectorAll("select")).map((s) => s.value);
+      expect(selectVals).toContain("deepseek-chat");
+      // app_token + table_id are read out from the reconstructed link (plaintext).
+      expect(screen.getByText("bascnTOKEN")).toBeInTheDocument();
+      expect(screen.getByText("tblTABLE")).toBeInTheDocument();
     });
   });
 
@@ -116,17 +125,17 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     When("owner 打开集成设置", async () => {
       openSettings(client);
       await waitFor(() => expect(client.getConfig).toHaveBeenCalled());
-      await screen.findByRole("dialog");
-    });
-    Then("弹窗显示空的配置表单且无报错", async () => {
-      // Form is present (save action exists) and no error Alert / mask echo shows.
       await waitFor(() => expect(saveButton()).toBeInTheDocument());
-      const dialog = screen.getByRole("dialog");
-      const values = Array.from(dialog.querySelectorAll("input")).map((el) => el.value);
-      // All-null skeleton → no pre-filled plaintext values.
-      expect(values.every((v) => v === "")).toBe(true);
-      // No error surface from a normal never-configured load.
-      expect(screen.queryByText(/出错|失败|无法/)).not.toBeInTheDocument();
+    });
+    Then("设置页显示空的配置表单且无报错", async () => {
+      // Cards are present (Save action exists) and no error Alert / masked affordance shows.
+      const inputs = Array.from(document.querySelectorAll("input"));
+      // All-null skeleton → no pre-filled plaintext values and no masked-secret placeholder.
+      expect(inputs.every((el) => el.value === "")).toBe(true);
+      expect(screen.queryByPlaceholderText(/已保存.*留空则保持不变/)).not.toBeInTheDocument();
+      // No error surface from a normal never-configured load — the page's own danger
+      // Alert ("保存失败") is absent (the cards' static security copy isn't an error).
+      expect(screen.queryByText("保存失败")).not.toBeInTheDocument();
     });
   });
 
@@ -140,22 +149,30 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await waitFor(() => expect(saveButton()).toBeInTheDocument());
     });
     When("owner 填入 DeepSeek key 与完整飞书凭据并保存", async () => {
-      const dialog = screen.getByRole("dialog");
-      const inputs = Array.from(dialog.querySelectorAll("input"));
-      // Fill every field so the save carries a valid, complete config.
-      inputs.forEach((el, i) => fireEvent.change(el, { target: { value: `val-${i}` } }));
+      // Fill the DeepSeek key, the 飞书 App ID + secret, and a parseable 飞书 share link
+      // so the save carries a valid, complete config.
+      fireEvent.change(screen.getByPlaceholderText(/sk-/), { target: { value: "sk-newkey" } });
+      fireEvent.change(screen.getByPlaceholderText("cli_xxxxxxxxxxxx"), {
+        target: { value: "cli_real" },
+      });
+      const secretInput = document.querySelector('input[id="secret-app-secret"]');
+      fireEvent.change(secretInput, { target: { value: "feishu-secret" } });
+      fireEvent.change(screen.getByPlaceholderText(/feishu\.cn\/base/), {
+        target: { value: "https://team.feishu.cn/base/bascnNEW?table=tblNEW" },
+      });
       fireEvent.click(saveButton());
       await waitFor(() => expect(client.saveConfig).toHaveBeenCalled());
     });
-    Then("弹窗提示保存成功", async () => {
+    Then("设置页提示保存成功", async () => {
       await screen.findByText(/已保存|保存成功/);
     });
-    And("弹窗用后端返回的掩码视图回显当前配置", async () => {
-      // Re-echo of the returned masked view: secret masks back, plaintext back.
+    And("设置页用后端返回的掩码视图回显当前配置", async () => {
+      // Re-echo of the returned masked view: secret masks reset to the masked affordance,
+      // plaintext (app_id / app_token / table_id) back.
       await waitFor(() => {
-        expect(screen.getByText("sk-…wxyz", { exact: false })).toBeInTheDocument();
-        expect(screen.getByText("yy…yy", { exact: false })).toBeInTheDocument();
+        expect(screen.getAllByPlaceholderText(/已保存.*留空则保持不变/).length).toBe(2);
       });
+      expect(screen.getByText("bascnTOKEN")).toBeInTheDocument();
     });
   });
 
@@ -172,18 +189,25 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await waitFor(() => expect(saveButton()).toBeInTheDocument());
     });
     When("owner 把 DeepSeek key 留空并保存", () => {
+      // Make the form dirty (so Save is enabled) without typing a key — edit the model.
+      fireEvent.change(document.querySelector("select"), {
+        target: { value: "deepseek-reasoner" },
+      });
       fireEvent.click(saveButton());
     });
     And("后端返回 400 与错误说明", async () => {
       await waitFor(() => expect(client.saveConfig).toHaveBeenCalled());
     });
-    Then("弹窗显示后端给出的错误说明", async () => {
-      // The backend's ApiError.message is surfaced verbatim, not a generic string.
-      await screen.findByText("DeepSeek key 必填");
+    Then("设置页显示后端给出的错误说明", async () => {
+      // The backend's ApiError.message is surfaced verbatim, not a generic string — in the
+      // page's top-level danger Alert and, since it names the DeepSeek key, the card field
+      // error too (so it appears at least once).
+      const hits = await screen.findAllByText("DeepSeek key 必填");
+      expect(hits.length).toBeGreaterThanOrEqual(1);
     });
     And("配置未被保存", () => {
-      // Dialog stays open and no success alert appears — the owner can retry.
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      // Page stays put and no success alert appears — the owner can retry.
+      expect(saveButton()).toBeInTheDocument();
       expect(screen.queryByText(/已保存|保存成功/)).not.toBeInTheDocument();
     });
   });
@@ -201,21 +225,20 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await waitFor(() => expect(saveButton()).toBeInTheDocument());
     });
     When("owner 只填了部分飞书字段并保存", () => {
-      // Fill exactly ONE 飞书 field (APP ID, targeted by its placeholder) and leave
-      // the other 飞书 fields empty — this is the observable "half-filled 飞书" state.
-      // The first DOM input is DeepSeek's API KEY, so picking it would not exercise
-      // 飞书 at all; address the APP ID input directly.
-      fireEvent.change(screen.getByPlaceholderText("cli_…"), {
+      // Fill exactly ONE 飞书 field (APP ID) and leave the secret + link empty — this is
+      // the observable "half-filled 飞书" state. Also fill the DeepSeek key so DeepSeek is
+      // not itself the reason for a 400 (the 飞书 half-fill is what the backend rejects).
+      fireEvent.change(screen.getByPlaceholderText(/sk-/), { target: { value: "sk-ok" } });
+      fireEvent.change(screen.getByPlaceholderText("cli_xxxxxxxxxxxx"), {
         target: { value: "cli_partial" },
       });
       fireEvent.click(saveButton());
     });
     And("后端返回 400 与错误说明", async () => {
       await waitFor(() => expect(client.saveConfig).toHaveBeenCalled());
-      // Make the half-filled state observable on the wire: saveConfig must receive a
-      // 飞书 block carrying only appId, with the other 飞书 keys absent (omitted, per
-      // the "don't send empty fields" rule) — that absence is exactly what a real
-      // backend would reject with this 400.
+      // Make the half-filled state observable on the wire: saveConfig must receive a 飞书
+      // block carrying only appId, with the other 飞书 keys absent (omitted, per the "don't
+      // send empty fields" rule) — that absence is exactly what a real backend rejects 400.
       const input = client.saveConfig.mock.calls[0][0];
       expect(input.feishu).toBeTruthy();
       expect(input.feishu.appId).toBe("cli_partial");
@@ -223,11 +246,12 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       expect("appToken" in input.feishu).toBe(false);
       expect("tableId" in input.feishu).toBe(false);
     });
-    Then("弹窗显示后端给出的错误说明", async () => {
-      await screen.findByText("飞书凭据需要一次性完整填写");
+    Then("设置页显示后端给出的错误说明", async () => {
+      const hits = await screen.findAllByText("飞书凭据需要一次性完整填写");
+      expect(hits.length).toBeGreaterThanOrEqual(1);
     });
     And("配置未被保存", () => {
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      expect(saveButton()).toBeInTheDocument();
       expect(screen.queryByText(/已保存|保存成功/)).not.toBeInTheDocument();
     });
   });
@@ -241,20 +265,19 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       openSettings(client);
       await waitFor(() => expect(client.getConfig).toHaveBeenCalled());
     });
-    And("弹窗回显着 DeepSeek key 与飞书 app_secret 的掩码值", async () => {
+    And("设置页回显着 DeepSeek key 与飞书 app_secret 的掩码值", async () => {
+      // Both stored secrets surface their masked affordance (untouched, empty editable).
       await waitFor(() => {
-        expect(screen.getByText("sk-…wxyz", { exact: false })).toBeInTheDocument();
-        expect(screen.getByText("yy…yy", { exact: false })).toBeInTheDocument();
+        const masked = screen.getAllByPlaceholderText(/已保存.*留空则保持不变/);
+        expect(masked.length).toBe(2);
+        masked.forEach((el) => expect(el.value).toBe(""));
       });
     });
     When("owner 只改了 model 而不动两个密钥字段并保存", async () => {
-      const dialog = screen.getByRole("dialog");
-      // Find the input whose value is the echoed model plaintext and edit only it.
-      const modelInput = Array.from(dialog.querySelectorAll("input")).find(
-        (el) => el.value === "deepseek-chat",
-      );
-      expect(modelInput, "model field should echo its plaintext value").toBeTruthy();
-      fireEvent.change(modelInput, { target: { value: "deepseek-reasoner" } });
+      // Edit only the DeepSeek model <Select>, leaving both secret fields untouched (empty).
+      fireEvent.change(document.querySelector("select"), {
+        target: { value: "deepseek-reasoner" },
+      });
       fireEvent.click(saveButton());
       await waitFor(() => expect(client.saveConfig).toHaveBeenCalled());
     });
@@ -286,24 +309,25 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
     Given("owner 已登录并打开集成设置", async () => {
       openSettings(client);
-      await waitFor(() => expect(testButton()).toBeInTheDocument());
+      await waitFor(() => expect(testButtons().length).toBe(2));
     });
     When("owner 点击测试连接", () => {
-      fireEvent.click(testButton());
+      // Either card's Test triggers the stored-config probe; click the DeepSeek one.
+      fireEvent.click(testButtons()[0]);
     });
     And("后端返回 DeepSeek 可连通、飞书凭据无效", async () => {
       await waitFor(() => expect(client.testConnections).toHaveBeenCalled());
     });
-    Then("弹窗把 DeepSeek 标记为连通", async () => {
-      // The success mark is "已连接" (it deliberately avoids the "连通" substring so
-      // the failing "不可连通" row is the unambiguous not-connected signal). Assert
-      // the DeepSeek row itself rendered the connected state — the badge text is the
-      // literal DOM string "DEEPSEEK · 已连接" (the ax-label uppercasing is CSS only).
-      await screen.findByText(/DEEPSEEK.*已连接/);
+    Then("设置页把 DeepSeek 标记为连通", async () => {
+      // DeepSeek's card flips to its connected state — the green "已连接" StatusPill + the
+      // backend note ("可连通") in its TestRow result line.
+      await screen.findByText("可连通");
+      expect(screen.getAllByText("已连接").length).toBeGreaterThanOrEqual(1);
     });
-    And("弹窗把飞书标记为不可连通并显示其说明", async () => {
+    And("设置页把飞书标记为不可连通并显示其说明", async () => {
+      // 飞书's card flips to its error state — the red "连接失败" StatusPill + the note.
       await screen.findByText("凭据无效");
-      expect(screen.getByText(/不可连通/)).toBeInTheDocument();
+      expect(screen.getAllByText("连接失败").length).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -317,28 +341,30 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
     Given("owner 已登录并打开集成设置", async () => {
       openSettings(client);
-      await waitFor(() => expect(testButton()).toBeInTheDocument());
+      await waitFor(() => expect(testButtons().length).toBe(2));
     });
     When("owner 点击测试连接", () => {
-      fireEvent.click(testButton());
+      fireEvent.click(testButtons()[0]);
     });
     And("后端返回两块都未配置", async () => {
       await waitFor(() => expect(client.testConnections).toHaveBeenCalled());
     });
-    Then("弹窗逐条显示两块均不可连通及其说明", async () => {
+    Then("设置页逐条显示两块均不可连通及其说明", async () => {
+      // Both cards flip to their (normal) error state showing the "未配置" note — ok:false
+      // is a result, not a request failure.
       await waitFor(() => {
-        expect(screen.getAllByText(/不可连通/).length).toBe(2);
         expect(screen.getAllByText("未配置").length).toBe(2);
+        expect(screen.getAllByText("连接失败").length).toBe(2);
       });
     });
-    And("弹窗不显示请求失败的报错", () => {
+    And("设置页不显示请求失败的报错", () => {
       // ok:false is a normal result, NOT a request failure — no failure Alert.
-      expect(screen.queryByText(/请求失败|测试失败|出错|无法连接/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/请求失败|测试失败|无法连接到后端/)).not.toBeInTheDocument();
     });
   });
 
   Scenario("未登录访问集成设置引导先登录", ({ Given, When, And, Then }) => {
-    const onNeedLogin = vi.fn();
+    const navigate = vi.fn();
     const client = fakeClient({
       getConfig: vi.fn(async () => {
         throw new ApiError(401, "未授权");
@@ -346,22 +372,20 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
     Given("owner 未登录", () => {});
     When("owner 打开集成设置", () => {
-      openSettings(client, { onNeedLogin });
+      openSettings(client, { navigate });
     });
     And("拉取配置返回 401", async () => {
       await waitFor(() => expect(client.getConfig).toHaveBeenCalled());
     });
-    Then("弹窗提示需要先登录", async () => {
-      // A 401 routes into the login flow rather than an inline settings error.
-      await waitFor(() => expect(onNeedLogin).toHaveBeenCalled());
+    Then("设置页提示需要先登录", async () => {
+      // A 401 routes into the standalone /signin page rather than an inline settings error.
+      await waitFor(() => expect(navigate).toHaveBeenCalled());
+      expect(navigate.mock.calls[0][0]).toMatch(/^\/signin\?/);
     });
-    And("自动弹出 owner 登录框", () => {
-      // Here (dialog-level) we only assert the dialog asks for login via onNeedLogin
-      // and does NOT render the 401 as its own inline error. The App-level wiring of
-      // that callback (close settings + open login) is covered by the App-level test
-      // "App wiring: integration-settings 401 routes into owner login" in
-      // tests/integration/app-settings-login.spec.jsx.
-      expect(onNeedLogin).toHaveBeenCalledTimes(1);
+    And("引导去 owner 登录页", () => {
+      // The return target lands the owner back on /settings after login, and the raw 401
+      // message is never surfaced as an inline error.
+      expect(navigate.mock.calls[0][0]).toContain("return=%2Fsettings");
       expect(screen.queryByText(/未授权/)).not.toBeInTheDocument();
     });
   });

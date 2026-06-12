@@ -7,6 +7,7 @@ import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 // so cleanup must happen per scenario (AfterEachScenario), not per step.
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
+import { setToken, clearToken } from "../../src/core/apiClient";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/build-form.feature"));
@@ -49,21 +50,34 @@ function makeFakeChat() {
         ],
       };
     }
+    // The closing turn: prose + LLM-driven follow-up modification suggestions. Since the
+    // DS migration the fixed FOLLOWUP chips below the composer are gone; suggestions are
+    // now a per-message kind (text + suggestions) rendered by renderChatTurn via the DS
+    // <Suggestions>. So the agent's closing turn carries them.
     const text = "搭好了 ✦ 共 9 个字段。你可以直接试填，或继续告诉我怎么改。";
     onText?.(text);
-    return { text, toolCalls: [] };
+    return {
+      text,
+      toolCalls: [],
+      suggestions: ["加一个备注字段", "把手机号设为必填", "换个封面文案"],
+    };
   });
 }
 
-// Drive the agent turn to completion: the follow-up suggestion chip only renders
-// once the turn ends (building → false), so awaiting it means the build settled.
+// Drive the agent turn to completion. The build settles when the turn ends
+// (building → false): the 发布 button is `disabled={building || fieldCount === 0}`,
+// so its becoming enabled means the form is built AND the turn closed. (We no longer
+// gate on a suggestion chip — those moved from a fixed footer affordance to a
+// per-message kind, and gating the whole flow on them would mask the cover/fields
+// assertions if the suggestions wiring regresses.)
 async function awaitBuilt() {
-  await screen.findByText("加一个备注字段");
+  await waitFor(() => expect(screen.getByRole("button", { name: "发布" })).toBeEnabled());
 }
 
 describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   AfterEachScenario(() => {
     cleanup();
+    clearToken();
   });
 
   Scenario("从提示词搭出活动报名表", ({ Given, When, Then, And }) => {
@@ -85,7 +99,10 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     And("预览里挂载了 9 个字段", () => {
       expect(document.querySelectorAll(".pv-fields > div")).toHaveLength(9);
     });
-    And("对话给出后续修改建议", () => {
+    And("对话给出后续修改建议", async () => {
+      // The closing assistant turn carries follow-up modification suggestions, rendered
+      // as DS suggestion chips under the prose (the message model's text+suggestions kind).
+      await screen.findByText("加一个备注字段");
       expect(screen.getByText("加一个备注字段")).toBeInTheDocument();
     });
   });
@@ -95,10 +112,22 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     // injected publishForm(meta, fields) → { slug } and renders the public fill link
     // /f/:slug for that slug. We inject publishForm + publicFormUrl as the App-level
     // seam (same pattern as chat/login) so the flow is deterministic without a backend.
+    //
+    // Since the UI refactor 发布 is a gated action: signed-out it routes to /signin
+    // (guard), so the publish itself only runs for a logged-in owner. We seed a token to
+    // put the App in a logged-in session so 发布 opens PublishFeedback directly.
     const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
     const publicFormUrl = vi.fn((slug) => `/f/${slug}`);
     Given("设计器处于空状态", () => {
-      render(<App chat={makeFakeChat()} publishForm={publishForm} publicFormUrl={publicFormUrl} />);
+      setToken("owner-jwt");
+      render(
+        <App
+          chat={makeFakeChat()}
+          publishForm={publishForm}
+          publicFormUrl={publicFormUrl}
+          getCurrentUser={async () => ({ email: "owner@example.com", emailVerified: true })}
+        />,
+      );
       expect(screen.getByText("描述你想要的表单")).toBeInTheDocument();
     });
     When("作者选择「做一个线下活动报名表」起步提示", async () => {

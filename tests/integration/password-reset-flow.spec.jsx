@@ -17,36 +17,40 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 // /pure → no auto cleanup; we unmount explicitly between cases.
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
+import { SignInScreen } from "../../src/signin.jsx";
 import { ApiError } from "../../src/core/apiClient";
 
 afterEach(() => cleanup());
 
-function baseStubs() {
-  return { chat: vi.fn(), login: vi.fn(), register: vi.fn(), logout: vi.fn() };
+// Fill the 找回密码 dialog's own email field (the last owner@example.com input — the
+// SignInPage login email field stays mounted under the overlay).
+function fillResetEmail(value) {
+  const emails = screen.getAllByPlaceholderText("owner@example.com");
+  fireEvent.change(emails[emails.length - 1], { target: { value } });
 }
 
-function openAccount() {
-  fireEvent.click(screen.getByRole("button", { name: "登录账户" }));
-}
-
-describe("找回密码 发起（登录框）(features/password-reset.feature, §24.5 frontend)", () => {
-  it("Scenario: 从登录框发起找回密码 — 显示中性提示", async () => {
-    // requestPasswordReset always resolves (anti-enumeration, §24.1) — the dialog shows
-    // ONE neutral copy regardless of whether the email is registered.
+describe("找回密码 发起（登录页）(features/password-reset.feature, §24.5 frontend)", () => {
+  it("Scenario: 从登录页发起找回密码 — 显示中性提示", async () => {
+    // Since the UI refactor the in-app login modal is gone — 找回密码 is opened from the
+    // standalone /signin page (DS SignInPage's 忘记密码？ link → a 找回密码 dialog).
+    // requestPasswordReset always resolves (anti-enumeration, §24.1) — ONE neutral copy
+    // shows regardless of whether the email is registered.
     const requestPasswordReset = vi.fn(async () => {});
-    render(<App {...baseStubs()} requestPasswordReset={requestPasswordReset} />);
-
-    // Given 打开了 owner 登录框
-    openAccount();
-    expect(screen.getByText("OWNER 登录 / 注册")).toBeInTheDocument();
+    render(
+      <SignInScreen
+        login={vi.fn()}
+        register={vi.fn()}
+        requestPasswordReset={requestPasswordReset}
+        navigate={vi.fn()}
+        search=""
+      />,
+    );
 
     // When 作者点击「忘记密码」并输入邮箱发起
     fireEvent.click(screen.getByRole("button", { name: "忘记密码？" }));
-    // The dialog flips to the 找回密码 sub-state.
-    await screen.findByText("找回密码");
-    fireEvent.change(screen.getByPlaceholderText("owner@example.com"), {
-      target: { value: "owner@example.com" },
-    });
+    // The 找回密码 dialog opens.
+    await screen.findByRole("dialog");
+    fillResetEmail("owner@example.com");
     fireEvent.click(screen.getByRole("button", { name: "发送重置链接" }));
 
     // Then 显示中性提示「若该邮箱已注册，我们已发送重置链接」.
@@ -61,19 +65,24 @@ describe("找回密码 发起（登录框）(features/password-reset.feature, §
   });
 
   it("Scenario: 未注册邮箱发起也得到相同中性提示（前端不区分）", async () => {
-    // Even a network/backend hiccup is swallowed by requestPasswordReset, so the SAME
-    // neutral copy shows — the UI can never enumerate accounts (§24.5).
+    // Even a network/backend hiccup is swallowed by submitReset, so the SAME neutral copy
+    // shows — the UI can never enumerate accounts (§24.5).
     const requestPasswordReset = vi.fn(async () => {
       throw new Error("network blip"); // swallowed by the dialog's guard
     });
-    render(<App {...baseStubs()} requestPasswordReset={requestPasswordReset} />);
+    render(
+      <SignInScreen
+        login={vi.fn()}
+        register={vi.fn()}
+        requestPasswordReset={requestPasswordReset}
+        navigate={vi.fn()}
+        search=""
+      />,
+    );
 
-    openAccount();
     fireEvent.click(screen.getByRole("button", { name: "忘记密码？" }));
-    await screen.findByText("找回密码");
-    fireEvent.change(screen.getByPlaceholderText("owner@example.com"), {
-      target: { value: "ghost@example.com" },
-    });
+    await screen.findByRole("dialog");
+    fillResetEmail("ghost@example.com");
     fireEvent.click(screen.getByRole("button", { name: "发送重置链接" }));
 
     await screen.findByText("若该邮箱已注册，我们已发送重置链接，请查收邮件。");

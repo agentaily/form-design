@@ -6,9 +6,9 @@ import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 // /pure → no auto afterEach(cleanup); @amiceli runs each Gherkin step as its own
 // test, so we must clean up per scenario (AfterEachScenario), not per step.
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
+import { MarkupLayer } from "@agentaily/design-system";
 import App from "../../src/App.jsx";
 import { FormPreview } from "../../src/preview.jsx";
-import { MarkupLayer } from "../../src/markup.jsx";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/markup-targeting.feature"));
@@ -66,6 +66,11 @@ async function buildSeededApp() {
   await waitFor(() => expect(screen.getByRole("button", { name: "指向修改" })).toBeEnabled());
 }
 
+// Since the UI refactor 指向修改 is the DS MarkupLayer (ax-markup* DOM), not the
+// hand-written src/markup.jsx (deleted). Its targeting still keys off the preview's
+// data-mk-label/data-mk-kind (preview.jsx unchanged), and its emitted message format
+// 〔label · kind〕note already matches the feature contract.
+//
 // jsdom has no real layout, so `document.elementFromPoint` (used by MarkupLayer to
 // resolve the target under the cursor) doesn't exist / can't hit-test. For
 // selection-dependent behavior we DEFINE it to return a node carrying the desired
@@ -89,7 +94,7 @@ function renderLayerWithSelection(target) {
   const onClose = vi.fn();
   render(<MarkupLayer onClose={onClose} onSend={onSend} />);
   stubTarget(target);
-  fireEvent.click(document.querySelector(".d-markup__canvas"));
+  fireEvent.click(document.querySelector(".ax-markup__canvas"));
   return { onSend, onClose };
 }
 
@@ -116,7 +121,7 @@ describeFeature(
         fireEvent.click(screen.getByRole("button", { name: "指向修改" }));
       });
       Then("进入指向修改模式", () => {
-        expect(document.querySelector(".d-markup")).toBeInTheDocument();
+        expect(document.querySelector(".ax-markup")).toBeInTheDocument();
       });
       And("「指向修改」按钮点亮为选中态", () => {
         // entry button lit: variant="solid" → ax-iconbtn--solid
@@ -185,14 +190,14 @@ describeFeature(
       });
       When("作者点击「提交按钮」", () => {
         stubTarget({ label: "提交按钮", kind: "按钮" });
-        fireEvent.click(document.querySelector(".d-markup__canvas"));
+        fireEvent.click(document.querySelector(".ax-markup__canvas"));
       });
       Then("该元素被选中并冻结 hover 高亮", () => {
-        expect(document.querySelector(".d-markup__box.is-selected")).toBeInTheDocument();
+        expect(document.querySelector(".ax-markup__box.is-selected")).toBeInTheDocument();
       });
       And("其下方弹出修改 composer", () => {
-        expect(document.querySelector(".d-markup__pop")).toBeInTheDocument();
-        expect(document.querySelector(".d-markup__ta")).toBeInTheDocument();
+        expect(document.querySelector(".ax-markup__pop")).toBeInTheDocument();
+        expect(document.querySelector(".ax-markup__ta")).toBeInTheDocument();
       });
       And("composer 顶部回显身份「提交按钮 · 按钮」", () => {
         expect(screen.getByText("提交按钮 · 按钮")).toBeInTheDocument();
@@ -212,23 +217,23 @@ describeFeature(
         fireEvent.click(screen.getByRole("button", { name: "指向修改" }));
         // jsdom elementFromPoint is unreliable → stub the target the canvas resolves.
         stubTarget({ label: "提交按钮", kind: "按钮" });
-        fireEvent.click(document.querySelector(".d-markup__canvas"));
+        fireEvent.click(document.querySelector(".ax-markup__canvas"));
       });
       When("作者输入「改成『立即报名』」并点击「发送到对话」", async () => {
-        const ta = document.querySelector(".d-markup__ta");
+        const ta = document.querySelector(".ax-markup__ta");
         fireEvent.change(ta, { target: { value: "改成『立即报名』" } });
         fireEvent.click(screen.getByRole("button", { name: /发送到对话/ }));
         // the tagged text is enqueued as a user turn (then the agent picks it up).
         await screen.findByText("〔提交按钮 · 按钮〕改成『立即报名』");
       });
       Then("左侧对话新增一条用户消息「〔提交按钮 · 按钮〕改成『立即报名』」", () => {
-        // user-role turns render inside .d-turn--user; the tagged text is the message.
-        const userTurns = Array.from(document.querySelectorAll(".d-turn--user"));
+        // user-role turns render inside .ax-msg--user; the tagged text is the message.
+        const userTurns = Array.from(document.querySelectorAll(".ax-msg--user"));
         const texts = userTurns.map((n) => n.textContent);
         expect(texts).toContain("〔提交按钮 · 按钮〕改成『立即报名』");
       });
       And("退出指向修改模式", () => {
-        expect(document.querySelector(".d-markup")).not.toBeInTheDocument();
+        expect(document.querySelector(".ax-markup")).not.toBeInTheDocument();
       });
     });
 
@@ -238,7 +243,7 @@ describeFeature(
         ({ onSend } = renderLayerWithSelection({ label: "封面" }));
       });
       When("作者输入「换个封面图」并发送", () => {
-        const ta = document.querySelector(".d-markup__ta");
+        const ta = document.querySelector(".ax-markup__ta");
         fireEvent.change(ta, { target: { value: "换个封面图" } });
         fireEvent.click(screen.getByRole("button", { name: /发送到对话/ }));
       });
@@ -252,7 +257,7 @@ describeFeature(
         renderLayerWithSelection({ label: "姓名", kind: "输入框" });
       });
       When("修改输入框为空或只含空白", () => {
-        const ta = document.querySelector(".d-markup__ta");
+        const ta = document.querySelector(".ax-markup__ta");
         fireEvent.change(ta, { target: { value: "   " } });
       });
       Then("「发送到对话」按钮不可用", () => {
@@ -269,12 +274,12 @@ describeFeature(
         fireEvent.keyDown(window, { key: "Escape" });
       });
       Then("取消选中并关闭 composer", () => {
-        expect(document.querySelector(".d-markup__pop")).not.toBeInTheDocument();
+        expect(document.querySelector(".ax-markup__pop")).not.toBeInTheDocument();
       });
       And("仍处于指向修改模式", () => {
         // onClose (exit) was NOT called — the layer is still mounted.
         expect(onClose).not.toHaveBeenCalled();
-        expect(document.querySelector(".d-markup")).toBeInTheDocument();
+        expect(document.querySelector(".ax-markup")).toBeInTheDocument();
       });
     });
 
@@ -315,11 +320,11 @@ describeFeature(
         fireEvent.click(screen.getByRole("button", { name: "取消" }));
       });
       Then("取消选中并关闭 composer", () => {
-        expect(document.querySelector(".d-markup__pop")).not.toBeInTheDocument();
+        expect(document.querySelector(".ax-markup__pop")).not.toBeInTheDocument();
       });
       And("仍处于指向修改模式", () => {
         expect(onClose).not.toHaveBeenCalled();
-        expect(document.querySelector(".d-markup")).toBeInTheDocument();
+        expect(document.querySelector(".ax-markup")).toBeInTheDocument();
       });
     });
 

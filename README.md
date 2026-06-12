@@ -23,7 +23,7 @@ ops (hooks, CI/CD, Pages deploy, releases) are in **[`OPERATIONS.md`](./OPERATIO
 the release & DB-migration playbook (CI/CD pipeline, secrets, single→multi-tenant
 migration) is in **[`RELEASE.md`](./RELEASE.md)**. How the project is **driven** — the
 layered R&D paradigm (roadmap → spec/BDD/contract → double-loop TDD by sub agents →
-parallel topology) — is in **[`METHODOLOGY.md`](./METHODOLOGY.md)**.
+parallel topology → Claude Design–driven UI) — is in **[`DEVELOPMENT.md`](./DEVELOPMENT.md)**.
 
 ## Run
 
@@ -42,17 +42,32 @@ The designer talks to the Cloudflare Workers backend over `VITE_API_BASE`
 `/api/*`; point it at a local backend with `cd workers && npx wrangler dev` then
 `VITE_API_BASE=http://127.0.0.1:8787`. `/api/chat` is owner-only, so the owner
 logs in (`POST /api/auth/login`) and the session token rides every owner-only
-request as a Bearer header (`core/auth` + the account dialog in `src/auth.jsx`).
+request as a Bearer header (`core/auth` + the standalone `/signin` page in
+`src/signin.jsx`). A signed-out owner who triggers a gated action is bounced to
+`/signin?return=…&reason=…` and resumed after login.
 
 ## How it's wired
 
 - `src/main.jsx` — entry; imports `@agentaily/design-system/styles.css` (tokens +
   fonts + motif utilities) once, then mounts the app.
-- `src/App.jsx` — header, resizable split (single-column ≤720px via the mobile
-  sub-bar), the live agent turn (streamed prose + tool-call cards) driven through
-  `core/queue` (continuous-send buffer + `Queue` UI), Schema view, share dialog.
-- `src/chat.jsx` — chat side: `Message` / `Reasoning` / `ToolCall` / `Composer` / `Suggestions` / `Alert`.
-- `src/auth.jsx` — owner login / account dialog (`Dialog` / `Input` / `Button` / `Alert`); password form when logged out, confirmation + logout when logged in.
+- `src/App.jsx` — the route split + the designer. The two-pane frame is the DS
+  `DesignerShell` (top bar / draggable split / mobile switch), the chat column is
+  the DS `ConversationThread` (pure render; its `controller` wraps the real
+  `core/queue` continuous-send buffer), the account control is the DS
+  `AccountControl`, and 指向修改 is the DS `MarkupLayer`. The live agent turn
+  (streamed prose + tool-call cards), publish (`PublishFeedback`), Schema view,
+  and the 邮箱未验证 banner are wired here.
+- `src/chat.jsx` — chat rendering: re-exports the DS `Icon`, and `renderChatTurn`
+  (the per-turn renderer fed to `ConversationThread` — `Message` / `Reasoning` /
+  `ToolCall` / `Suggestions` / `Alert`).
+- `src/signin.jsx` — the standalone `/signin` page: the DS `SignInPage` wired to
+  the real owner auth (`core/auth` login / register / password-reset), using its
+  `error` / `submitting` seams for backend errors + async busy, plus a small
+  找回密码 dialog (the one bit SignInPage doesn't cover).
+- `src/settings.jsx` — the standalone `/settings` page (`SettingsScreen`): the DS
+  `DeepSeekCard` + `FeishuCard` connection cards (pure display) composed with a
+  form-design-owned save bar / backend-error display, wired to the real BYOK
+  backend via `core/configClient` (masked secrets kept, 401 → `/signin`).
 - `src/preview.jsx` — live form: `Field` / `Input` / `Textarea` / `Select` / `RadioGroup` / `Checkbox` / `Button`, with validation via the DS `Form.useForm` hook.
 - `src/app.css` — layout-only styles (page chrome, split, form-card shell); all values reference DS tokens.
 - `src/core/` — the **SPEC architecture's testable core** (TypeScript, strict),
@@ -102,9 +117,10 @@ form tools in `designerTools` (`set_form_meta`, `add_field`, …), which mutate 
 live form model that `preview.jsx` renders; failed tool calls backfill as errors so
 the model self-heals. Tests inject a fake `chat` into `<App chat={…} />` for
 deterministic builds. `/api/chat` is owner-only — the owner-login/Bearer flow is
-wired (`core/auth` + `src/auth.jsx`; a 401 auto-opens the login dialog). The owner
-also connects DeepSeek + 飞书 through the integration-settings dialog (`src/settings.jsx`
-
-- `core/configClient`, SPEC §12/§14): open → `GET /api/config` echoes the masked
-  config, save → `POST /api/config`, test → `POST /api/config/test`; a 401 routes back
-  into the login flow. The publish/submit endpoints land in later phases (see `ROADMAP.md`).
+wired (`core/auth` + the standalone `/signin` page `src/signin.jsx`; a 401 navigates to
+`/signin`). The owner connects DeepSeek + 飞书 on the standalone `/settings` page
+(`src/settings.jsx` = `SettingsScreen`, composing DS `DeepSeekCard` + `FeishuCard` with a
+form-design-owned save bar / backend-error display, over `core/configClient`, SPEC
+§12/§14): mount → `GET /api/config` echoes the masked config, save → `POST /api/config`
+(masked secrets kept, never re-sent), test → `POST /api/config/test`; a 401 routes to
+`/signin`. The publish/submit endpoints land in later phases (see `ROADMAP.md`).

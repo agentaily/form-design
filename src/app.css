@@ -1,8 +1,17 @@
 /* ─────────────────────────────────────────────────────────────────────────
    Layout-only styles for Agentaily Forms.
    Every component is composed from @agentaily/design-system; the rules below
-   only handle page chrome, the split layout, and the form-card shell.
+   only handle the bits the DS doesn't own — the preview pane's inner body, the
+   form-card shell, and the bare public / auth landing pages.
    All values reference DS tokens (var(--*)) — no hand-picked colors/sizes.
+
+   The page frame (top bar / split / divider / mobile switch), the chat thread +
+   composer + empty state, and the 指向修改 overlay are now DS components
+   (DesignerShell · ConversationThread · MarkupLayer), so their hand-written
+   chrome (the old d-app / d-top / d-split / d-pane / d-divider / d-thread /
+   d-empty / d-foot / d-mbar / d-markup rules) is gone — they ship as the DS
+   ax-dshell, ax-cthread and ax-markup classes. Bar heights line up via the DS
+   tokens --topbar-h and --bar-h.
    ───────────────────────────────────────────────────────────────────────── */
 
 html,
@@ -17,204 +26,7 @@ body {
   height: 100vh;
 }
 
-.d-app {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  background: var(--surface-page);
-}
-
-/* top bar */
-.d-top {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  height: 52px;
-  flex: none;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border-default);
-  background: var(--surface-panel);
-}
-.d-top__brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.d-top__mark {
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-body);
-}
-.d-top__word {
-  font-family: var(--font-mono);
-  font-size: 15px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  color: var(--text-body);
-}
-.d-top__div {
-  color: var(--text-faint);
-}
-.d-top__crumb {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text-muted);
-}
-.d-top__title {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  justify-content: center;
-}
-.d-top__name {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-}
-.d-top__actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* split */
-.d-split {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-}
-.d-pane {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-}
-.d-pane--preview {
-  flex: 1;
-  position: relative;
-}
-.d-divider {
-  width: 9px;
-  flex: none;
-  cursor: col-resize;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--surface-page);
-  border-left: 1px solid var(--border-default);
-  border-right: 1px solid var(--border-default);
-}
-.d-divider__grip {
-  width: 2px;
-  height: 26px;
-  border-radius: 2px;
-  background: var(--border-strong);
-  transition: background var(--dur-1) var(--ease-out);
-}
-.d-divider:hover .d-divider__grip {
-  background: var(--text-faint);
-}
-
-/* chat thread */
-.d-thread {
-  flex: 1;
-  overflow-y: auto;
-}
-.d-thread__col {
-  max-width: 680px;
-  margin: 0 auto;
-  padding: 28px 24px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-.d-thread.is-compact .d-thread__col {
-  gap: 12px;
-  padding-top: 18px;
-}
-.d-turn--user {
-  display: flex;
-  justify-content: flex-end;
-}
-
-/* empty state */
-.d-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-}
-.d-empty__inner {
-  max-width: 440px;
-  text-align: center;
-  padding: 40px 24px;
-}
-.d-empty__mark {
-  width: 46px;
-  height: 46px;
-  margin: 0 auto 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-3);
-  color: var(--text-body);
-  background: var(--surface-card);
-}
-.d-empty__h {
-  font-family: var(--font-display);
-  font-size: var(--text-xl);
-  font-weight: 500;
-  letter-spacing: var(--tracking-tight);
-  color: var(--text-body);
-  margin: 0 0 8px;
-}
-.d-empty__p {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  line-height: var(--leading-body);
-  margin: 0 0 20px;
-}
-.d-empty__chips {
-  display: flex;
-  justify-content: center;
-}
-
-/* composer foot */
-.d-foot {
-  flex: none;
-  padding: 8px 24px 14px;
-}
-.d-foot > * {
-  max-width: 680px;
-  margin: 0 auto;
-}
-.d-foot__queue {
-  margin-bottom: 10px;
-}
-.d-foot__suggest {
-  margin-bottom: 10px;
-}
-.d-foot__note {
-  text-align: center;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-faint);
-  margin: 8px auto 0;
-  letter-spacing: 0.04em;
-}
-
-/* preview pane head */
-.d-pvhead {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 48px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border-default);
-  background: var(--surface-panel);
-}
+/* preview pane head (mounted in the DesignerShell preview slot's .ax-dshell__panebar) */
 .d-pvhead__tabs {
   min-width: 0;
 }
@@ -231,6 +43,22 @@ body {
   height: 16px;
   background: var(--border-default);
   margin: 0 3px;
+}
+/* desktop-width toggles — DesignerShell owns the mobile switch, so hide these on phones */
+.d-devtoggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* preview stage: position:relative so the DS MarkupLayer (inset:0) overlays only the
+   preview body, not the panebar above it. Fills the slot below the panebar. */
+.d-pvstage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /* preview body */
@@ -484,7 +312,7 @@ body {
   padding: 28px 24px;
 }
 
-/* ───────────────────────── owner login / account dialog ───────────────────────── */
+/* ───────────────────── 找回密码 sub-dialog (in the /signin page) ───────────────────── */
 .d-auth-body {
   display: flex;
   flex-direction: column;
@@ -496,27 +324,15 @@ body {
   line-height: var(--leading-snug);
   margin: 0;
 }
-/* 「忘记密码？」/「返回登录」 inline text entry — a borderless link affordance that
-   inherits DS tokens (no hard-coded color). */
-.d-auth__link {
-  align-self: flex-start;
-  background: none;
-  border: 0;
-  padding: 2px 0;
-  font-family: inherit;
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: color var(--dur-1) var(--ease-out);
-}
-.d-auth__link:hover {
-  color: var(--text-body);
-}
 
-/* ─────────────────────── 邮箱未验证 banner (设计器顶部, §23.6) ─────────────────── */
+/* ─────────────── 邮箱未验证 banner (§23.6) — floating strip over DesignerShell ─────────────── */
 .d-verify-banner {
-  padding: 0 var(--space-4, 16px);
-  margin-top: var(--space-2, 8px);
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 40;
+  width: min(620px, calc(100% - 32px));
 }
 .d-verify-banner__row {
   display: flex;
@@ -538,131 +354,22 @@ body {
   gap: 18px;
 }
 
-/* ───────────────────────── integration settings dialog ───────────────────────── */
+/* ───────────────── integration settings page (/settings, §12 + §14) ─────────────────
+   The /settings route renders the DS SettingsPage frame + two DS connection cards
+   (DeepSeekCard + FeishuCard), which own their own internal layout. This wrapper just
+   stacks the page's own save Alerts above the cards inside SettingsPage's content column. */
 .d-settings {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-}
-.d-settings__block {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.d-settings__test {
-  padding-top: 12px;
-  border-top: 1px solid var(--border-default);
-}
-.d-settings__probe {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.d-settings__probe-msg {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--text-muted);
+  gap: 20px;
 }
 
-/* ───────────────────────── responsive: phone (single column) ───────────────────────── */
-.d-mbar {
-  display: none;
-}
-
+/* ───────────────────────── responsive: phone (preview inner only) ───────────────────────── */
+/* The shell/thread/mobile-switch responsiveness is owned by DesignerShell + ConversationThread;
+   only the preview pane's own inner padding + the desktop-width toggles need adjusting here. */
 @media (max-width: 720px) {
-  /* one pane at a time, toggled by .d-split[data-mview] from the sub-bar */
-  .d-split {
-    flex-direction: column;
-  }
-  .d-pane {
-    width: 100% !important;
-    flex: 1;
-    min-height: 0;
-  }
-  .d-divider {
+  .d-devtoggles {
     display: none;
-  }
-  .d-split[data-mview="chat"] .d-pane--preview {
-    display: none;
-  }
-  .d-split[data-mview="preview"] .d-pane--chat {
-    display: none;
-  }
-
-  /* header: tighter, drop breadcrumb + form-name; keep a centered status pill */
-  .d-top {
-    gap: 8px;
-    padding: 0 12px;
-  }
-  .d-top__div,
-  .d-top__crumb {
-    display: none;
-  }
-  .d-top__name {
-    display: none;
-  }
-  .d-top__actions {
-    gap: 6px;
-  }
-
-  /* segmented view switcher under the header */
-  .d-mbar {
-    display: flex;
-    flex: none;
-    gap: 8px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border-default);
-    background: var(--surface-panel);
-  }
-  .d-mseg {
-    flex: 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    height: 38px;
-    border: 1px solid var(--border-default);
-    background: var(--surface-page);
-    border-radius: var(--radius-2);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    cursor: pointer;
-    transition:
-      color var(--dur-1) var(--ease-out),
-      background var(--dur-1) var(--ease-out),
-      border-color var(--dur-1) var(--ease-out);
-  }
-  .d-mseg:active {
-    transform: translateY(1px);
-  }
-  .d-mseg.is-on {
-    background: var(--surface-card);
-    border-color: var(--border-strong);
-    color: var(--text-body);
-  }
-  .d-mseg__count {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    line-height: 16px;
-    color: var(--text-faint);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-1);
-    padding: 0 5px;
-  }
-  .d-mseg.is-on .d-mseg__count {
-    color: var(--text-muted);
-  }
-
-  /* tighten inner rhythm for narrow viewports */
-  .d-thread__col {
-    padding: 18px 16px 8px;
-  }
-  .d-foot {
-    padding: 8px 14px 12px;
-  }
-  .d-pvhead {
-    padding: 0 12px;
   }
   .d-pvscroll {
     padding: 18px 14px 56px;
@@ -676,237 +383,6 @@ body {
   .d-schema {
     padding: 18px 14px;
   }
-}
-
-/* very narrow: keep the mark, drop the wordmark */
-@media (max-width: 380px) {
-  .d-top__word {
-    display: none;
-  }
-}
-
-/* ── 指向修改 (element-targeting) mode overlay ── */
-.d-markup {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 49px;
-  bottom: 0;
-  z-index: 20;
-  pointer-events: none;
-  box-shadow: inset 0 0 0 2px var(--focus-soft);
-}
-.d-markup__canvas {
-  position: absolute;
-  inset: 0;
-  cursor: crosshair;
-  touch-action: none;
-  pointer-events: auto;
-}
-
-/* hover / selected highlight box */
-.d-markup__box {
-  position: absolute;
-  pointer-events: none;
-  border: 1.5px solid var(--accent);
-  border-radius: var(--radius-1);
-  background: rgba(127, 127, 127, 0.06);
-  z-index: 22;
-  transition:
-    left 80ms var(--ease-out),
-    top 80ms var(--ease-out),
-    width 80ms var(--ease-out),
-    height 80ms var(--ease-out);
-}
-.d-markup__box.is-selected {
-  box-shadow: 0 0 0 3px var(--focus-soft);
-  background: rgba(127, 127, 127, 0.1);
-  transition: none;
-}
-.d-markup__tag {
-  position: absolute;
-  top: 0;
-  left: -1.5px;
-  transform: translateY(-100%);
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 7px;
-  background: var(--accent);
-  color: var(--accent-fg);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.01em;
-  border-radius: var(--radius-1) var(--radius-1) 0 0;
-  white-space: nowrap;
-}
-.d-markup__tagkind {
-  opacity: 0.7;
-}
-
-/* composer popover */
-.d-markup__pop {
-  position: absolute;
-  width: 248px;
-  z-index: 30;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 11px;
-  background: var(--surface-card);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-3);
-  box-shadow: var(--shadow-3);
-  pointer-events: auto;
-}
-.d-markup__poptarget {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-muted);
-}
-.d-markup__poptag {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--text-body);
-}
-.d-markup__ta {
-  width: 100%;
-  min-height: 64px;
-  resize: none;
-  padding: 8px 10px;
-  background: var(--surface-page);
-  color: var(--text-body);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-2);
-  font-family: var(--font-body);
-  font-size: var(--text-sm);
-  line-height: var(--leading-snug);
-  outline: none;
-}
-.d-markup__ta:focus {
-  border-color: var(--fg-2);
-  box-shadow: 0 0 0 3px var(--focus-soft);
-}
-.d-markup__ta::placeholder {
-  color: var(--text-faint);
-}
-.d-markup__popbtns {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-.d-markup__cancel,
-.d-markup__done {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 12px;
-  border-radius: var(--radius-2);
-  font-family: var(--font-body);
-  font-size: var(--text-sm);
-  cursor: pointer;
-  border: 1px solid transparent;
-  transition:
-    background var(--dur-1) var(--ease-out),
-    color var(--dur-1) var(--ease-out);
-}
-.d-markup__cancel {
-  background: none;
-  color: var(--text-faint);
-}
-.d-markup__cancel:hover {
-  color: var(--text-body);
-  background: var(--surface-raised);
-}
-.d-markup__done {
-  background: var(--accent);
-  color: var(--accent-fg);
-}
-.d-markup__done:hover {
-  background: var(--accent-hover);
-}
-.d-markup__done:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-/* top hint pill */
-.d-markup__pill {
-  position: absolute;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 25;
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 7px 7px 7px 14px;
-  max-width: calc(100% - 32px);
-  background: var(--surface-card);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-full);
-  box-shadow: var(--shadow-2);
-  pointer-events: auto;
-}
-.d-markup__dot {
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: var(--radius-full);
-  background: var(--accent);
-  animation: d-mk-pulse 1.6s var(--ease-out) infinite;
-}
-@keyframes d-mk-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.3;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .d-markup__dot {
-    animation: none;
-  }
-}
-.d-markup__pilltxt {
-  font-size: var(--text-sm);
-  color: var(--text-body);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.d-markup__pillsep {
-  flex: none;
-  width: 1px;
-  height: 18px;
-  background: var(--border-strong);
-}
-.d-markup__pillx {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 11px;
-  border: none;
-  background: var(--surface-raised);
-  color: var(--text-muted);
-  border-radius: var(--radius-full);
-  font-family: var(--font-body);
-  font-size: var(--text-sm);
-  cursor: pointer;
-  transition:
-    color var(--dur-1) var(--ease-out),
-    background var(--dur-1) var(--ease-out);
-}
-.d-markup__pillx:hover {
-  color: var(--text-body);
-  background: var(--border-strong);
 }
 
 /* ── 公开填写页 (答题者侧, 第 6 步) ───────────────────────────────────────────── */
