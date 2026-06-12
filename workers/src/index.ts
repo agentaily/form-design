@@ -71,6 +71,13 @@ import {
 import { issueToken, consumeToken } from "./tokens";
 import { sendEmail, buildVerifyEmail, buildResetEmail, EmailSendError } from "./email";
 import { listSubmissions, BitableReadError } from "./submissions";
+import {
+  rateLimit,
+  SUBMIT_RATE_LIMITS,
+  REGISTER_RATE_LIMIT,
+  PASSWORD_RESET_RATE_LIMIT,
+  LOGIN_RATE_LIMIT,
+} from "./ratelimit";
 
 /** Worker bindings (see wrangler.toml + vitest.config.ts). */
 interface Env {
@@ -154,8 +161,7 @@ app.use(
 // REGISTER_RATE_LIMIT（5/小时）、PASSWORD_RESET_RATE_LIMIT（4/小时）、LOGIN_RATE_LIMIT（10/分钟）。
 // fail-open（§25.7）：KV 故障 → checkRateLimit 内部兜成放行，端点正常 200/201，绝不因限流器故障打挂。
 //
-// import { rateLimit, SUBMIT_RATE_LIMITS, REGISTER_RATE_LIMIT, PASSWORD_RESET_RATE_LIMIT,
-//   LOGIN_RATE_LIMIT } from "./ratelimit"; // ← implementer 接线时启用
+// 接线见各 public handler 上的 §25 限流标注（rateLimit(...) 排在 cors() 之后、handler 之前）。
 
 app.get("/health", (c) => c.json({ ok: true, service: "form-design-api" }));
 
@@ -254,7 +260,7 @@ app.get("/api/forms/:slug/submissions", guard);
 // Resend 免费档（注册即发验证邮件，§23.2）。挂在 cors() 之后、本 handler 之前；超限 429 +
 // Retry-After，不进 createUser / 不发信。implementer 接线：
 //   app.post("/api/auth/register", rateLimit(REGISTER_RATE_LIMIT), async (c) => { ... });
-app.post("/api/auth/register", async (c) => {
+app.post("/api/auth/register", rateLimit(REGISTER_RATE_LIMIT), async (c) => {
   // Server misconfiguration is a deploy error, NOT a client error — never collapse
   // it into a 400/409 that misleads the caller.
   if (!c.env.AUTH_SECRET) {
@@ -379,7 +385,7 @@ app.get("/api/auth/verify-email/confirm", async (c) => {
 // 共享 Resend（每次命中邮箱即发 reset 信）。本期仅 per-IP（per-email 与 §24.1 防枚举冲突，留后续，
 // §25.4）。挂在 cors() 之后、本 handler 之前；超限 429 + Retry-After。implementer 接线：
 //   app.post("/api/auth/password-reset/request", rateLimit(PASSWORD_RESET_RATE_LIMIT), async (c) => { ... });
-app.post("/api/auth/password-reset/request", async (c) => {
+app.post("/api/auth/password-reset/request", rateLimit(PASSWORD_RESET_RATE_LIMIT), async (c) => {
   let email = "";
   try {
     const body = (await c.req.json()) as PasswordResetRequestBody;
@@ -440,7 +446,7 @@ app.post("/api/auth/password-reset/confirm", async (c) => {
 // 叠加 §17.3 已有的防枚举 + 等耗时。挂在 cors() 之后、本 handler 之前；超限 429 + Retry-After。
 // implementer 接线：
 //   app.post("/api/auth/login", rateLimit(LOGIN_RATE_LIMIT), async (c) => { ... });
-app.post("/api/auth/login", async (c) => {
+app.post("/api/auth/login", rateLimit(LOGIN_RATE_LIMIT), async (c) => {
   // Server misconfiguration is a deploy error, NOT an auth failure — it must not
   // collapse into a 401 that would let everyone in or lock everyone out (§17.3).
   if (!c.env.AUTH_SECRET) {
@@ -623,119 +629,125 @@ app.post("/api/config/test", async (c) => {
 // §25 限流：挂 SUBMIT_RATE_LIMITS（per-IP 10/分钟 且 100/小时，bucket "submit"，双窗口任一命中
 // 即拒）——护 owner 飞书写额度（被刷烧 owner 飞书写额度，§15）。挂在 cors() 之后、本 handler 之前；
 // 超限 429 + Retry-After（取命中窗口剩余秒），不进 formExists / 不换 token / 不写记录。implementer
-// 接线（两条同 bucket、不同窗口的中间件，任一拒即短路）：
-//   app.post("/api/submit", ...SUBMIT_RATE_LIMITS.map(rateLimit), async (c) => { ... });
-app.post("/api/submit", async (c) => {
-  // 1) Parse + validate the request body. Non-JSON / missing / empty / mis-shaped
-  //    answers → 400, nothing forwarded upstream.
-  let request: SubmitRequest;
-  try {
-    const raw = await c.req.json();
-    request = parseSubmitRequest(raw);
-  } catch (err) {
-    const error = err instanceof SyntaxError ? "invalid JSON body" : "answers is required";
-    return c.json({ error }, 400);
-  }
-
-  // 1.5) Associate the submission to a published form (§16.5): the form must
-  //      exist BEFORE we read owner config or touch any Feishu upstream. An
-  //      unknown slug → 404, nothing forwarded (no token exchange, no record
-  //      write) — never write a stranger's slug into the owner's table.
-  if (!(await formExists(c.env.DB, request.formSlug))) {
-    return c.json({ error: "form not found" }, 404);
-  }
-
-  // 1.6) Status gate (§20.2): the form must be 'published' to accept submissions.
-  //      'draft' / 'closed' → 409, BEFORE reading owner config / any Feishu upstream.
-  //      (getFormStatus + getFormFields MAY be one D1 read; see §20.1.)
-  const status = await getFormStatus(c.env.DB, request.formSlug);
-  if (status !== "published") {
-    return c.json({ error: new FormNotPublishedError().message }, 409);
-  }
-
-  // 1.7) answers ↔ schema validation (§20.3): required fields must have non-empty
-  //      answers. Failure → 400, nothing forwarded. Reads the form's fields, then
-  //      validateAnswers throws AnswersValidationError on a missing/empty required.
-  const fieldsDef = await getFormFields(c.env.DB, request.formSlug);
-  if (fieldsDef === null) {
-    // 与 1.5 一致地兜底：状态门通过后 fields 仍取不到属异常态 → 404。
-    return c.json({ error: "form not found" }, 404);
-  }
-  try {
-    validateAnswers(fieldsDef, request.answers);
-  } catch (err) {
-    if (err instanceof AnswersValidationError) {
-      return c.json({ error: err.message }, 400);
+// 接线（两条同 bucket、不同窗口的中间件，任一拒即短路；逐条挂、让 handler 留在最后一个位参，
+// 避免 spread variadic 丢失元组长度后 Hono 重载推断不出末位 handler）：
+//   app.post("/api/submit", rateLimit(SUBMIT_RATE_LIMITS[0]), rateLimit(SUBMIT_RATE_LIMITS[1]), handler);
+app.post(
+  "/api/submit",
+  rateLimit(SUBMIT_RATE_LIMITS[0]),
+  rateLimit(SUBMIT_RATE_LIMITS[1]),
+  async (c) => {
+    // 1) Parse + validate the request body. Non-JSON / missing / empty / mis-shaped
+    //    answers → 400, nothing forwarded upstream.
+    let request: SubmitRequest;
+    try {
+      const raw = await c.req.json();
+      request = parseSubmitRequest(raw);
+    } catch (err) {
+      const error = err instanceof SyntaxError ? "invalid JSON body" : "answers is required";
+      return c.json({ error }, 400);
     }
-    throw err;
-  }
 
-  // 2) PUBLIC endpoint — there is no "current owner". Reverse-look up the form's
-  //    owning owner_id by slug (§17.9 第 5 条) so the answer lands in THAT owner's
-  //    Feishu tenant, not a fixed / arbitrary one. (formExists already passed, so
-  //    a null here is an anomaly — treat it as not-found, never touch upstream.)
-  const formOwnerId = await getFormOwner(c.env.DB, request.formSlug);
-  if (formOwnerId === null) {
-    return c.json({ error: "form not found" }, 404);
-  }
-
-  // 3) Read + decrypt the FORM-OWNER's config (plaintext, in-Worker view only).
-  const key = await importConfigKey(c.env.CONFIG_KEY);
-  const owner = await getOwnerConfig(c.env.DB, key, formOwnerId);
-
-  // 4) No Feishu configured → 409, never touch upstream.
-  try {
-    if (owner.feishu === null) {
-      throw new FeishuNotConfiguredError();
+    // 1.5) Associate the submission to a published form (§16.5): the form must
+    //      exist BEFORE we read owner config or touch any Feishu upstream. An
+    //      unknown slug → 404, nothing forwarded (no token exchange, no record
+    //      write) — never write a stranger's slug into the owner's table.
+    if (!(await formExists(c.env.DB, request.formSlug))) {
+      return c.json({ error: "form not found" }, 404);
     }
-  } catch (err) {
-    if (err instanceof FeishuNotConfiguredError) {
-      return c.json({ error: err.message }, 409);
-    }
-    throw err;
-  }
-  const feishu = owner.feishu;
 
-  // 4) Exchange the owner's saved app_id/app_secret for a tenant_access_token.
-  //    The plaintext app_secret rides ONLY this request body (§15.7); any failure
-  //    surfaces as 502 with no credential in the error.
-  let token: string;
-  try {
-    token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
-  } catch (err) {
-    if (err instanceof FeishuTokenError) {
-      return c.json({ error: err.message }, 502);
+    // 1.6) Status gate (§20.2): the form must be 'published' to accept submissions.
+    //      'draft' / 'closed' → 409, BEFORE reading owner config / any Feishu upstream.
+    //      (getFormStatus + getFormFields MAY be one D1 read; see §20.1.)
+    const status = await getFormStatus(c.env.DB, request.formSlug);
+    if (status !== "published") {
+      return c.json({ error: new FormNotPublishedError().message }, 409);
     }
-    throw err;
-  }
 
-  // 5) 类型化写值（§16.8 / §15.8 升级，既有列冲突兜底方案 a）：先列出目标表现有列的**真实
-  //    类型**（listBitableColumns），再把 answers 格成 typed fields（answersToTypedFields，传
-  //    fieldsDef）——**已存在列**按列真实类型写（兜旧文本列 / 类型漂移，飞书不因类型不符整条拒）；
-  //    **缺列**按字段自身映射类型写（与自愈即将建成的列类型匹配，§16.8.4）。再写一条记录，缺列时
-  //    按字段 type 自愈建**对应类型**列后用同一份类型化值重试一次（§15.8）。列出失败 / 写失败
-  //    （含自愈后仍失败）→ BitableWriteError → 502，token / secret 绝不进错误体（§15.7）。
-  let recordId: string;
-  try {
-    const columnTypes = await listBitableColumns(token, feishu.appToken, feishu.tableId);
-    const fields = answersToTypedFields(request.answers, columnTypes, fieldsDef);
-    ({ recordId } = await writeRecordWithFieldEnsure(
-      token,
-      feishu.appToken,
-      feishu.tableId,
-      fields,
-      fieldsDef,
-    ));
-  } catch (err) {
-    if (err instanceof BitableWriteError) {
-      return c.json({ error: err.message }, 502);
+    // 1.7) answers ↔ schema validation (§20.3): required fields must have non-empty
+    //      answers. Failure → 400, nothing forwarded. Reads the form's fields, then
+    //      validateAnswers throws AnswersValidationError on a missing/empty required.
+    const fieldsDef = await getFormFields(c.env.DB, request.formSlug);
+    if (fieldsDef === null) {
+      // 与 1.5 一致地兜底：状态门通过后 fields 仍取不到属异常态 → 404。
+      return c.json({ error: "form not found" }, 404);
     }
-    throw err;
-  }
+    try {
+      validateAnswers(fieldsDef, request.answers);
+    } catch (err) {
+      if (err instanceof AnswersValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
 
-  // 6) Success → only ok + recordId; never the written fields, token, or creds.
-  return c.json({ ok: true, recordId }, 200);
-});
+    // 2) PUBLIC endpoint — there is no "current owner". Reverse-look up the form's
+    //    owning owner_id by slug (§17.9 第 5 条) so the answer lands in THAT owner's
+    //    Feishu tenant, not a fixed / arbitrary one. (formExists already passed, so
+    //    a null here is an anomaly — treat it as not-found, never touch upstream.)
+    const formOwnerId = await getFormOwner(c.env.DB, request.formSlug);
+    if (formOwnerId === null) {
+      return c.json({ error: "form not found" }, 404);
+    }
+
+    // 3) Read + decrypt the FORM-OWNER's config (plaintext, in-Worker view only).
+    const key = await importConfigKey(c.env.CONFIG_KEY);
+    const owner = await getOwnerConfig(c.env.DB, key, formOwnerId);
+
+    // 4) No Feishu configured → 409, never touch upstream.
+    try {
+      if (owner.feishu === null) {
+        throw new FeishuNotConfiguredError();
+      }
+    } catch (err) {
+      if (err instanceof FeishuNotConfiguredError) {
+        return c.json({ error: err.message }, 409);
+      }
+      throw err;
+    }
+    const feishu = owner.feishu;
+
+    // 4) Exchange the owner's saved app_id/app_secret for a tenant_access_token.
+    //    The plaintext app_secret rides ONLY this request body (§15.7); any failure
+    //    surfaces as 502 with no credential in the error.
+    let token: string;
+    try {
+      token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
+    } catch (err) {
+      if (err instanceof FeishuTokenError) {
+        return c.json({ error: err.message }, 502);
+      }
+      throw err;
+    }
+
+    // 5) 类型化写值（§16.8 / §15.8 升级，既有列冲突兜底方案 a）：先列出目标表现有列的**真实
+    //    类型**（listBitableColumns），再把 answers 格成 typed fields（answersToTypedFields，传
+    //    fieldsDef）——**已存在列**按列真实类型写（兜旧文本列 / 类型漂移，飞书不因类型不符整条拒）；
+    //    **缺列**按字段自身映射类型写（与自愈即将建成的列类型匹配，§16.8.4）。再写一条记录，缺列时
+    //    按字段 type 自愈建**对应类型**列后用同一份类型化值重试一次（§15.8）。列出失败 / 写失败
+    //    （含自愈后仍失败）→ BitableWriteError → 502，token / secret 绝不进错误体（§15.7）。
+    let recordId: string;
+    try {
+      const columnTypes = await listBitableColumns(token, feishu.appToken, feishu.tableId);
+      const fields = answersToTypedFields(request.answers, columnTypes, fieldsDef);
+      ({ recordId } = await writeRecordWithFieldEnsure(
+        token,
+        feishu.appToken,
+        feishu.tableId,
+        fields,
+        fieldsDef,
+      ));
+    } catch (err) {
+      if (err instanceof BitableWriteError) {
+        return c.json({ error: err.message }, 502);
+      }
+      throw err;
+    }
+
+    // 6) Success → only ok + recordId; never the written fields, token, or creds.
+    return c.json({ ok: true, recordId }, 200);
+  },
+);
 
 // POST /api/forms — 发布表单：校验形状 → 生成 slug + 存 D1 → 201 { slug }。
 // 形状非法（缺 meta.title / fields 非数组 / field 形状非法）→ 400，不落库（§16.2、§16.5）。

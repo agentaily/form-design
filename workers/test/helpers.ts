@@ -29,6 +29,14 @@ export interface TestEnv {
   CONFIG_KEY: string;
   /** session JWT 的 HMAC 签名密钥 — fixed throwaway value injected in vitest.config.ts (§17.6). */
   AUTH_SECRET: string;
+  /**
+   * 公开端点限流 / 防刷的固定窗口计数 KV（§25）。miniflare 按 wrangler.toml 的 [[kv_namespaces]]
+   * 自动提供本地 KV，无需在 vitest.config.ts 手注 binding 值。测试侧需在每个 scenario 间清空它
+   * （见 {@link resetRateLimit} / vitest setup）——SELF.fetch 不带 CF-Connecting-IP，所有请求落同一
+   * 兜底桶（§25.3），KV 计数在同一 isolate 内跨 test 累积会把高频 register/login/submit 的外环误限成
+   * 429。清键 = 把每个 scenario 当作「全新窗口」，不动产线限流行为本身。
+   */
+  RATE_LIMIT: KVNamespace;
 }
 
 export const testEnv = env as unknown as TestEnv;
@@ -101,6 +109,25 @@ export async function resetUsers(): Promise<void> {
  */
 export async function resetAuthTokens(): Promise<void> {
   await testEnv.DB.exec("DELETE FROM auth_tokens");
+}
+
+/**
+ * Clear the public-endpoint rate-limit KV counters between scenarios (§25). Without
+ * a `CF-Connecting-IP` header, every SELF.fetch lands in the single constant
+ * UNKNOWN_IP_BUCKET (§25.3) and the fixed-window counts accumulate across tests in
+ * the shared isolate — so a suite that registers / logs in / submits many times
+ * would self-throttle into 429s. Wiping the `rl:` keys makes each scenario start
+ * from an empty window, mirroring distinct real visitors. Runs in the global setup
+ * before EACH test (see test/setup-ratelimit.ts); also exported for any suite that
+ * wants to clear mid-test. Does NOT change production rate-limit behavior.
+ */
+export async function resetRateLimit(): Promise<void> {
+  let cursor: string | undefined;
+  do {
+    const page = await testEnv.RATE_LIMIT.list(cursor ? { cursor } : {});
+    await Promise.all(page.keys.map((k) => testEnv.RATE_LIMIT.delete(k.name)));
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor !== undefined);
 }
 
 // --- Upstream (DeepSeek) fetch mock ----------------------------------------

@@ -170,10 +170,22 @@ export interface RateLimitCheckInput {
  * @returns 当前窗口起点（Unix 秒，可被 windowSeconds 整除）。
  */
 export function windowStartFor(nowSeconds: number, windowSeconds: number): number {
-  void nowSeconds;
-  void windowSeconds;
-  // 实现：floor(nowSeconds / windowSeconds) * windowSeconds（§25.2）。纯函数。
-  throw new Error("not implemented: windowStartFor");
+  // floor(now / windowSeconds) * windowSeconds（§25.2）。纯函数、确定性、无副作用。
+  return Math.floor(nowSeconds / windowSeconds) * windowSeconds;
+}
+
+/**
+ * SHA-256(ip) 的十六进制摘要（§25.3）。单向、确定性（同 ip 恒同输出）；仅用于把原始 IP 收敛成
+ * 一个**不可回指**的匿名分桶标识，绝不把原始 IP 写进 KV 键。哈希用途仅为分桶去重、不需抗碰撞强度。
+ */
+async function hashIp(ip: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ip));
+  const bytes = new Uint8Array(digest);
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, "0");
+  }
+  return hex;
 }
 
 /**
@@ -192,17 +204,15 @@ export function windowStartFor(nowSeconds: number, windowSeconds: number): numbe
  * @param windowStart 窗口起点（来自 {@link windowStartFor}）。
  * @returns KV 计数键（不含原始 IP 明文）。
  */
-export function rateLimitKeyFor(
+export async function rateLimitKeyFor(
   ip: string,
   bucket: RateLimitBucket,
   windowStart: number,
 ): Promise<string> {
-  void ip;
-  void bucket;
-  void windowStart;
-  // 实现：hash(ip)（SHA-256，确定性、单向）→ 拼 `rl:<bucket>:<hash>:<windowStart>`（§25.3）。
-  // 绝不把原始 IP 明文写进键。
-  throw new Error("not implemented: rateLimitKeyFor");
+  // hash(ip)（SHA-256 hex，确定性、单向）→ 拼 `rl:<bucket>:<hash>:<windowStart>`（§25.3）。
+  // 绝不把原始 IP 明文写进键——KV 里只留「某匿名标识在某窗口的计数」。
+  const hash = await hashIp(ip);
+  return `rl:${bucket}:${hash}:${windowStart}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,17 +242,39 @@ export function rateLimitKeyFor(
  * @param nowSeconds 当前时刻（Unix 秒，默认取系统时钟；测试可注入以推进 / 对齐窗口）。
  * @returns {@link RateLimitDecision}（allowed / remaining / retryAfter）。KV 故障时 fail-open 放行。
  */
-export function checkRateLimit(
+export async function checkRateLimit(
   kv: KVNamespace,
   input: RateLimitCheckInput,
-  nowSeconds?: number,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
 ): Promise<RateLimitDecision> {
-  void kv;
-  void input;
-  void nowSeconds;
-  // 实现：窗口数学 + 键 → 读 KV 计数 → 判 → 自增（TTL=windowSeconds）。整段 try/catch 兜住
-  // KV 异常 → fail-open 放行（allowed:true），只记 err.name，绝不泄漏 IP / 键（§25.2 / §25.7）。
-  throw new Error("not implemented: checkRateLimit");
+  const { ip, bucket, limit, windowSeconds } = input;
+  try {
+    // 窗口对齐 → 计数键 → 到窗口重置的剩余秒数（§25.2）。
+    const windowStart = windowStartFor(nowSeconds, windowSeconds);
+    const key = await rateLimitKeyFor(ip, bucket, windowStart);
+    const retryAfter = windowStart + windowSeconds - nowSeconds;
+
+    // 读当前计数（缺键 / 非数视为 0）。
+    const raw = await kv.get(key);
+    const parsed = raw === null ? 0 : Number.parseInt(raw, 10);
+    const count = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+
+    // ≥ limit → 拒（不自增）：第 limit+1 次起 429（§25.2）。
+    if (count >= limit) {
+      return { allowed: false, remaining: 0, retryAfter };
+    }
+
+    // 否则 +1 写回，TTL=windowSeconds（到期自动清，无需手动 GC，§25.2）。计数自增的并发竞争
+    // 在 KV 最终一致下可能少计一两次——对「尽力防滥用」可接受，不引分布式锁 / DO（§25.6）。
+    const next = count + 1;
+    await kv.put(key, String(next), { expirationTtl: windowSeconds });
+    return { allowed: true, remaining: limit - next, retryAfter };
+  } catch (err) {
+    // fail-open（铁律，§25.7）：任何 KV 异常（不可用 / 超时 / 配额）一律放行，当作未命中。
+    // 只记 err.name，**绝不**把 KV 内容 / 原始 IP / 键写进日志或返回值（§25.7）。
+    console.error("rate-limit fail-open", err instanceof Error ? err.name : "unknown");
+    return { allowed: true, remaining: limit, retryAfter: 0 };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,8 +316,24 @@ export interface RateLimitEnv {
 export function rateLimit<E extends RateLimitEnv = RateLimitEnv>(
   rule: RateLimitRule,
 ): MiddlewareHandler<E> {
-  void rule;
-  // 实现：取 CF-Connecting-IP（缺 → UNKNOWN_IP_BUCKET）→ checkRateLimit → 超限 429 + Retry-After
-  // 头、不 next()；否则 next()。挂在 cors() 之后、只挂公开端点（§25.5 / §25.8）。
-  throw new Error("not implemented: rateLimit");
+  return async (c, next) => {
+    // 取真实访客 IP（CF-Connecting-IP，平台填充、不可伪造，§25.3）；缺失 → 常量兜底桶（仍限）。
+    const ip = c.req.header("CF-Connecting-IP") ?? UNKNOWN_IP_BUCKET;
+    // checkRateLimit 内部带 fail-open：KV 故障 → allowed:true，照常放行（§25.7）。
+    const decision = await checkRateLimit(c.env.RATE_LIMIT, {
+      ip,
+      bucket: rule.bucket,
+      limit: rule.limit,
+      windowSeconds: rule.windowSeconds,
+    });
+    if (!decision.allowed) {
+      // 超限固定 429（不是 503，§25.8）+ Retry-After（到窗口重置剩余秒）。文案中性、不回显
+      // 限额 / 剩余（避免给刷子精确卡线，§25.8）。不调 next() → 不进 handler。429 因本中间件
+      // 排在 cors() 之后，天然带上 CORS 头（§25.5）。
+      c.header("Retry-After", String(decision.retryAfter));
+      return c.json({ error: "请求过于频繁，请稍后再试" }, 429);
+    }
+    // 放行：除一次 KV 自增外不改任何响应语义，端点状态码 / 体 / 头与未挂限流时一致（§25.8）。
+    await next();
+  };
 }

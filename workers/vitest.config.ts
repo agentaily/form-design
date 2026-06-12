@@ -45,5 +45,11 @@ export default defineConfig({
       },
     }),
   ],
-  test: {},
+  test: {
+    // Clear the §25 rate-limit KV counters before every test (see
+    // test/setup-ratelimit.ts) so the outer-loop harness's high-frequency
+    // register / login / submit calls — all sharing the no-IP fallback bucket —
+    // don't self-throttle into 429s. Does not change production behavior.
+    setupFiles: ["./test/setup-ratelimit.ts"],
+  },
 });
