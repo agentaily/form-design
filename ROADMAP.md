@@ -28,16 +28,16 @@
 - **补严**：CORS（白名单跨域）、提交校验（表单状态门 + 必填校验，脏 / 未发布不写飞书）、表单管理 CRUD（`GET /api/forms` 列表 · `PATCH` 改状态 · `DELETE`）、安全收尾（常量时间密码比较、字段递归深度上限、飞书探测 `res.ok`）
 - **部署上线（2026-06-11）**：后端已上线 **https://form-design-api.agentaily.workers.dev** —— D1 `form-design-db`（APAC）建库 + 建表、3 个 runtime secret（`CONFIG_KEY`/`AUTH_SECRET`/`OWNER_PASSWORD`）已设、`wrangler deploy` 跑通、独立 CI `deploy-workers.yml`（push main 且 `workers/**` 变更自动部署）。独立 yarnbcoder 账户，Workers+D1 token 与运行时 secret 均进 vault。冒烟测试全绿（health 200 / 公开拉取 404 / 登录对 200 错 401）。详见 [OPERATIONS.md](./OPERATIONS.md) §12。
 - **飞书列自动创建 · 自愈（SPEC §15.8）**：`POST /api/submit` 写记录遇目标表缺列（飞书 `code 1254045`）时自动补建缺失列（文本列，重复列 `1254014` 幂等）再重试一次，提交不再因「表里没有对应列」而失败；稳态（列已存在）零额外开销，不预检字段端点。owner 不必再手动在飞书表预建与表单字段同名的列。
+- **多租户 / 开放注册（PR #22，已上线）**：单 owner（`OWNER_PASSWORD` + `owner_id='default'`）→ 开放注册多用户——邮箱 + 密码自助注册即成 owner（注册即登录），各自 BYOK 配置 / 表单 / 提交严格隔离。头等约束**横向越权防护**（owner-only 按 slug 操作 `WHERE … AND owner_id=?`，跨 owner → 404 不暴露存在性；公开 submit 按 slug 反查 form 所属 owner 写其飞书）。`password.ts`（PBKDF2 + per-user salt + 常量时间比对 + 防时序枚举）/ `users.ts` / `getFormOwner` / `index.ts` 接线 + 前端 `LoginDialog` 双模。inner + outer 全绿（`tenant-isolation.test.ts` / `tenant-isolation-api.test.ts` 管越权 · `auth-api.test.ts` 走 register/login · `tests/integration/owner-login.spec.jsx`）。详见 SPEC §17。
+- **邮箱验证 + 找回密码（PR #26 + #28，2026-06-12 已上线 + 生产端到端验证）**：真实事务邮件走 **Resend**（纯 HTTP、无 SDK，发件域 `mail.agentaily.com` 已验证；`RESEND_API_KEY` 进 Worker secret）。**邮箱软验证**（注册即 best-effort 发验证信、点链接置 `email_verified=1`、不门禁功能；注册去重改**未验证可覆盖 / 已验证锁死**防占座）+ **找回密码**（发起永远 200 防枚举、确认凭一次性 reset token）+ `GET /api/auth/me`（banner 跨刷新拿真状态）。一次性 token 只存 SHA-256、单次、限时（verify 24h / reset 1h，新表 `auth_tokens`）。前端「忘记密码」子态 + `/reset-password` / `/verify-email` 落地页 + 未验证 banner。内外环测试 + 独立评审全过；线上验证：注册→真实验证信 Resend delivered→confirm→`emailVerified=1`。详见 SPEC §22–§24 / §17.2 / §17.12；配方沉淀为全局 skill `email-auth-resend`。
 
-> 后端全程双循环 TDD（spec → outer → impl → review），凭据进 vault（DeepSeek key、飞书自建应用、CF token、runtime secret）。
+> 后端全程双循环 TDD（spec → outer → impl → review），凭据进 vault（DeepSeek key、飞书自建应用、CF token、runtime secret、Resend key）。
 
 ---
 
 ## 🚧 进行中
 
-- 后端核心已补严完整 **且已部署上线**；下一步是待办里的 **前端接入** 与 **飞书端到端**
-- **多租户 / 开放注册（实现体 + 单测已落，outer-loop 待 re-align）**：从单 owner（`OWNER_PASSWORD` + `owner_id='default'`）改造为开放注册的多用户——邮箱 + 密码自助注册即成 owner（注册即登录、先不验证邮箱），各自 BYOK 配置 / 表单 / 提交严格隔离。头等约束是**横向越权防护**（owner-only 的按 slug 操作 `WHERE ... AND owner_id=?`，跨 owner → 404 不暴露存在性；公开 submit 按 slug 反查 form 所属 owner 写其飞书）。**已实现**：`password.ts`（PBKDF2-HMAC-SHA256 + per-user salt + 常量时间比对）、`users.ts`（createUser/findUserByEmail/authenticateUser，含假 hash 防时序枚举）、`getFormOwner`、`index.ts` 接线（公开 `POST /api/auth/register` + 改 `POST /api/auth/login` 查 users 表、所有 owner-only handler `ownerId=session.sub` 贯穿、submissions 归属门 404、submit 反查 form owner）、前端 `LoginDialog` 双模登录/注册（DS Tabs）。inner-loop 单测全绿（`password.test.ts` / `users.test.ts` / `tenant-isolation.test.ts` + 前端 `auth.test.js`）。**待 outer-tester**：把 `*-api.test.ts` + `test/helpers.ts` 的 login 从 `OWNER_PASSWORD` re-align 成注册/登录，并实现 `tenant-isolation.feature` / `auth.feature` / `owner-login.feature` 场景。详见 SPEC §17。
-- **邮箱验证 + 找回密码（实现 + 内外环测试全绿，待 secret/部署/合 PR）**：接 Resend（纯 HTTP，无 SDK）做事务邮件。**邮箱软验证**——注册即 best-effort 发验证邮件、点链接置 `email_verified=1`，不门禁功能，只用于「防占座别人邮箱」（注册去重改成**未验证可覆盖 / 已验证锁死**）+ 前端 banner（依 `GET /api/auth/me` 跨刷新权威）。**找回密码**——发起永远 200 防枚举、确认凭一次性 reset token 重置。一次性 token 只存 SHA-256、单次使用、限时（verify 24h / reset 1h）。**已实现**：后端 `email.ts`（sendEmail→Resend）/ `tokens.ts`（issue/consume/revoke）/ `users.ts`（createUser 三态 + markEmailVerified + resetUserPassword + findUserById）/ `index.ts`（register best-effort 发信 + `verify-email/request｜confirm` + `password-reset/request｜confirm` + `GET /api/auth/me`）；前端 `core/auth.ts`（reset/verify/getCurrentUser）/「忘记密码？」子态 / `reset-password.jsx` / `verify-email.jsx` / 接 `/api/auth/me` 的 banner。发件域 `mail.agentaily.com` 已验证、key 进 vault（`credentials/resend-form-design`）。内环单测 + 外环集成（workers `*-api.test.ts` mock Resend）+ 前端 banner/落地页测试全绿。契约见 SPEC §22（发信 + token 表）/ §23 / §24 / §17.2 修订 / §17.12 + feature `email-verification.feature` / `password-reset.feature` + migration `0002_auth_tokens.sql`。**待**：`wrangler secret put RESEND_API_KEY` + 部署 + 合 PR。
+- 后端核心 + **多租户/开放注册** + **邮箱鉴权（验证 / 找回密码）** + **飞书端到端** 均**已上线**（见「已完成」）。当前推进方向是**待办**里的**前端接入剩余三块**（集成设置 modal / 发布 + 表单管理 / 公开填写页 + 数据后台接后端）与**飞书增强**（预建列 / 列类型映射 / 按 `formSlug` 过滤）。
 
 ---
 
@@ -46,8 +46,7 @@
 ### 后端
 
 - 绑自定义域名 `api.form-design.agentaily.com`（可选；现走 `*.workers.dev` 默认域）
-- 多 owner / 注册 —— 已挪到「进行中」（spec 就绪，待实现，详见 SPEC §17）
-- 邮箱验证 + 找回密码 —— 已挪到「进行中」（契约就绪，待实现，详见 SPEC §22–§24）
+- **表单新提交通知（未来，先不做 · 以后再说）**：owner 的表单收到新回复时给 owner 发邮件通知。**必须按天聚合 + 每表单可开关**（默认关）——「每条提交即发」量随访客流量不可控、会冲破 Resend 免费档变贵；按天聚合后量级 = 活跃表单数 × 天，基本恒在免费档内。复用已上线的 Resend 发信基建（见「已完成」邮箱验证条 / 全局 skill `email-auth-resend`），改动落在公开 submit 路径，需配通知开关等产品决策，故单独一轮做。
 - 数据后台增强：聚合统计、分页、CSV 导出
 - 公开端点限流 / 防刷
 
