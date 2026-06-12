@@ -1,7 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { applySchema, resetConfig, resetForms, login, authHeader } from "./helpers";
-import { FEISHU_BITABLE_RECORDS_URL } from "../src/submit";
+import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Outer-loop acceptance specs for the data backend `GET /api/forms/:slug/submissions`,
@@ -45,6 +45,22 @@ const RECORDS_URL = FEISHU_BITABLE_RECORDS_URL.replace(
   "{app_token}",
   OWNER_FEISHU_APP_TOKEN,
 ).replace("{table_id}", OWNER_FEISHU_TABLE_ID);
+
+// The fields endpoint — NOT used by the submissions read itself, but the publish
+// SETUP (POST /api/forms with Feishu configured) fans out a best-effort 预建 in
+// waitUntil (§16.8) that lists + creates columns here. The mock absorbs that fan-out
+// so it doesn't default-deny THROW; the test drains it before asserting on the read.
+const FIELDS_URL = FEISHU_BITABLE_FIELDS_URL.replace("{app_token}", OWNER_FEISHU_APP_TOKEN).replace(
+  "{table_id}",
+  OWNER_FEISHU_TABLE_ID,
+);
+function pathKey(url: string): string {
+  const u = new URL(url);
+  return u.origin + u.pathname;
+}
+const FIELDS_PATH = pathKey(FIELDS_URL);
+const FIELDS_LIST_BODY = JSON.stringify({ code: 0, msg: "success", data: { items: [] } });
+const FIELD_CREATE_OK_BODY = JSON.stringify({ code: 0, msg: "success" });
 
 const FEISHU_TOKEN_OK_BODY = JSON.stringify({
   code: 0,
@@ -121,12 +137,20 @@ interface FeishuMock {
   readonly tokenCalls: CapturedCall[];
   /** Bitable record-list GET calls, in order. */
   readonly recordCalls: CapturedCall[];
+  /** list-fields (GET) calls — only the publish-setup pre-create touches these. */
+  readonly fieldsListCalls: CapturedCall[];
+  /** create-field (POST) calls — only the publish-setup pre-create touches these. */
+  readonly fieldCreateCalls: CapturedCall[];
+  /** Empty every captured-call array (discards the publish background fan-out). */
+  resetCalls(): void;
   restore(): void;
 }
 
 function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
   const tokenCalls: CapturedCall[] = [];
   const recordCalls: CapturedCall[] = [];
+  const fieldsListCalls: CapturedCall[] = [];
+  const fieldCreateCalls: CapturedCall[] = [];
 
   const realFetch = globalThis.fetch;
   const stub = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -172,10 +196,29 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
         headers: opts.records.headers ?? { "content-type": "application/json" },
       });
     }
-    // Default-deny: only the two configured Feishu upstreams (and the read only at
-    // the configured app_token/table_id URL) are allowed.
+    // The publish-setup best-effort 预建 (§16.8) lists + creates columns here. The
+    // submissions read never touches this endpoint — these calls only ever come from
+    // the background fan-out, which the test drains + resets away before asserting.
+    if (pathKey(req.url) === FIELDS_PATH) {
+      if (req.method === "GET") {
+        fieldsListCalls.push(captured);
+        return new Response(FIELDS_LIST_BODY, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (req.method === "POST") {
+        fieldCreateCalls.push(captured);
+        return new Response(FIELD_CREATE_OK_BODY, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected method ${req.method} on fields endpoint ${req.url}`);
+    }
+    // Default-deny: only the configured Feishu upstreams are allowed.
     throw new Error(
-      `unexpected outbound fetch to ${req.url} (only the Feishu token + ${RECORDS_URL} GET are mocked)`,
+      `unexpected outbound fetch to ${req.url} (only the Feishu token + ${RECORDS_URL} GET + fields are mocked)`,
     );
   };
 
@@ -183,10 +226,31 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
   return {
     tokenCalls,
     recordCalls,
+    fieldsListCalls,
+    fieldCreateCalls,
+    resetCalls: () => {
+      tokenCalls.length = 0;
+      recordCalls.length = 0;
+      fieldsListCalls.length = 0;
+      fieldCreateCalls.length = 0;
+    },
     restore: () => {
       globalThis.fetch = realFetch;
     },
   };
+}
+
+/**
+ * Drain the publish-setup background `preCreateBitableColumnsBestEffort` (§16.8) —
+ * wait for its token exchange to land, then settle so any list/create follow-ups also
+ * land, so the caller can `resetCalls()` and assert on the submissions read alone.
+ */
+async function drainBackgroundPreCreate(mock: FeishuMock): Promise<void> {
+  const deadline = Date.now() + 800;
+  while (mock.tokenCalls.length === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await new Promise((r) => setTimeout(r, 25));
 }
 
 /**
@@ -297,12 +361,15 @@ describe("submissions GET /api/forms/:slug/submissions (workers/features/submiss
     // Given 一个已登录的 owner + 已保存完整飞书凭据 + 一份已发布的表单
     const token = await login();
     await configureOwner(token, { feishu: true });
-    const slug = await publishFormAndGetSlug(token);
-    // And 上游 token 接口 code 0；记录列表接口 code 0 且带两条记录
+    // And 上游 token 接口 code 0；记录列表接口 code 0 且带两条记录。先装 mock 再发布，
+    // drain 掉发布预建后台扇出（§16.8），使下面的 token/record 计数只反映这次读取。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       records: { status: 200, body: RECORDS_TWO_BODY },
     });
+    const slug = await publishFormAndGetSlug(token);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When owner 带有效 token 请求该表单的提交列表
     const res = await getSubmissions(slug, authHeader(token));
@@ -334,12 +401,14 @@ describe("submissions GET /api/forms/:slug/submissions (workers/features/submiss
     // Given 一个已登录的 owner + 已配飞书 + 已发布表单
     const token = await login();
     await configureOwner(token, { feishu: true });
-    const slug = await publishFormAndGetSlug(token);
-    // And token code 0；记录列表 code 0 且无任何记录
+    // And token code 0；记录列表 code 0 且无任何记录。装 mock → 发布 → drain → reset。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       records: { status: 200, body: RECORDS_EMPTY_BODY },
     });
+    const slug = await publishFormAndGetSlug(token);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When owner 带有效 token 请求该表单的提交列表
     const res = await getSubmissions(slug, authHeader(token));
@@ -360,12 +429,14 @@ describe("submissions GET /api/forms/:slug/submissions (workers/features/submiss
     // Given 一个已登录的 owner + 已配飞书 + 已发布表单
     const token = await login();
     await configureOwner(token, { feishu: true });
-    const slug = await publishFormAndGetSlug(token);
-    // And token code 0；记录列表 code 0 且带两条记录
+    // And token code 0；记录列表 code 0 且带两条记录。装 mock → 发布 → drain → reset。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       records: { status: 200, body: RECORDS_TWO_BODY },
     });
+    const slug = await publishFormAndGetSlug(token);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When owner 带有效 token 请求该表单的提交列表
     const res = await getSubmissions(slug, authHeader(token));
@@ -437,12 +508,15 @@ describe("submissions GET /api/forms/:slug/submissions (workers/features/submiss
     // Given 一个已登录的 owner + 已配飞书 + 已发布表单
     const token = await login();
     await configureOwner(token, { feishu: true });
-    const slug = await publishFormAndGetSlug(token);
     // And token 接口返回非 0 业务错误码 (HTTP 仍 200!). The records reply is OMITTED:
     // reaching the read after a failed token exchange would THROW (proving 不打记录读取).
+    // 装 mock → 发布（其后台预建的 token 换取同样失败、被静默吞）→ drain → reset。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_BAD_BODY },
     });
+    const slug = await publishFormAndGetSlug(token);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When owner 带有效 token 请求该表单的提交列表
     const res = await getSubmissions(slug, authHeader(token));
@@ -466,12 +540,14 @@ describe("submissions GET /api/forms/:slug/submissions (workers/features/submiss
     // Given 一个已登录的 owner + 已配飞书 + 已发布表单
     const token = await login();
     await configureOwner(token, { feishu: true });
-    const slug = await publishFormAndGetSlug(token);
-    // And token code 0；记录列表接口返回非 0 业务错误码
+    // And token code 0；记录列表接口返回非 0 业务错误码。装 mock → 发布 → drain → reset。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       records: { status: 200, body: RECORDS_BAD_BODY },
     });
+    const slug = await publishFormAndGetSlug(token);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When owner 带有效 token 请求该表单的提交列表
     const res = await getSubmissions(slug, authHeader(token));
@@ -498,11 +574,13 @@ describe("submissions GET /api/forms/:slug/submissions (workers/features/submiss
     // is the one that returns the most data — still must not echo creds).
     const token = await login();
     await configureOwner(token, { feishu: true });
-    const slug = await publishFormAndGetSlug(token);
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       records: { status: 200, body: RECORDS_TWO_BODY },
     });
+    const slug = await publishFormAndGetSlug(token);
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When owner 带有效 token 请求该表单的提交列表
     const res = await getSubmissions(slug, authHeader(token));

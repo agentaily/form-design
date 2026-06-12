@@ -1,7 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { applySchema, resetConfig, resetForms, testEnv, login, authHeader } from "./helpers";
-import { FEISHU_BITABLE_RECORDS_URL } from "../src/submit";
+import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Auth split (SPEC.md §17.1): POST /api/forms (publish) and the POST /api/config
@@ -60,6 +60,19 @@ const BITABLE_URL = FEISHU_BITABLE_RECORDS_URL.replace(
   OWNER_FEISHU_APP_TOKEN,
 ).replace("{table_id}", OWNER_FEISHU_TABLE_ID);
 
+// The fields endpoint — the publish 预建 (§16.8) + the submit's steady-state
+// listBitableColumns (§15.8 升级) both hit it. The mock absorbs both; the submit
+// scenario drains the publish fan-out before asserting on the write.
+const BITABLE_FIELDS_URL = FEISHU_BITABLE_FIELDS_URL.replace(
+  "{app_token}",
+  OWNER_FEISHU_APP_TOKEN,
+).replace("{table_id}", OWNER_FEISHU_TABLE_ID);
+function pathKey(url: string): string {
+  const u = new URL(url);
+  return u.origin + u.pathname;
+}
+const BITABLE_FIELDS_PATH = pathKey(BITABLE_FIELDS_URL);
+
 const FEISHU_TOKEN_OK_BODY = JSON.stringify({
   code: 0,
   msg: "ok",
@@ -71,6 +84,19 @@ const BITABLE_OK_BODY = JSON.stringify({
   msg: "success",
   data: { record: { record_id: UPSTREAM_RECORD_ID } },
 });
+// List-fields reply: the submitted labels (姓名 text / 兴趣 multi-select) already
+// exist as columns, so the steady-state submit writes by real type — no self-heal.
+const FIELDS_LIST_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: {
+    items: [
+      { field_name: "姓名", type: 1 },
+      { field_name: "兴趣", type: 4 },
+    ],
+  },
+});
+const FIELD_CREATE_OK_BODY = JSON.stringify({ code: 0, msg: "success" });
 
 // A representative published form: meta + a text field and a checkbox field with
 // options (§16.2 example shape). Reused as the publish body and as the expected
@@ -108,6 +134,9 @@ interface UpstreamReply {
 interface FeishuMockOpts {
   token?: UpstreamReply;
   record?: UpstreamReply;
+  /** list-fields GET reply (§15.8 升级 + §16.8 预建). Defaults to FIELDS_LIST_BODY. */
+  fieldsList?: UpstreamReply | null;
+  fieldCreate?: UpstreamReply;
 }
 
 interface CapturedCall {
@@ -121,12 +150,23 @@ interface CapturedCall {
 interface FeishuMock {
   readonly tokenCalls: CapturedCall[];
   readonly recordCalls: CapturedCall[];
+  readonly fieldsListCalls: CapturedCall[];
+  readonly fieldCreateCalls: CapturedCall[];
+  resetCalls(): void;
   restore(): void;
 }
 
 function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
   const tokenCalls: CapturedCall[] = [];
   const recordCalls: CapturedCall[] = [];
+  const fieldsListCalls: CapturedCall[] = [];
+  const fieldCreateCalls: CapturedCall[] = [];
+  const fieldsListReply: UpstreamReply | null =
+    opts.fieldsList === undefined ? { status: 200, body: FIELDS_LIST_BODY } : opts.fieldsList;
+  const fieldCreateReply: UpstreamReply = opts.fieldCreate ?? {
+    status: 200,
+    body: FIELD_CREATE_OK_BODY,
+  };
 
   const realFetch = globalThis.fetch;
   const stub = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -168,8 +208,28 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
         headers: opts.record.headers ?? { "content-type": "application/json" },
       });
     }
+    if (pathKey(req.url) === BITABLE_FIELDS_PATH) {
+      if (req.method === "GET") {
+        if (!fieldsListReply) {
+          throw new Error(`unexpected list-fields upstream call to ${req.url} (forbidden)`);
+        }
+        fieldsListCalls.push(captured);
+        return new Response(fieldsListReply.body, {
+          status: fieldsListReply.status,
+          headers: fieldsListReply.headers ?? { "content-type": "application/json" },
+        });
+      }
+      if (req.method === "POST") {
+        fieldCreateCalls.push(captured);
+        return new Response(fieldCreateReply.body, {
+          status: fieldCreateReply.status,
+          headers: fieldCreateReply.headers ?? { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected method ${req.method} on fields endpoint ${req.url}`);
+    }
     throw new Error(
-      `unexpected outbound fetch to ${req.url} (only the Feishu token + ${BITABLE_URL} are mocked)`,
+      `unexpected outbound fetch to ${req.url} (only the Feishu token + records + fields are mocked)`,
     );
   };
 
@@ -177,10 +237,31 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
   return {
     tokenCalls,
     recordCalls,
+    fieldsListCalls,
+    fieldCreateCalls,
+    resetCalls: () => {
+      tokenCalls.length = 0;
+      recordCalls.length = 0;
+      fieldsListCalls.length = 0;
+      fieldCreateCalls.length = 0;
+    },
     restore: () => {
       globalThis.fetch = realFetch;
     },
   };
+}
+
+/**
+ * Drain the publish-triggered background `preCreateBitableColumnsBestEffort` (§16.8)
+ * — wait for its token exchange to land, then settle, so the caller can `resetCalls()`
+ * and assert on the submit traffic alone.
+ */
+async function drainBackgroundPreCreate(mock: FeishuMock): Promise<void> {
+  const deadline = Date.now() + 800;
+  while (mock.tokenCalls.length === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await new Promise((r) => setTimeout(r, 25));
 }
 
 /**
@@ -384,13 +465,15 @@ describe("forms POST /api/forms + GET /api/forms/:slug (workers/features/form-pu
   it("Scenario: submit 带合法 slug 时正常走飞书写入", async () => {
     // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
-    // And 一份已发布的表单
-    const slug = await publishAndGetSlug();
-    // And 上游飞书两段都将返回 code 为 0
+    // And 上游飞书两段都将返回 code 为 0。先装 mock 再发布，drain 掉发布预建后台扇出（§16.8）。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: { status: 200, body: BITABLE_OK_BODY },
     });
+    // And 一份已发布的表单
+    const slug = await publishAndGetSlug();
+    await drainBackgroundPreCreate(mock);
+    mock.resetCalls();
 
     // When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
     const res = await postSubmit({ formSlug: slug, answers: SUBMISSION_ANSWERS });

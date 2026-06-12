@@ -3,6 +3,7 @@ import { vi } from "vitest";
 import {
   parseSubmitRequest,
   answersToFields,
+  answersToTypedFields,
   validateAnswers,
   writeToBitable,
   ensureBitableFields,
@@ -12,12 +13,12 @@ import {
   BitableFieldMissingError,
   FEISHU_BITABLE_RECORDS_URL,
   FEISHU_BITABLE_FIELDS_URL,
-  FEISHU_FIELD_TYPE_TEXT,
   FEISHU_CODE_FIELD_NOT_FOUND,
   FEISHU_CODE_FIELD_DUPLICATED,
   type SubmitAnswer,
 } from "../src/submit";
 import type { Field } from "../src/forms";
+import { FEISHU_BITABLE_FIELD_TYPE, type BitableColumnTypes } from "../src/feishu-schema";
 import { getFeishuTenantToken, FeishuTokenError, FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Inner-loop unit specs for the pure / single-upstream-call seams behind
@@ -417,11 +418,24 @@ describe("writeToBitable (SPEC.md §15.5 add-record)", () => {
   });
 });
 
-describe("ensureBitableFields (SPEC.md §15.8 自愈建列：列出 + 只建缺失列)", () => {
+describe("ensureBitableFields (SPEC.md §15.8 + §16.8 升级：列出 + 只建缺失列，按字段 type 建对应类型)", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("lists existing columns with ?page_size and Bearer token, then creates only the missing ones as type 1", async () => {
-    // 「姓名」已存在、「城市」缺失 → 只对「城市」建一次列。
+  // 自愈现在收 Field[]（label↔type），按字段 type 建对应类型列（§16.8 升级），不再一律文本。
+  const NAME_FIELD: Field = { id: "f_name", type: "text", label: "姓名" };
+  const AGE_FIELD: Field = { id: "f_age", type: "number", label: "年龄" };
+  const CITY_FIELD: Field = {
+    id: "f_city",
+    type: "select",
+    label: "城市",
+    options: [
+      { label: "北京", value: "bj" },
+      { label: "上海", value: "sh" },
+    ],
+  };
+
+  it("lists existing columns with ?page_size and Bearer token, then creates only the missing ones with the mapped type", async () => {
+    // 「姓名」已存在、「年龄」缺失 → 只对「年龄」建一次列，按字段 type 建成数字列(2)。
     const { calls } = stubFetchByPath({
       [FIELDS_PATH]: [
         { status: 200, body: fieldsListBody(["姓名"]) },
@@ -429,7 +443,7 @@ describe("ensureBitableFields (SPEC.md §15.8 自愈建列：列出 + 只建缺�
       ],
     });
 
-    await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, ["姓名", "城市"]);
+    await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, [NAME_FIELD, AGE_FIELD]);
 
     // First call is the GET lister carrying ?page_size and the token only on the header.
     expect(calls).toHaveLength(2);
@@ -437,13 +451,34 @@ describe("ensureBitableFields (SPEC.md §15.8 自愈建列：列出 + 只建缺�
     expect(new URL(calls[0].url).searchParams.get("page_size")).toBe("100");
     expect(calls[0].headers.get("authorization")).toBe(`Bearer ${TENANT_TOKEN}`);
 
-    // Second call is a single create for the missing column only, as text (type 1).
+    // Second call creates the missing column as a NUMBER column (type 2), not text.
     expect(calls[1].method).toBe("POST");
-    expect(calls[1].body).toMatchObject({ field_name: "城市", type: FEISHU_FIELD_TYPE_TEXT });
+    expect(calls[1].body).toMatchObject({
+      field_name: "年龄",
+      type: FEISHU_BITABLE_FIELD_TYPE.NUMBER,
+    });
     expect(calls[1].headers.get("authorization")).toBe(`Bearer ${TENANT_TOKEN}`);
   });
 
-  it("creates one column per missing name (all missing → list once + create twice)", async () => {
+  it("creates a single/multi-select missing column with its property.options (§16.8)", async () => {
+    const { calls } = stubFetchByPath({
+      [FIELDS_PATH]: [
+        { status: 200, body: fieldsListBody([]) },
+        { status: 200, body: FIELD_CREATE_OK_BODY },
+      ],
+    });
+
+    await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, [CITY_FIELD]);
+
+    const create = calls.find((c) => c.method === "POST");
+    expect(create?.body).toEqual({
+      field_name: "城市",
+      type: FEISHU_BITABLE_FIELD_TYPE.SINGLE_SELECT,
+      property: { options: [{ name: "北京" }, { name: "上海" }] },
+    });
+  });
+
+  it("creates one column per missing field (all missing → list once + create twice)", async () => {
     const { calls } = stubFetchByPath({
       [FIELDS_PATH]: [
         { status: 200, body: fieldsListBody([]) },
@@ -452,12 +487,12 @@ describe("ensureBitableFields (SPEC.md §15.8 自愈建列：列出 + 只建缺�
       ],
     });
 
-    await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, ["姓名", "城市"]);
+    await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, [NAME_FIELD, AGE_FIELD]);
 
     const created = calls
       .filter((c) => c.method === "POST")
       .map((c) => (c.body as { field_name?: string }).field_name);
-    expect(created).toEqual(["姓名", "城市"]);
+    expect(created).toEqual(["姓名", "年龄"]);
     expect(calls.filter((c) => c.method === "GET")).toHaveLength(1);
   });
 
@@ -471,11 +506,11 @@ describe("ensureBitableFields (SPEC.md §15.8 自愈建列：列出 + 只建缺�
     });
 
     await expect(
-      ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, ["姓名"]),
+      ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, [NAME_FIELD]),
     ).resolves.toBeUndefined();
   });
 
-  it("makes no upstream call when fieldNames is empty", async () => {
+  it("makes no upstream call when fields is empty", async () => {
     const { calls } = stubFetchByPath({ [FIELDS_PATH]: [] });
     await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, []);
     expect(calls).toHaveLength(0);
@@ -486,7 +521,7 @@ describe("ensureBitableFields (SPEC.md §15.8 自愈建列：列出 + 只建缺�
       [FIELDS_PATH]: [{ status: 200, body: JSON.stringify({ code: 1254000, msg: "boom" }) }],
     });
 
-    const err = await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, ["姓名"]).then(
+    const err = await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, [NAME_FIELD]).then(
       () => {
         throw new Error("expected ensureBitableFields to reject");
       },
@@ -506,7 +541,7 @@ describe("ensureBitableFields (SPEC.md §15.8 自愈建列：列出 + 只建缺�
       ],
     });
 
-    const err = await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, ["姓名"]).then(
+    const err = await ensureBitableFields(TENANT_TOKEN, APP_TOKEN, TABLE_ID, [NAME_FIELD]).then(
       () => {
         throw new Error("expected ensureBitableFields to reject");
       },
@@ -519,8 +554,13 @@ describe("ensureBitableFields (SPEC.md §15.8 自愈建列：列出 + 只建缺�
   });
 });
 
-describe("writeRecordWithFieldEnsure (SPEC.md §15.8 编排：写 → 建 → 重试一次)", () => {
+describe("writeRecordWithFieldEnsure (SPEC.md §15.8 + §16.8 升级：写 → 按字段 type 建 → 重试一次)", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  // 自愈现在收 fieldDefs: Field[]（该 form 字段定义，label↔type），据此把缺列建成对应类型。
+  const NAME_FIELD: Field = { id: "f_name", type: "text", label: "姓名" };
+  const CITY_FIELD: Field = { id: "f_city", type: "text", label: "城市" };
+  const FIELD_DEFS: Field[] = [NAME_FIELD, CITY_FIELD];
 
   it("returns on the first write with NO field-endpoint traffic when columns already exist (稳态零开销)", async () => {
     // FIELDS_PATH omitted → any list/create THROWS, proving the steady path skips it.
@@ -528,9 +568,13 @@ describe("writeRecordWithFieldEnsure (SPEC.md §15.8 编排：写 → 建 → �
       [RECORDS_URL]: [{ status: 200, body: recordOkBody("rec-steady") }],
     });
 
-    const result = await writeRecordWithFieldEnsure(TENANT_TOKEN, APP_TOKEN, TABLE_ID, {
-      姓名: "张三",
-    });
+    const result = await writeRecordWithFieldEnsure(
+      TENANT_TOKEN,
+      APP_TOKEN,
+      TABLE_ID,
+      { 姓名: "张三" },
+      FIELD_DEFS,
+    );
 
     expect(result.recordId).toBe("rec-steady");
     // Exactly one record write; no fields traffic at all.
@@ -551,10 +595,13 @@ describe("writeRecordWithFieldEnsure (SPEC.md §15.8 编排：写 → 建 → �
       ],
     });
 
-    const result = await writeRecordWithFieldEnsure(TENANT_TOKEN, APP_TOKEN, TABLE_ID, {
-      姓名: "张三",
-      城市: "北京",
-    });
+    const result = await writeRecordWithFieldEnsure(
+      TENANT_TOKEN,
+      APP_TOKEN,
+      TABLE_ID,
+      { 姓名: "张三", 城市: "北京" },
+      FIELD_DEFS,
+    );
 
     expect(result.recordId).toBe("rec-healed");
     // write ×2 (fail-with-missing then retry-success), list ×1, create ×2 (both missing).
@@ -565,6 +612,75 @@ describe("writeRecordWithFieldEnsure (SPEC.md §15.8 编排：写 → 建 → �
     expect(calls.filter((c) => c.method === "POST" && pathOf(c.url) === FIELDS_PATH)).toHaveLength(
       2,
     );
+  });
+
+  it("only back-fills the columns this write needs (fieldDefs whose label is a write key)", async () => {
+    // fields 只写「姓名」一格，fieldDefs 含「姓名」+「城市」——自愈只补「姓名」对应的列。
+    const { calls } = stubFetchByPath({
+      [RECORDS_URL]: [
+        { status: 200, body: RECORD_MISSING_BODY },
+        { status: 200, body: recordOkBody("rec-healed") },
+      ],
+      [FIELDS_PATH]: [
+        { status: 200, body: fieldsListBody([]) },
+        { status: 200, body: FIELD_CREATE_OK_BODY },
+      ],
+    });
+
+    await writeRecordWithFieldEnsure(
+      TENANT_TOKEN,
+      APP_TOKEN,
+      TABLE_ID,
+      { 姓名: "张三" },
+      FIELD_DEFS,
+    );
+
+    const created = calls
+      .filter((c) => c.method === "POST" && pathOf(c.url) === FIELDS_PATH)
+      .map((c) => (c.body as { field_name?: string }).field_name);
+    // 只补这次写入涉及的「姓名」，不强建未写到的「城市」。
+    expect(created).toEqual(["姓名"]);
+  });
+
+  it("self-heals a MISSING column nested inside a group, creating it with the child's mapped type (Bug #2)", async () => {
+    // fieldDefs 顶层只有一个 group「成绩」(无值、label 不是写入键)，其 number 子字段「分数」是
+    // 真正的写入键。自愈必须先 flattenLeafFields 摊平 group 才能把「分数」纳入要补建的列，
+    // 否则按顶层 label 过滤会漏掉它 → 重试仍缺列。建出的列须是数字列(2)，不是文本。
+    const GROUP_DEFS: Field[] = [
+      {
+        id: "g_scores",
+        type: "group",
+        label: "成绩",
+        children: [{ id: "f_score", type: "number", label: "分数" }],
+      },
+    ];
+    const { calls } = stubFetchByPath({
+      [RECORDS_URL]: [
+        { status: 200, body: RECORD_MISSING_BODY },
+        { status: 200, body: recordOkBody("rec-healed") },
+      ],
+      [FIELDS_PATH]: [
+        { status: 200, body: fieldsListBody([]) },
+        { status: 200, body: FIELD_CREATE_OK_BODY },
+      ],
+    });
+
+    // fields 写「分数」一格（已类型化为 number），fieldDefs 是含 group 的定义。
+    const result = await writeRecordWithFieldEnsure(
+      TENANT_TOKEN,
+      APP_TOKEN,
+      TABLE_ID,
+      { 分数: 88 },
+      GROUP_DEFS,
+    );
+
+    expect(result.recordId).toBe("rec-healed");
+    // 自愈建出了分组子字段「分数」对应的列，且类型是 NUMBER（2），不是文本。
+    const create = calls.find((c) => c.method === "POST" && pathOf(c.url) === FIELDS_PATH);
+    expect(create?.body).toMatchObject({
+      field_name: "分数",
+      type: FEISHU_BITABLE_FIELD_TYPE.NUMBER,
+    });
   });
 
   it("retries at most once: a still-1254045 retry rethrows BitableFieldMissingError (route → 502), no 3rd write", async () => {
@@ -580,9 +696,13 @@ describe("writeRecordWithFieldEnsure (SPEC.md §15.8 编排：写 → 建 → �
       ],
     });
 
-    const err = await writeRecordWithFieldEnsure(TENANT_TOKEN, APP_TOKEN, TABLE_ID, {
-      姓名: "张三",
-    }).then(
+    const err = await writeRecordWithFieldEnsure(
+      TENANT_TOKEN,
+      APP_TOKEN,
+      TABLE_ID,
+      { 姓名: "张三" },
+      FIELD_DEFS,
+    ).then(
       () => {
         throw new Error("expected writeRecordWithFieldEnsure to reject");
       },
@@ -603,9 +723,13 @@ describe("writeRecordWithFieldEnsure (SPEC.md §15.8 编排：写 → 建 → �
       [RECORDS_URL]: [{ status: 200, body: JSON.stringify({ code: 1254000, msg: "invalid" }) }],
     });
 
-    const err = await writeRecordWithFieldEnsure(TENANT_TOKEN, APP_TOKEN, TABLE_ID, {
-      姓名: "张三",
-    }).then(
+    const err = await writeRecordWithFieldEnsure(
+      TENANT_TOKEN,
+      APP_TOKEN,
+      TABLE_ID,
+      { 姓名: "张三" },
+      FIELD_DEFS,
+    ).then(
       () => {
         throw new Error("expected writeRecordWithFieldEnsure to reject");
       },
@@ -614,5 +738,144 @@ describe("writeRecordWithFieldEnsure (SPEC.md §15.8 编排：写 → 建 → �
 
     expect(err).toBeInstanceOf(BitableWriteError);
     expect(err).not.toBeInstanceOf(BitableFieldMissingError);
+  });
+});
+
+describe("answersToTypedFields (SPEC.md §16.8 / §15.8 升级：按列真实类型格式化值)", () => {
+  const { TEXT, NUMBER, DATE, MULTI_SELECT } = FEISHU_BITABLE_FIELD_TYPE;
+
+  // 字段定义（label↔type）：缺列的格式化按这里的字段映射类型（§16.8.4 修订）。
+  const NAME_DEF: Field = { id: "f_name", type: "text", label: "姓名" };
+  const AGE_DEF: Field = { id: "f_age", type: "number", label: "年龄" };
+  const BIRTH_DEF: Field = { id: "f_birth", type: "date", label: "生日" };
+  const HOBBY_DEF: Field = { id: "f_hobby", type: "checkbox", label: "兴趣" };
+  const ALL_DEFS: Field[] = [NAME_DEF, AGE_DEF, BIRTH_DEF, HOBBY_DEF];
+
+  it("formats each answer by the column's REAL type from the listed columnTypes (方案 a)", () => {
+    const columnTypes: BitableColumnTypes = new Map([
+      ["姓名", TEXT],
+      ["年龄", NUMBER],
+      ["兴趣", MULTI_SELECT],
+    ]);
+    const answers: SubmitAnswer[] = [
+      { label: "姓名", value: "张三" },
+      { label: "年龄", value: "28" },
+      { label: "兴趣", value: ["阅读", "运动"] },
+    ];
+
+    const fields = answersToTypedFields(answers, columnTypes, ALL_DEFS);
+
+    // 年龄按 NUMBER 列 → JS number(28)；兴趣按 MULTI_SELECT → string[]；姓名按 TEXT → string。
+    expect(fields).toEqual({ 姓名: "张三", 年龄: 28, 兴趣: ["阅读", "运动"] });
+  });
+
+  it("omits a key whose value cannot be safely formatted (dirty number dropped, others written)", () => {
+    const columnTypes: BitableColumnTypes = new Map([
+      ["姓名", TEXT],
+      ["年龄", NUMBER],
+    ]);
+    const answers: SubmitAnswer[] = [
+      { label: "姓名", value: "张三" },
+      { label: "年龄", value: "不是数字" },
+    ];
+
+    const fields = answersToTypedFields(answers, columnTypes, ALL_DEFS);
+
+    // 脏数字 → undefined → 省略该键；其余字段照常写。
+    expect(fields).toEqual({ 姓名: "张三" });
+    expect("年龄" in fields).toBe(false);
+  });
+
+  it("formats a date answer to a millisecond timestamp for a DATE column", () => {
+    const columnTypes: BitableColumnTypes = new Map([["生日", DATE]]);
+    const fields = answersToTypedFields(
+      [{ label: "生日", value: "2024-01-15" }],
+      columnTypes,
+      ALL_DEFS,
+    );
+    expect(fields).toEqual({ 生日: Date.parse("2024-01-15") });
+  });
+
+  it("treats a column declared as TEXT as text even when the answer looks numeric (旧文本列兜底)", () => {
+    // 旧文本列：年龄列真实类型是文本 → 按文本写「28」而非 number，飞书不因类型不符整条拒。
+    const columnTypes: BitableColumnTypes = new Map([["年龄", TEXT]]);
+    const fields = answersToTypedFields([{ label: "年龄", value: "28" }], columnTypes, ALL_DEFS);
+    expect(fields).toEqual({ 年龄: "28" });
+    expect(typeof fields.年龄).toBe("string");
+  });
+
+  // —— Bug #1 回归：缺列(不在 columnTypes)按字段自身映射类型格式化，而非兜底文本 ——
+  // 自愈正会把缺列建成字段映射类型（number→数字列…），故首写就要带类型化值，重试才能命中。
+
+  it("formats a MISSING number column's answer as a JS number, not a text string (Bug #1)", () => {
+    // 「年龄」不在 columnTypes（列还不存在）→ 按字段映射类型 NUMBER 格式化 → JS number(95)。
+    const fields = answersToTypedFields(
+      [{ label: "年龄", value: "95" }],
+      new Map() as BitableColumnTypes,
+      ALL_DEFS,
+    );
+    expect(fields.年龄).toBe(95);
+    expect(typeof fields.年龄).toBe("number");
+  });
+
+  it("formats a MISSING date column's answer as a millisecond timestamp (Bug #1)", () => {
+    const fields = answersToTypedFields(
+      [{ label: "生日", value: "2024-03-15" }],
+      new Map() as BitableColumnTypes,
+      ALL_DEFS,
+    );
+    expect(fields.生日).toBe(Date.parse("2024-03-15"));
+    expect(typeof fields.生日).toBe("number");
+  });
+
+  it("formats a MISSING checkbox column's answer as a string[] (Bug #1)", () => {
+    const fields = answersToTypedFields(
+      [{ label: "兴趣", value: ["阅读", "运动"] }],
+      new Map() as BitableColumnTypes,
+      ALL_DEFS,
+    );
+    expect(fields.兴趣).toEqual(["阅读", "运动"]);
+    expect(Array.isArray(fields.兴趣)).toBe(true);
+  });
+
+  it("formats a MISSING text column's answer as a joined string (Bug #1 文本字段仍走文本)", () => {
+    // 文本字段缺列 → 映射类型仍是 TEXT → string[] 按文本 join（与升级前同形，但来由是字段映射）。
+    const NEW_TEXT_DEF: Field = { id: "f_new", type: "text", label: "新列" };
+    const fields = answersToTypedFields(
+      [{ label: "新列", value: ["a", "b"] }],
+      new Map() as BitableColumnTypes,
+      [NEW_TEXT_DEF],
+    );
+    expect(fields).toEqual({ 新列: "a, b" });
+  });
+
+  it("formats a MISSING group child column's answer by ITS type via flattenLeafFields (Bug #2 缺列+分组)", () => {
+    // 「分数」是 group「成绩」的 number 子字段；列还不存在 → 必须按子字段映射类型 NUMBER 格式化
+    // （flattenLeafFields 摊平 group 才能查到它的 type），否则文本 "88" 会塞进自愈建的数字列。
+    const GROUP_DEFS: Field[] = [
+      {
+        id: "g_scores",
+        type: "group",
+        label: "成绩",
+        children: [{ id: "f_score", type: "number", label: "分数" }],
+      },
+    ];
+    const fields = answersToTypedFields(
+      [{ label: "分数", value: "88" }],
+      new Map() as BitableColumnTypes,
+      GROUP_DEFS,
+    );
+    expect(fields.分数).toBe(88);
+    expect(typeof fields.分数).toBe("number");
+  });
+
+  it("falls back to TEXT only when a missing column has NO field def (异常态兜底)", () => {
+    // 列缺失且 fieldDefs 里也无此 label → 退化文本兜底（最稳）。
+    const fields = answersToTypedFields(
+      [{ label: "幽灵列", value: ["a", "b"] }],
+      new Map() as BitableColumnTypes,
+      ALL_DEFS,
+    );
+    expect(fields).toEqual({ 幽灵列: "a, b" });
   });
 });
