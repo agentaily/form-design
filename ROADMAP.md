@@ -37,7 +37,8 @@
 
 ## 🚧 进行中
 
-- 后端核心 + **多租户/开放注册** + **邮箱鉴权（验证 / 找回密码）** + **飞书端到端** 均**已上线**（见「已完成」）。当前推进方向是**待办**里的**前端接入剩余三块**（集成设置 modal / 发布 + 表单管理 / 公开填写页 + 数据后台接后端）与**飞书增强**（预建列 / 列类型映射 / 按 `formSlug` 过滤）。
+- **前端 UI 已全闭环**（设计 / 集成设置 / 发布管理 / 公开填写 / 数据后台均接通后端）+ 多租户 / 开放注册 + 邮箱鉴权（验证 / 找回密码）+ 飞书端到端，**均已上线**（见「已完成」）。
+- **当前在做：公开端点限流 / 防刷**——BYOK 下保护 owner 飞书额度（被刷的 `POST /api/submit` 烧 owner 飞书写额度）+ **共享 Resend 免费档**（被刷的 `register` / `password-reset/request` 一波打满 100/天、全员发不出邮件）+ 登录防爆破；走 Cloudflare **KV** 计数器、按 IP 滑窗、超限 429 + `Retry-After`、KV 故障 fail-open。注：owner-only 的 `/api/chat` 各烧自己 DeepSeek 额度，不在限流范围（SPEC §11）。
 
 ---
 
@@ -48,7 +49,7 @@
 - 绑自定义域名 `api.form-design.agentaily.com`（可选；现走 `*.workers.dev` 默认域）
 - **表单新提交通知（未来，先不做 · 以后再说）**：owner 的表单收到新回复时给 owner 发邮件通知。**必须按天聚合 + 每表单可开关**（默认关）——「每条提交即发」量随访客流量不可控、会冲破 Resend 免费档变贵；按天聚合后量级 = 活跃表单数 × 天，基本恒在免费档内。复用已上线的 Resend 发信基建（见「已完成」邮箱验证条 / 全局 skill `email-auth-resend`），改动落在公开 submit 路径，需配通知开关等产品决策，故单独一轮做。
 - 数据后台增强：聚合统计、分页、CSV 导出
-- 公开端点限流 / 防刷
+- 公开端点限流 / 防刷 —— 已挪到「进行中」
 
 ### 飞书端到端
 
@@ -61,9 +62,9 @@
 - ✅ API client 层 + 对话接 `POST /api/chat`（真模型流式替换写死脚本）—— 已完成
 - ✅ 登录接 `POST /api/auth/login`：`core/auth` 存 session token、owner-only 请求带 Bearer；登录 / 账户弹窗（DS），`401` 自动引导登录 —— **已完成（解锁 `/api/chat`）**
 - ✅ 找回密码 + 邮箱验证前端：`LoginDialog`「忘记密码？」子态（中性防枚举）、`/reset-password?token=` 改密落地页、`/verify-email?status=` 结果落地页、设计器「邮箱未验证 · 重新发送」banner（依 `GET /api/auth/me` 真状态、跨刷新权威）—— **已完成**
-- 集成设置 modal 接 `GET/POST /api/config` + `POST /api/config/test`
-- 发布 + 表单管理：`POST /api/forms` 发布；列表 / 改状态 / 删 用 `GET/PATCH/DELETE /api/forms`
-- 公开填写页 + 数据后台：`GET /api/forms/:slug` 渲染 + `POST /api/submit` 提交；`GET /api/forms/:slug/submissions` 看提交
+- ✅ 集成设置 modal 接 `GET/POST /api/config` + `POST /api/config/test`：`settings.jsx`（掩码回显 / 不重交密文 §12.4 / 401 引导登录 / 逐条测连接）+ `core/configClient.ts` —— **已完成**（`integration-settings.spec.jsx` / `app-settings-login.spec.jsx`）
+- ✅ 发布 + 表单管理：`forms-panel.jsx` + `PublishFeedback` + `core/formsClient.ts`（发布 `POST /api/forms`、列表 / 改状态 / 删 `GET/PATCH/DELETE /api/forms`）—— **已完成**（`form-publish-mgmt.spec.jsx` / `app-forms-login.spec.jsx`）
+- ✅ 公开填写页 + 数据后台：`public-form.jsx`（`/f/:slug` 渲染 + `POST /api/submit`，`core/publicClient.ts`，不带 Bearer）+ `submissions-view.jsx`（`GET /api/forms/:slug/submissions`，`core/submissionsClient.ts`）—— **已完成**（`public-fill.spec.jsx` / `fill-and-submit.spec.jsx` / `data-dashboard.spec.jsx`）
 
 ### 产品（SPEC §10 Phase 4）
 
