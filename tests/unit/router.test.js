@@ -17,11 +17,13 @@ import {
   matchPublicForm,
   matchResetPassword,
   matchVerifyEmail,
+  matchSettings,
   currentPathname,
   currentSearch,
   PUBLIC_FORM_PREFIX,
   RESET_PASSWORD_PATH,
   VERIFY_EMAIL_PATH,
+  SETTINGS_PATH,
 } from "../../src/core/router";
 
 describe("router · PUBLIC_FORM_PREFIX", () => {
@@ -129,6 +131,30 @@ describe("router · matchVerifyEmail — recognises /verify-email?status=", () =
     expect(matchVerifyEmail("/", "?status=ok")).toBeNull();
     expect(matchVerifyEmail("/verify", "?status=ok")).toBeNull();
     expect(matchVerifyEmail("/verify-email/extra", "")).toBeNull();
+  });
+});
+
+describe("router · matchSettings — recognises /settings (SPEC §12 + §14)", () => {
+  it("exposes the contract-fixed settings path", () => {
+    expect(SETTINGS_PATH).toBe("/settings");
+  });
+
+  it("matches /settings, returning an empty param object (config comes from the backend)", () => {
+    // Like /signin, the page reads nothing off the URL — it fetches the masked config
+    // from getConfig() — so a bare match object is enough to switch App onto the page.
+    expect(matchSettings("/settings")).toEqual({});
+  });
+
+  it("tolerates a single trailing slash", () => {
+    expect(matchSettings("/settings/")).toEqual({});
+  });
+
+  it("returns null for any other path (the designer / public / other routes)", () => {
+    expect(matchSettings("/")).toBeNull();
+    expect(matchSettings("/setting")).toBeNull();
+    expect(matchSettings("/settings/extra")).toBeNull();
+    expect(matchSettings("/signin")).toBeNull();
+    expect(matchSettings("/f/abc")).toBeNull();
   });
 });
 

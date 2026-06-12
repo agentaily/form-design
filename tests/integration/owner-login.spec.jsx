@@ -5,61 +5,70 @@ import { expect, vi } from "vitest";
 import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
-import { ApiError } from "../../src/core/apiClient";
+import { SignInScreen } from "../../src/signin.jsx";
+import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/owner-login.feature"));
 
-// owner-login.feature realized at the component level: the real <App> + the real
-// <LoginDialog> (dual-mode 登录 / 注册, §17 multi-user), with injected
-// login/register/logout/chat seams so the flow is deterministic without a backend
-// or token store. Each step matches the Gherkin exactly.
+// owner-login.feature realized at the component level. The UI refactor moved login out
+// of an in-app modal and onto a standalone /signin page (DS SignInPage, 登录 / 注册 双模)
+// rendered by <SignInScreen> with injectable login/register/requestPasswordReset/navigate
+// seams. So 登录 / 注册 / 错误 are driven against <SignInScreen> directly, while the two
+// designer-side behaviors (一个 401 把作者送进登录页;登出从顶栏账户菜单退出) are driven
+// against the real <App> with an injected navigate spy / token store.
 //
-// Key UI facts from src/auth.jsx (the component under test):
-//   - dialog title logged-out: 「OWNER 登录 / 注册」, logged-in: 「OWNER 账户」
-//   - DS Tabs flips mode: 「登录」 / 「注册」
-//   - email Input placeholder: owner@example.com
-//   - password Input placeholder: login「输入登录密码」/ register「设置一个至少 8 位的密码」
-//   - submit button label: 登录 / 注册 (busy → 登录中… / 注册中…)
-//   - logged-in panel shows Alert「已登录」 + 登出 button
-//   - account entry IconButton label: 登录账户 (out) / 账户已登录 (in)
-//   - error copy: 409→「该邮箱已注册，请直接登录。」 401→「账号或密码错误，请重试。」
-//     weak local pre-check→「密码至少 8 位。」
+// Key UI facts from src/signin.jsx + the DS components:
+//   - SignInPage footer flips mode: 注册一个 (→ signup) / 去登录 (→ signin)
+//   - email Input: input[type=email], placeholder owner@example.com
+//   - password Input: input[type=password]; signup also has a 确认密码 input
+//   - submit button: 登录 (signin) / 注册并继续 (signup)
+//   - the 忘记密码？ link shows in signin mode only
+//   - backend errors render in SignInPage's own danger banner above the submit button
+//     (the 0.5.0 `error` seam, via messageFor):
+//       409 → 该邮箱已注册，请直接登录。  401 → 账号或密码错误，请重试。
+//   - the SignInPage validates client-side first (邮箱格式 / 密码长度 / 确认一致),
+//     so a < 8 password shows 密码至少 8 位 inline and never reaches register()
+//   - on success SignInScreen calls navigate(returnTo) — the designer re-mounts logged-in
+// From src/App.jsx (the designer):
+//   - a chat 401 → needLogin → navigate("/signin?return=…&reason=登录后继续对话设计")
+//   - the AccountControl: signed-out → a 登录 text button; signed-in → an avatar
+//     (aria-label 账户菜单) opening a menu with 退出登录
 
-// The owner-only /api/chat proxy 401s until logged in (§17) — used by the chat
-// auto-login-guide scenario.
 const chat401 = () =>
   vi.fn(async () => {
     throw new ApiError(401, "未授权");
   });
 
-const noopChat = () => vi.fn(async () => ({ text: "" }));
+// Fill the SignInPage credentials. `confirm` (signup only) fills the 确认密码 input.
+function fillCreds(email, password, confirm) {
+  fireEvent.change(document.querySelector('input[type="email"]'), {
+    target: { value: email },
+  });
+  const pws = document.querySelectorAll('input[type="password"]');
+  fireEvent.change(pws[0], { target: { value: password } });
+  if (confirm != null && pws[1]) fireEvent.change(pws[1], { target: { value: confirm } });
+}
 
-function openAccount() {
-  fireEvent.click(screen.getByRole("button", { name: "登录账户" }));
+function submitForm() {
+  fireEvent.click(Array.from(document.querySelectorAll("button")).find((b) => b.type === "submit"));
 }
 
 function switchToRegister() {
-  fireEvent.click(screen.getByRole("tab", { name: "注册" }));
-}
-
-function fillCreds(email, password) {
-  fireEvent.change(screen.getByPlaceholderText("owner@example.com"), {
-    target: { value: email },
-  });
-  // Login + register modes use different password placeholders; match whichever exists.
-  const pw =
-    screen.queryByPlaceholderText("输入登录密码") ??
-    screen.getByPlaceholderText("设置一个至少 8 位的密码");
-  fireEvent.change(pw, { target: { value: password } });
+  fireEvent.click(screen.getByRole("button", { name: "注册一个" }));
 }
 
 describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
-  AfterEachScenario(() => cleanup());
+  AfterEachScenario(() => {
+    cleanup();
+    clearToken();
+  });
 
   Scenario("未登录时对话触发登录引导", ({ Given, When, Then, And }) => {
+    const navigate = vi.fn();
     Given("设计器处于空状态且未登录", () => {
-      render(<App chat={chat401()} login={vi.fn()} register={vi.fn()} logout={vi.fn()} />);
+      clearToken();
+      render(<App chat={chat401()} navigate={navigate} />);
       expect(screen.getByText("描述你想要的表单")).toBeInTheDocument();
     });
     When("作者发起一句对话且后端返回 401", async () => {
@@ -69,32 +78,48 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     Then("对话提示需要先登录", () => {
       expect(screen.getByText("请先登录 owner 后再使用对话设计。")).toBeInTheDocument();
     });
-    And("自动弹出 owner 登录 / 注册框", () => {
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
-      expect(screen.getByText("OWNER 登录 / 注册")).toBeInTheDocument();
+    And("跳转到 owner 登录页", async () => {
+      // No in-app modal anymore — a 401 routes the owner to the standalone /signin page.
+      await waitFor(() => expect(navigate).toHaveBeenCalled());
+      expect(navigate.mock.calls[0][0]).toMatch(/^\/signin\?/);
+      // the redirect carries where to come back to + why (the gated reason).
+      expect(navigate.mock.calls[0][0]).toContain("return=");
+      expect(navigate.mock.calls[0][0]).toContain("reason=");
     });
   });
 
   Scenario("新用户用邮箱 + 密码注册即登录", ({ Given, When, Then, And }) => {
     const register = vi.fn(async () => {});
-    Given("打开了 owner 登录 / 注册框并切到注册模式", () => {
-      render(<App chat={noopChat()} login={vi.fn()} register={register} logout={vi.fn()} />);
-      openAccount();
-      expect(screen.getByText("OWNER 登录 / 注册")).toBeInTheDocument();
+    const navigate = vi.fn();
+    Given("打开了 owner 登录页并切到注册模式", () => {
+      render(
+        <SignInScreen
+          login={vi.fn()}
+          register={register}
+          requestPasswordReset={vi.fn()}
+          navigate={navigate}
+          search="?return=/back"
+        />,
+      );
       switchToRegister();
+      expect(screen.getByText("创建 owner 账户")).toBeInTheDocument();
     });
     When("作者输入一个未注册的邮箱与一个 8 位及以上的密码并提交", async () => {
-      fillCreds("newowner@example.com", "correct-horse-battery");
-      fireEvent.click(screen.getByRole("button", { name: "注册" }));
-      await screen.findByText("已登录");
+      const pw = "correct-horse-battery";
+      fillCreds("newowner@example.com", pw, pw);
+      submitForm();
+      await waitFor(() => expect(register).toHaveBeenCalled());
     });
-    Then("登录框显示已登录", () => {
-      // register() called with the typed email + password — 注册即登录 (§17.2).
+    Then("注册成功并跳回原页面", async () => {
+      // register() called with the typed email + password — 注册即登录 (§17.2),
+      // then the page navigates back to ?return=.
       expect(register).toHaveBeenCalledWith("newowner@example.com", "correct-horse-battery");
-      expect(screen.getByText("已登录")).toBeInTheDocument();
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("/back"));
     });
-    And("顶栏账户入口标记为已登录", () => {
-      expect(screen.getByRole("button", { name: "账户已登录" })).toBeInTheDocument();
+    And("进入已登录态", () => {
+      // the navigation back IS the logged-in transition (the designer re-mounts with the
+      // persisted token); no backend error banner is shown.
+      expect(screen.queryByText(/该邮箱已注册|账号或密码错误|失败/)).not.toBeInTheDocument();
     });
   });
 
@@ -102,118 +127,156 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     const register = vi.fn(async () => {
       throw new ApiError(409, "email already registered");
     });
-    Given("打开了 owner 登录 / 注册框并切到注册模式", () => {
-      render(<App chat={noopChat()} login={vi.fn()} register={register} logout={vi.fn()} />);
-      openAccount();
+    const navigate = vi.fn();
+    Given("打开了 owner 登录页并切到注册模式", () => {
+      render(
+        <SignInScreen
+          login={vi.fn()}
+          register={register}
+          requestPasswordReset={vi.fn()}
+          navigate={navigate}
+          search="?return=/back"
+        />,
+      );
       switchToRegister();
     });
     When("作者输入一个已被注册的邮箱与密码并提交", async () => {
-      fillCreds("taken@example.com", "correct-horse-battery");
-      fireEvent.click(screen.getByRole("button", { name: "注册" }));
+      const pw = "correct-horse-battery";
+      fillCreds("taken@example.com", pw, pw);
+      submitForm();
       await screen.findByText("该邮箱已注册，请直接登录。");
     });
-    Then("登录框提示该邮箱已注册", () => {
-      // 409 → 邮箱已注册 copy (register-specific, §17.2).
-      expect(screen.getByText("该邮箱已注册，请直接登录。")).toBeInTheDocument();
+    Then("登录页提示该邮箱已注册", () => {
+      // 409 → 邮箱已注册 copy (register-specific, §17.2), in SignInPage's danger banner.
+      expect(screen.getByRole("alert")).toHaveTextContent("该邮箱已注册，请直接登录。");
     });
-    And("顶栏账户入口仍为未登录", () => {
-      expect(screen.getByRole("button", { name: "登录账户" })).toBeInTheDocument();
+    And("仍停留在登录页（未登录）", () => {
+      expect(navigate).not.toHaveBeenCalled();
     });
   });
 
   Scenario("注册时密码过弱给出可读错误", ({ Given, When, Then, And }) => {
-    // The local pre-check (< 8) short-circuits BEFORE any round-trip, so register
-    // must NOT be called — we assert that to prove the weak-password guard.
+    // The SignInPage client-side check (< 8) short-circuits BEFORE any round-trip, so
+    // register must NOT be called — we assert that to prove the weak-password guard.
     const register = vi.fn(async () => {});
-    Given("打开了 owner 登录 / 注册框并切到注册模式", () => {
-      render(<App chat={noopChat()} login={vi.fn()} register={register} logout={vi.fn()} />);
-      openAccount();
+    const navigate = vi.fn();
+    Given("打开了 owner 登录页并切到注册模式", () => {
+      render(
+        <SignInScreen
+          login={vi.fn()}
+          register={register}
+          requestPasswordReset={vi.fn()}
+          navigate={navigate}
+          search="?return=/back"
+        />,
+      );
       switchToRegister();
     });
-    When("作者输入一个少于 8 位的密码并提交", async () => {
-      fillCreds("weakpw@example.com", "short"); // 5 chars < 8
-      fireEvent.click(screen.getByRole("button", { name: "注册" }));
-      await screen.findByText("密码至少 8 位。");
+    When("作者输入一个少于 8 位的密码并提交", () => {
+      fillCreds("weakpw@example.com", "short", "short"); // 5 chars < 8
+      submitForm();
     });
-    Then("登录框提示密码过弱", () => {
-      expect(screen.getByText("密码至少 8 位。")).toBeInTheDocument();
-      // Weak password never reached the backend (caught client-side, §17.2).
+    Then("登录页提示密码过弱", () => {
+      // SignInPage shows the inline 密码至少 8 位 field error; never reaches register().
+      expect(screen.getByText("密码至少 8 位")).toBeInTheDocument();
       expect(register).not.toHaveBeenCalled();
     });
-    And("顶栏账户入口仍为未登录", () => {
-      expect(screen.getByRole("button", { name: "登录账户" })).toBeInTheDocument();
+    And("仍停留在登录页（未登录）", () => {
+      expect(navigate).not.toHaveBeenCalled();
     });
   });
 
   Scenario("已注册用户用邮箱 + 密码登录", ({ Given, When, Then, And }) => {
     const login = vi.fn(async () => {});
-    Given("打开了 owner 登录 / 注册框", () => {
-      render(<App chat={noopChat()} login={login} register={vi.fn()} logout={vi.fn()} />);
-      openAccount();
-      // Dialog opens in 登录 mode by default.
-      expect(screen.getByText("OWNER 登录 / 注册")).toBeInTheDocument();
+    const navigate = vi.fn();
+    Given("打开了 owner 登录页", () => {
+      render(
+        <SignInScreen
+          login={login}
+          register={vi.fn()}
+          requestPasswordReset={vi.fn()}
+          navigate={navigate}
+          search="?return=/back"
+        />,
+      );
+      // signin mode is the default.
+      expect(screen.getByText("登录 Agentaily Forms")).toBeInTheDocument();
     });
     When("作者输入正确的邮箱与密码并提交", async () => {
       fillCreds("owner@example.com", "correct-horse-battery");
-      fireEvent.click(screen.getByRole("button", { name: "登录" }));
-      await screen.findByText("已登录");
+      submitForm();
+      await waitFor(() => expect(login).toHaveBeenCalled());
     });
-    Then("登录框显示已登录", () => {
+    Then("登录成功并跳回原页面", async () => {
       expect(login).toHaveBeenCalledWith("owner@example.com", "correct-horse-battery");
-      expect(screen.getByText("已登录")).toBeInTheDocument();
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith("/back"));
     });
-    And("顶栏账户入口标记为已登录", () => {
-      expect(screen.getByRole("button", { name: "账户已登录" })).toBeInTheDocument();
+    And("进入已登录态", () => {
+      expect(screen.queryByText(/该邮箱已注册|账号或密码错误|失败/)).not.toBeInTheDocument();
     });
   });
 
   Scenario("邮箱或密码错误时给出可读错误", ({ Given, When, Then, And }) => {
     // The backend returns a UNIFIED 401 that does NOT distinguish 邮箱不存在 vs 密码错
-    // (§17.3) — the dialog maps it to one anti-enumeration copy.
+    // (§17.3) — messageFor maps it to one anti-enumeration copy.
     const login = vi.fn(async () => {
       throw new ApiError(401, "未授权");
     });
-    Given("打开了 owner 登录 / 注册框", () => {
-      render(<App chat={noopChat()} login={login} register={vi.fn()} logout={vi.fn()} />);
-      openAccount();
+    const navigate = vi.fn();
+    Given("打开了 owner 登录页", () => {
+      render(
+        <SignInScreen
+          login={login}
+          register={vi.fn()}
+          requestPasswordReset={vi.fn()}
+          navigate={navigate}
+          search="?return=/back"
+        />,
+      );
     });
     When("作者输入错误的邮箱或密码并提交", async () => {
       fillCreds("owner@example.com", "wrong-password-x");
-      fireEvent.click(screen.getByRole("button", { name: "登录" }));
+      submitForm();
       await screen.findByText("账号或密码错误，请重试。");
     });
-    Then("登录框提示账号或密码错误", () => {
-      expect(screen.getByText("账号或密码错误，请重试。")).toBeInTheDocument();
+    Then("登录页提示账号或密码错误", () => {
+      expect(screen.getByRole("alert")).toHaveTextContent("账号或密码错误，请重试。");
     });
-    And("顶栏账户入口仍为未登录", () => {
-      expect(screen.getByRole("button", { name: "登录账户" })).toBeInTheDocument();
+    And("仍停留在登录页（未登录）", () => {
+      expect(navigate).not.toHaveBeenCalled();
     });
   });
 
   Scenario("已登录后登出", ({ Given, When, Then, And }) => {
-    const login = vi.fn(async () => {});
     const logout = vi.fn();
-    Given("作者已登录并打开账户框", async () => {
-      render(<App chat={noopChat()} login={login} register={vi.fn()} logout={logout} />);
-      openAccount();
-      fillCreds("owner@example.com", "correct-horse-battery");
-      fireEvent.click(screen.getByRole("button", { name: "登录" }));
-      await screen.findByText("已登录");
-    });
-    When("作者点击登出", async () => {
-      fireEvent.click(screen.getByRole("button", { name: "登出" }));
-      await waitFor(() =>
-        expect(screen.getByPlaceholderText("owner@example.com")).toBeInTheDocument(),
+    Given("作者已登录并打开账户菜单", async () => {
+      // A held token = a logged-in session (authIsLoggedIn). me resolves verified so no
+      // banner; the AccountControl renders the avatar menu.
+      setToken("owner-jwt");
+      render(
+        <App
+          chat={vi.fn()}
+          logout={logout}
+          getCurrentUser={async () => ({ email: "owner@example.com", emailVerified: true })}
+        />,
       );
+      await waitFor(() => expect(document.querySelector(".am-acct")).toBeInTheDocument());
+      fireEvent.click(document.querySelector(".am-acct"));
+      expect(screen.getByRole("menuitem", { name: /退出登录/ })).toBeInTheDocument();
     });
-    Then("登录框回到邮箱 + 密码输入态", () => {
+    When("作者点击退出登录", () => {
+      fireEvent.click(screen.getByRole("menuitem", { name: /退出登录/ }));
+    });
+    Then("顶栏账户入口回到未登录", async () => {
+      // doLogout drops the session: logout() called + state cleared → the AccountControl
+      // falls back to the signed-out 登录 button (avatar menu gone).
       expect(logout).toHaveBeenCalled();
-      // Back to the dual-mode form: the email + password inputs are visible again.
-      expect(screen.getByPlaceholderText("owner@example.com")).toBeInTheDocument();
-      expect(screen.getByPlaceholderText("输入登录密码")).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByRole("button", { name: "登录" })).toBeInTheDocument());
+      expect(document.querySelector(".am-acct")).not.toBeInTheDocument();
     });
-    And("顶栏账户入口回到未登录", () => {
-      expect(screen.getByRole("button", { name: "登录账户" })).toBeInTheDocument();
+    And("可重新进入登录", () => {
+      // the signed-out account entry is the re-entry into the /signin flow.
+      expect(screen.getByRole("button", { name: "登录" })).toBeInTheDocument();
     });
   });
 });

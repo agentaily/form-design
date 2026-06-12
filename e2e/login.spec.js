@@ -1,11 +1,14 @@
 import { test, expect } from "@playwright/test";
 
 // End-to-end of the owner register / login flow (SPEC §17, open-registration
-// multi-user) in a real browser. We intercept POST /api/auth/register and
-// POST /api/auth/login so the flow is deterministic and needs no backend:
+// multi-user) in a real browser. Since the UI refactor login is a standalone /signin
+// page (DS SignInPage, 登录 / 注册 双模) reached from the header AccountControl 登录
+// button — not an in-app modal. We intercept POST /api/auth/register, /api/auth/login
+// and GET /api/auth/me so the flow is deterministic and needs no backend:
 //   - register: a fresh email → 201 { token }; an already-"taken" email → 409.
 //   - login:    the registered email + password → 200 { token }; anything else
 //               → a UNIFIED 401 (the backend never reveals 邮箱不存在 vs 密码错, §17.3).
+//   - me:       once a token is held, the designer reads it → { email, emailVerified }.
 const KNOWN_EMAIL = "owner@example.com";
 const KNOWN_PASSWORD = "open-sesame-8chars";
 const TAKEN_EMAIL = "taken@example.com";
@@ -45,6 +48,15 @@ async function mockAuth(page) {
       });
     }
   });
+
+  // Once logged in the designer reads GET /api/auth/me to fill the account control.
+  await page.route("**/api/auth/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: KNOWN_EMAIL, emailVerified: true }),
+    });
+  });
 }
 
 test.describe("Agentaily Forms · owner 注册 / 登录", () => {
@@ -54,50 +66,56 @@ test.describe("Agentaily Forms · owner 注册 / 登录", () => {
   });
 
   test("wrong credentials error, correct credentials log in, then logout", async ({ page }) => {
-    // Open the account dialog from the header (dual-mode 登录 / 注册, §17).
-    await page.getByRole("button", { name: "登录账户" }).click();
-    await expect(page.getByRole("dialog")).toBeVisible();
-    await expect(page.getByText("OWNER 登录 / 注册")).toBeVisible();
+    // From the designer, the header AccountControl 登录 button routes to the /signin page.
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    await expect(page).toHaveURL(/\/signin/);
+    // SignInPage in 登录 mode by default.
+    await expect(page.getByRole("heading", { name: "登录 Agentaily Forms" })).toBeVisible();
 
-    // Wrong email/password → the unified, anti-enumeration error, still logged out.
-    await page.getByPlaceholder("owner@example.com").fill(KNOWN_EMAIL);
+    // Wrong email/password → the unified, anti-enumeration error, still on /signin.
+    await page.locator('input[type="email"]').fill(KNOWN_EMAIL);
     await page.getByPlaceholder("输入登录密码").fill("definitely-wrong");
     await page.getByRole("button", { name: "登录", exact: true }).click();
-    await expect(page.getByText("账号或密码错误，请重试。")).toBeVisible();
+    // SignInPage's own danger banner (0.5.0 `error` seam) above the submit button.
+    await expect(page.getByRole("alert")).toContainText("账号或密码错误，请重试。");
+    await expect(page).toHaveURL(/\/signin/);
 
-    // Correct email + password → logged-in panel + header marked logged in.
-    await page.getByPlaceholder("owner@example.com").fill(KNOWN_EMAIL);
+    // Correct email + password → token persisted → navigate back to the designer, where
+    // the AccountControl now shows the signed-in avatar menu.
+    await page.locator('input[type="email"]').fill(KNOWN_EMAIL);
     await page.getByPlaceholder("输入登录密码").fill(KNOWN_PASSWORD);
     await page.getByRole("button", { name: "登录", exact: true }).click();
-    await expect(page.getByText("已登录")).toBeVisible();
-    await expect(page.getByRole("button", { name: "账户已登录" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "账户菜单" })).toBeVisible();
 
-    // Logout returns to the dual-mode form (email + password inputs visible again).
-    await page.getByRole("button", { name: "登出" }).click();
-    await expect(page.getByPlaceholder("owner@example.com")).toBeVisible();
-    await expect(page.getByPlaceholder("输入登录密码")).toBeVisible();
-    await expect(page.getByRole("button", { name: "登录账户" })).toBeVisible();
+    // Logout: open the avatar menu → 退出登录 → the signed-out 登录 button returns.
+    await page.getByRole("button", { name: "账户菜单" }).click();
+    await page.getByRole("menuitem", { name: /退出登录/ }).click();
+    await expect(page.getByRole("button", { name: "登录", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "账户菜单" })).toHaveCount(0);
   });
 
   test("new email self-registers (注册即登录); a taken email errors", async ({ page }) => {
-    await page.getByRole("button", { name: "登录账户" }).click();
-    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    await expect(page).toHaveURL(/\/signin/);
 
-    // Switch to 注册 mode.
-    await page.getByRole("tab", { name: "注册" }).click();
+    // Switch to 注册 (signup) mode via the SignInPage footer link.
+    await page.getByRole("button", { name: "注册一个" }).click();
+    await expect(page.getByRole("heading", { name: "创建 owner 账户" })).toBeVisible();
 
-    // A taken email → 409 readable error, still logged out.
-    await page.getByPlaceholder("owner@example.com").fill(TAKEN_EMAIL);
+    // A taken email → 409 readable error, still on /signin.
+    await page.locator('input[type="email"]').fill(TAKEN_EMAIL);
     await page.getByPlaceholder("设置一个至少 8 位的密码").fill(KNOWN_PASSWORD);
-    await page.getByRole("button", { name: "注册", exact: true }).click();
-    await expect(page.getByText("该邮箱已注册，请直接登录。")).toBeVisible();
-    await expect(page.getByRole("button", { name: "登录账户" })).toBeVisible();
+    await page.getByPlaceholder("再次输入密码").fill(KNOWN_PASSWORD);
+    await page.getByRole("button", { name: "注册并继续" }).click();
+    await expect(page.getByRole("alert")).toContainText("该邮箱已注册，请直接登录。");
+    await expect(page).toHaveURL(/\/signin/);
 
-    // A fresh email + ≥ 8-char password → 201 注册即登录 → logged-in panel.
-    await page.getByPlaceholder("owner@example.com").fill("brand-new@example.com");
+    // A fresh email + ≥ 8-char password → 201 注册即登录 → navigate back to the designer,
+    // where the AccountControl now shows the signed-in avatar menu.
+    await page.locator('input[type="email"]').fill("brand-new@example.com");
     await page.getByPlaceholder("设置一个至少 8 位的密码").fill(KNOWN_PASSWORD);
-    await page.getByRole("button", { name: "注册", exact: true }).click();
-    await expect(page.getByText("已登录")).toBeVisible();
-    await expect(page.getByRole("button", { name: "账户已登录" })).toBeVisible();
+    await page.getByPlaceholder("再次输入密码").fill(KNOWN_PASSWORD);
+    await page.getByRole("button", { name: "注册并继续" }).click();
+    await expect(page.getByRole("button", { name: "账户菜单" })).toBeVisible();
   });
 });

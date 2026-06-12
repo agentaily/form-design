@@ -1079,7 +1079,9 @@ owner **未配飞书 / 飞书连不上 / token 换取失败 / 建列失败** →
 >
 > **不在本节（迁出）：** 邮箱验证 + 发信（已增量，独立成 §22 发信 / §23 邮箱验证）、找回密码（§24）。
 >
-> **仍不在范围：** 刷新 token / 登出黑名单、验证码、RBAC / 细粒度权限、前端登录注册页 UI。这些留后续 feature。登录防爆破 / `register` 限流走 §25（公开端点限流）。
+> **仍不在范围：** 刷新 token / 登出黑名单、验证码、RBAC / 细粒度权限。这些留后续 feature。登录防爆破 / `register` 限流走 §25（公开端点限流）。
+>
+> **前端登录 UI（已落地，2026-06-12）：** owner 登录是一个**独立 `/signin` 路由页**（`src/signin.jsx`，DS `SignInPage` 接 `core/auth` 的 login/register/找回密码），不是应用内弹窗；未登录触发受限操作（分享/发布/我的表单/集成设置）→ 跳 `/signin?return=&reason=`，intent 经 sessionStorage 跨页、登录回跳后续跑。顶栏账户区用 DS `AccountControl`（账户下拉：我的表单 / 集成设置 / 退出登录）。路由匹配器 `matchSignIn` 见 `src/core/router.ts`。
 >
 > **数据迁移（运维一次性，不在本节细化）：** 现有线上 `owner_config` / `forms` 各有一行 `owner_id='default'`。部署新代码 + 建 `users` 表后，由运维用真实邮箱注册首个账号，再跑一次性 SQL 把 `owner_id='default'` 的行 `UPDATE` 成该账号的 `users.id`（脚本 `workers/migrations/002-migrate-default-owner.sql`，user id 部署时填）。这是运维动作，不属本节契约。
 

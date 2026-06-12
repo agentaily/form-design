@@ -1,53 +1,82 @@
-// App-level wiring for the integration-settings 401 → login handoff (SPEC §17).
+// App-level wiring for 集成设置 since it became a standalone /settings route (DS 0.6.0).
 //
-// integration-settings.spec.jsx pins the DIALOG-level contract: a 401 from any
-// config call fires onNeedLogin and does NOT render an inline settings error. It
-// deliberately stops there and defers the App-level effect of that callback —
-// "close settings + pop login" — to this test, so the promise in that file's
-// comment is actually backed by an assertion.
-//
-// We render the real <App/>, inject a getConfig that 401s (same seam App exposes
-// for chat/login/logout), open 集成设置 from the header, and assert the dialog
-// swaps: settings closes, the owner login dialog opens. No backend / token store.
+// integration-settings.spec.jsx pins the PAGE-level contract on <SettingsScreen> (echo,
+// save, backend errors, per-block test, 401 → navigate to /signin). This file pins the
+// two App-level seams the page contract leaves to App:
+//   1. The AccountControl avatar menu「集成设置」navigates a logged-in owner to /settings
+//      (the page is no longer an in-app modal).
+//   2. App's route split renders <SettingsScreen> on /settings and threads the config
+//      seams + navigate so a config 401 on that page routes the owner to /signin (carrying
+//      return=/settings) without surfacing the raw 401.
+// We render the real <App/> with a held token (logged-in session) + an injected navigate
+// spy. No backend.
 import React from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
 // /pure → no auto afterEach(cleanup); tests/setup.js installs none globally, so we
 // unmount explicitly between cases to avoid a leaked App tree.
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
-import { ApiError } from "../../src/core/apiClient";
+import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  clearToken();
+});
 
-// Stubs for the owner-only seams App injects into its children. chat never runs
-// in these cases (we don't send a message); login/logout are inert placeholders.
+// A held token puts the App into a logged-in session (authIsLoggedIn) so the guarded
+// 集成设置 entry navigates to /settings instead of bouncing to /signin. me resolves
+// verified (no banner). chat never runs here (we don't send a message).
 function baseStubs() {
-  return { chat: vi.fn(), login: vi.fn(), logout: vi.fn() };
+  return {
+    chat: vi.fn(),
+    getCurrentUser: async () => ({ email: "owner@example.com", emailVerified: true }),
+  };
 }
 
-function openSettings() {
-  fireEvent.click(screen.getByRole("button", { name: "集成设置" }));
-}
+describe("App wiring: 集成设置 navigates a logged-in owner to /settings", () => {
+  it("routes to /settings from the account menu (no in-app modal)", async () => {
+    const navigate = vi.fn();
+    setToken("owner-jwt");
+    render(<App {...baseStubs()} navigate={navigate} />);
 
-describe("App wiring: integration-settings 401 routes into owner login", () => {
-  it("closes settings and pops the owner login dialog on a config 401", async () => {
-    // Arrange: a getConfig that rejects with 401 (missing/expired owner session).
+    // Open the AccountControl menu and click 集成设置.
+    await waitFor(() => expect(document.querySelector(".am-acct")).toBeInTheDocument());
+    fireEvent.click(document.querySelector(".am-acct"));
+    fireEvent.click(screen.getByRole("menuitem", { name: /集成设置/ }));
+
+    // A logged-in owner is taken straight to the standalone /settings page.
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/settings"));
+  });
+});
+
+describe("App wiring: a config 401 on /settings routes into the /signin page (SPEC §17)", () => {
+  it("renders the settings page on /settings and routes to /signin on a config 401", async () => {
+    // Arrange: render App ON the /settings route with a getConfig that rejects 401
+    // (missing/expired owner session). App's route split mounts <SettingsScreen> and
+    // threads these seams.
+    const navigate = vi.fn();
     const getConfig = vi.fn(async () => {
       throw new ApiError(401, "未授权");
     });
     render(
-      <App {...baseStubs()} getConfig={getConfig} saveConfig={vi.fn()} testConnections={vi.fn()} />,
+      <App
+        {...baseStubs()}
+        pathname="/settings"
+        navigate={navigate}
+        getConfig={getConfig}
+        saveConfig={vi.fn()}
+        testConnections={vi.fn()}
+      />,
     );
 
-    // Act: open 集成设置 — its open effect fetches config and hits the 401.
-    openSettings();
+    // Act: the page's mount effect fetches config and hits the 401.
     await waitFor(() => expect(getConfig).toHaveBeenCalled());
 
-    // Assert: the dialog swaps — owner login appears, settings is gone, and the
-    // raw 401 message is never surfaced as an inline settings error. The dual-mode
-    // login dialog title is 「OWNER 登录 / 注册」 (§17 multi-user).
-    await screen.findByText("OWNER 登录 / 注册");
-    await waitFor(() => expect(screen.queryByText("集成设置")).not.toBeInTheDocument());
+    // Assert: the owner is routed to the standalone /signin page (carrying return=/settings),
+    // and the raw 401 message is never surfaced as an inline settings error.
+    await waitFor(() => expect(navigate).toHaveBeenCalled());
+    expect(navigate.mock.calls[0][0]).toMatch(/^\/signin\?/);
+    expect(navigate.mock.calls[0][0]).toContain("return=%2Fsettings");
     expect(screen.queryByText(/未授权/)).not.toBeInTheDocument();
   });
 });

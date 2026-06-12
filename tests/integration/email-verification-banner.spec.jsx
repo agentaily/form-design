@@ -125,8 +125,10 @@ describe("邮箱验证 banner + 落地页 (features/email-verification.feature, 
 
   it("Scenario: 重发遇 401 时引导先登录（会话失效）", async () => {
     // The owner-only resend 401s when the session lapsed — the banner routes into login
-    // (same handler shape as the chat/settings 401 flow), so the fix is one step away.
+    // (same handler shape as the chat/settings 401 flow). Since the UI refactor login is
+    // the standalone /signin page, so a 401 navigate()s there instead of popping a dialog.
     asLoggedIn();
+    const navigate = vi.fn();
     const getCurrentUser = vi.fn(async () => ({
       email: "owner@example.com",
       emailVerified: false,
@@ -137,6 +139,7 @@ describe("邮箱验证 banner + 落地页 (features/email-verification.feature, 
     render(
       <App
         {...baseStubs()}
+        navigate={navigate}
         getCurrentUser={getCurrentUser}
         requestEmailVerification={requestEmailVerification}
       />,
@@ -145,8 +148,10 @@ describe("邮箱验证 banner + 落地页 (features/email-verification.feature, 
 
     fireEvent.click(screen.getByRole("button", { name: "重新发送" }));
 
-    // A 401 pops the owner login dialog (§23.3) and never surfaces the raw 未授权.
-    await screen.findByText("OWNER 登录 / 注册");
+    // A 401 routes the owner to the standalone /signin page (§23.3) and never surfaces
+    // the raw 未授权.
+    await waitFor(() => expect(navigate).toHaveBeenCalled());
+    expect(navigate.mock.calls[0][0]).toMatch(/^\/signin\?/);
     expect(screen.queryByText(/未授权/)).not.toBeInTheDocument();
   });
 

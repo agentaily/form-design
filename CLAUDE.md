@@ -2,7 +2,7 @@
 
 对话式表单设计器(**设计 → 发布 → 收集 → 看结果**)。导航:
 README(怎么跑/接线)· [SPEC.md](./SPEC.md)(产品+架构)· [ROADMAP.md](./ROADMAP.md)(能力地图)·
-[METHODOLOGY.md](./METHODOLOGY.md)(研发驱动范式)· [OPERATIONS.md](./OPERATIONS.md)(运维)·
+[DEVELOPMENT.md](./DEVELOPMENT.md)(开发文档)· [OPERATIONS.md](./OPERATIONS.md)(运维)·
 [`.claude/agents/README.md`](./.claude/agents/README.md)(sub agent 分工)。
 
 ## 工作流纪律
@@ -16,7 +16,7 @@ README(怎么跑/接线)· [SPEC.md](./SPEC.md)(产品+架构)· [ROADMAP.md](./
 - **合并守 CI gate**:含源码的 PR **等 CI 绿了再合**(或 `gh pr merge --auto` 让它自动等);
   只有**纯文档 / 紧急修复**才用 `--admin` 绕过 base 分支保护策略,并在汇报里讲明绕过了什么。
 - 谁 ship 或改变一个能力,**同一次改动**更新 [ROADMAP.md](./ROADMAP.md);谁改变研发流程本身,
-  更新 [METHODOLOGY.md](./METHODOLOGY.md)。文档不复述,链 SPEC / agents/README。
+  更新 [DEVELOPMENT.md](./DEVELOPMENT.md)。文档不复述,链 SPEC / agents/README。
 
 ## 硬约束
 

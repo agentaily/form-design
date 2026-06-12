@@ -3,38 +3,49 @@
 //
 // form-publish-mgmt.spec.jsx pins the COMPONENT-level contract: a 401 from any
 // forms call fires onNeedLogin and does NOT render an inline error. It defers the
-// App-level effect of that callback — "close panel + pop login" — to here, mirroring
-// app-settings-login.spec.jsx (which does the same for 集成设置).
+// App-level effect of that callback — "close panel + route to /signin" — to here,
+// mirroring app-settings-login.spec.jsx (which does the same for 集成设置).
 //
-// We render the real <App/>, inject the owner-only forms seams (listForms/publishForm)
-// the same way App exposes getConfig/saveConfig/testConnections for SettingsDialog,
-// open 「我的表单」 from the header, and assert: (1) before opening, FormsPanel is inert
-// — no listForms fired on mount; (2) opening with a 401 listForms swaps settings/panel
-// out and pops the owner login dialog. No backend / token store.
+// Since the UI refactor, login is a standalone /signin page (not an in-app modal):
+// 「我的表单」 is reached from the AccountControl avatar menu (so the owner must be
+// logged in to open it via guard), and a forms 401 closes the panel and navigate()s
+// to /signin?return=&reason= instead of popping a dialog. We render the real <App/>,
+// inject the owner-only forms seams + a navigate spy, and assert: (1) before opening,
+// FormsPanel is inert — no listForms on mount; (2) opening with a 401 listForms closes
+// the panel and routes to /signin. No backend.
 import React from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
 // /pure → no auto afterEach(cleanup); we unmount explicitly between cases.
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
-import { ApiError } from "../../src/core/apiClient";
+import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  clearToken();
+});
 
-// Owner-only seams App injects into its children. chat never runs here (we don't send
-// a message); login/logout are inert placeholders.
+// A held token puts the App into a logged-in session so the guarded 「我的表单」 entry
+// opens the panel instead of bouncing straight to /signin. me resolves verified.
 function baseStubs() {
-  return { chat: vi.fn(), login: vi.fn(), logout: vi.fn() };
+  return {
+    chat: vi.fn(),
+    getCurrentUser: async () => ({ email: "owner@example.com", emailVerified: true }),
+  };
 }
 
-function openMyForms() {
-  // The 「我的表单」 entry — a header control labelled for the forms list.
-  fireEvent.click(screen.getByRole("button", { name: /我的表单/ }));
+// 「我的表单」 lives in the AccountControl avatar menu (logged-in). Open the menu, click it.
+async function openMyForms() {
+  await waitFor(() => expect(document.querySelector(".am-acct")).toBeInTheDocument());
+  fireEvent.click(document.querySelector(".am-acct"));
+  fireEvent.click(screen.getByRole("menuitem", { name: /我的表单/ }));
 }
 
-describe("App wiring: FormsPanel mount + 401 routes into owner login", () => {
+describe("App wiring: FormsPanel mount + 401 routes into the /signin page", () => {
   it("does not fetch the forms list until 「我的表单」 is opened (inert when closed)", async () => {
-    // App mounts <FormsPanel> unconditionally (like SettingsDialog), so it must NOT
-    // call listForms on mount — only when the panel is actually opened.
+    // App mounts <FormsPanel> unconditionally (like the PublishFeedback overlay), so it
+    // must NOT call listForms on mount — only when the panel is actually opened. We don't
+    // even need a session for this: the closed panel must stay quiet either way.
     const listForms = vi.fn(async () => []);
     render(<App {...baseStubs()} listForms={listForms} publishForm={vi.fn()} />);
 
@@ -43,20 +54,25 @@ describe("App wiring: FormsPanel mount + 401 routes into owner login", () => {
     expect(listForms).not.toHaveBeenCalled();
   });
 
-  it("closes the panel and pops the owner login dialog on a forms-list 401", async () => {
+  it("closes the panel and routes to /signin on a forms-list 401", async () => {
     // A listForms that rejects with 401 (missing/expired owner session).
+    const navigate = vi.fn();
     const listForms = vi.fn(async () => {
       throw new ApiError(401, "未授权");
     });
-    render(<App {...baseStubs()} listForms={listForms} publishForm={vi.fn()} />);
+    setToken("owner-jwt");
+    render(
+      <App {...baseStubs()} navigate={navigate} listForms={listForms} publishForm={vi.fn()} />,
+    );
 
     // Open 「我的表单」 — its open effect fetches the list and hits the 401.
-    openMyForms();
+    await openMyForms();
     await waitFor(() => expect(listForms).toHaveBeenCalled());
 
-    // The dialog swaps: owner login appears, and the raw 401 is never surfaced inline.
-    // The dual-mode login dialog title is 「OWNER 登录 / 注册」 (§17 multi-user).
-    await screen.findByText("OWNER 登录 / 注册");
+    // The dialog swaps: the owner is routed to the standalone /signin page (no in-app
+    // login dialog), and the raw 401 is never surfaced inline.
+    await waitFor(() => expect(navigate).toHaveBeenCalled());
+    expect(navigate.mock.calls[0][0]).toMatch(/^\/signin\?/);
     expect(screen.queryByText(/未授权/)).not.toBeInTheDocument();
   });
 });

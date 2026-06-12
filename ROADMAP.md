@@ -2,7 +2,7 @@
 
 > 对话式动态表单设计器：**设计 → 发布 → 收集 → 看结果**。
 > 产品规格见 [SPEC.md](./SPEC.md)，运维见 [OPERATIONS.md](./OPERATIONS.md)，
-> 研发驱动范式见 [METHODOLOGY.md](./METHODOLOGY.md)。
+> 开发文档（研发驱动范式）见 [DEVELOPMENT.md](./DEVELOPMENT.md)。
 
 ---
 
@@ -14,10 +14,11 @@
 - **API client 层**（`core/apiClient` + `core/sse`）：fetch 封装 + `VITE_API_BASE` + Bearer token 注入 + SSE 流解析
 - **对话接真后端 `POST /api/chat`**：DeepSeek 流式（OpenAI 协议）替换写死脚本；`core/designerLoop` 单回合 ReAct（自愈）+ `core/designerTools`（UI 字段模型工具：set_meta / add / update / remove / duplicate / reorder）；对话引擎对测试可注入
 - 表单工具：`add` / `update` / `remove` / `duplicate` / `reorder` field + 校验
-- **markup 指向修改**：hover 高亮预览元素、点击带身份发消息到对话
-- **连续发送（缓冲区）**：处理中可继续输入，消息收进缓冲区、下一轮一次性合并处理（SPEC §4.1，`core/queue.ts` + 顶部 DS `Queue` 组件）
+- **markup 指向修改**：hover 高亮预览元素、点击带身份发消息到对话（DS `MarkupLayer`，靠 preview 上的 `data-mk-*`）
+- **连续发送（缓冲区）**：处理中可继续输入，消息收进缓冲区、下一轮一次性合并处理（SPEC §4.1，`core/queue.ts`；缓冲区 UI 由 DS `ConversationThread` 的 `controller` 渲染）
 - **表单校验走 DS `Form.useForm`**：按类型规则（必填 + 邮箱 + 11 位手机号）、提交即定位首个错误、实时纠错（依赖 `@agentaily/design-system` 0.2.0）
 - **响应式适配**：≤720px 单列 + 对话/预览分段切换器、头部压缩、分享收成图标；≤380px 仅留 logo
+- **设计系统组件全面上移（DS 0.2.0 → 0.6.0，2026-06-12；含两轮向 DS 反馈 seam）**：把本地手搓的页面外壳 / 对话线程 / 账户控件 / 登录 / 集成设置 / 指向修改全部换成上游 DS 组件——`DesignerShell`（双栏外壳 + 拖拽 + 移动端切换）、`ConversationThread`（纯渲染 + `controller`，对接现有 §4.1 `core/queue.ts`，富消息用 `renderTurn` 配 `Reasoning/ToolCall/Suggestions/Message`）、`AccountControl`（账户下拉：我的表单 / 集成设置 / 退出登录）、`SignInPage`（**登录改独立 `/signin` 路由页**，原 `LoginDialog` 弹窗删除；受限操作未登录 → 跳登录页 + 回跳续跑，intent 经 sessionStorage 跨页）、`MarkupLayer`、统一 `Icon`、布局 token `--bar-h/--topbar-h`。删 `src/auth.jsx`/`src/markup.jsx` + 整段手写外壳 / 线程 / markup 的 CSS（app.css 1028→约 560 行）。**集成设置改为独立 `/settings` 路由页**（`src/settings.jsx` = `SettingsScreen`）：DS 纯展示连接卡 `DeepSeekCard` + `FeishuCard` + form-design 自己的保存栏 / **后端 400 逐字回显** / 门禁，接真 BYOK 后端 `core/configClient`（掩码不重交 §12.4、401→/signin、逐连接测试），删 `SettingsDialog`；**`SignInPage` 用上游 `error`/`submitting` seam**、logo 字标光标随 DS 默认（`BrandMark` cursor=false）消失。这两处经**向 DS 反馈两轮 seam**落地（0.5.0：SignInPage error/submitting + IntegrationSettings 受控 seam；0.6.0：集成设置**拆成纯展示连接卡**、删旧 `IntegrationSettings`、BrandMark 默认去光标）。全程经 **claude.ai/design 对话设计 → `design-sync` 落地**，不再手搓（沉淀为全局 skill `design-via-claude-design`；上游发版 + 破坏性变更下游通知流程见 design-system 的 `RELEASE.md`）。
 - Cloudflare Pages + GitHub Actions 自动部署（push main → 自动上线；独立 yarnbcoder 账户）
 
 ### 后端（`workers/`，Hono on Cloudflare Workers + D1）
