@@ -99,6 +99,15 @@ interface Env {
    * 保留为可选字段仅为兼容线上尚未 `wrangler secret delete` 的环境与测试注入；新代码不读它。
    */
   OWNER_PASSWORD?: string;
+  /**
+   * KV binding（§25）：公开端点限流 / 防刷的固定窗口计数器（ratelimit.ts 的 `rateLimit` 中间件
+   * 读 `c.env.RATE_LIMIT`）。值是某「hash(ip)+端点类别+窗口起点」键在当前窗口的计数，TTL=窗口长度
+   * （到期自动清，§25.2）。**只**服务公开端点限流（submit / register / pwreset / login，§25.4）；
+   * owner-only 与 /health 不读它。prod 的 KV namespace id 在 wrangler.toml 占位、由 release-eng 填真实
+   * id（`wrangler kv namespace create RATE_LIMIT`）；测试侧 miniflare 自动提供本地 KV（implementer 在
+   * vitest.config.ts 的 cloudflareTest 里接 wrangler.toml 的 kv_namespaces，无需手注 binding 值）。
+   */
+  RATE_LIMIT: KVNamespace;
 }
 
 // Agentaily Forms backend. Routes get added per feature (owner config, LLM
@@ -127,6 +136,25 @@ app.use(
     maxAge: 86400, // 预检缓存一天，减少预检次数（§19.3，值可调）
   }),
 );
+
+// --- 公开端点限流 / 防刷 (§25) ----------------------------------------------
+//
+// ratelimit.ts 导出 `rateLimit(rule)` 中间件工厂 + 各端点默认限额常量（实现体留 implementer）。
+// 挂载纪律（§25.5，与上面 CORS / 下面 requireAuth 协同）：
+//   - **只**逐条挂在被匿名刷、却烧 owner 飞书额度 / 共享 Resend 额度 / 是密码爆破面的**公开**
+//     端点上（method+path 级）：POST /api/submit、/api/auth/register、/api/auth/password-reset/request、
+//     /api/auth/login（见下方各 handler 上的「§25 限流」标注）。
+//   - 排在 **CORS 中间件之后**（CORS 已先短路应答 OPTIONS 预检 → 预检不被计数 / 不触发限流；
+//     429 响应也因排在 cors 之后天然带 CORS 头）。
+//   - **绝不**宽匹配 `app.use("/api/*", rateLimit(...))`——会误伤 owner-only（§11，各烧自己额度，
+//     不限）、`/health`（探活）、所有 OPTIONS 预检（§19）。owner-only 的 POST /api/chat 等也**不**挂。
+//   - 公开 GET（GET /api/forms/:slug、GET /api/auth/verify-email/confirm）本期**不挂**（只读廉价，§25.4）。
+// 限额默认值见 ratelimit.ts：SUBMIT_RATE_LIMITS（10/分钟 且 100/小时，双窗口任一命中即拒）、
+// REGISTER_RATE_LIMIT（5/小时）、PASSWORD_RESET_RATE_LIMIT（4/小时）、LOGIN_RATE_LIMIT（10/分钟）。
+// fail-open（§25.7）：KV 故障 → checkRateLimit 内部兜成放行，端点正常 200/201，绝不因限流器故障打挂。
+//
+// import { rateLimit, SUBMIT_RATE_LIMITS, REGISTER_RATE_LIMIT, PASSWORD_RESET_RATE_LIMIT,
+//   LOGIN_RATE_LIMIT } from "./ratelimit"; // ← implementer 接线时启用
 
 app.get("/health", (c) => c.json({ ok: true, service: "form-design-api" }));
 
@@ -220,6 +248,11 @@ app.get("/api/forms/:slug/submissions", guard);
 // NEW user's real id. Taken email → 409; bad email / weak password / non-JSON →
 // 400 (nothing persisted). Server misconfig (AUTH_SECRET unset) → 500. The
 // plaintext password / signing secret never appear in the response (§17.2 / §17.6).
+//
+// §25 限流：挂 rateLimit(REGISTER_RATE_LIMIT)（per-IP 5/小时，bucket "register"）——护共享
+// Resend 免费档（注册即发验证邮件，§23.2）。挂在 cors() 之后、本 handler 之前；超限 429 +
+// Retry-After，不进 createUser / 不发信。implementer 接线：
+//   app.post("/api/auth/register", rateLimit(REGISTER_RATE_LIMIT), async (c) => { ... });
 app.post("/api/auth/register", async (c) => {
   // Server misconfiguration is a deploy error, NOT a client error — never collapse
   // it into a 400/409 that misleads the caller.
@@ -340,6 +373,11 @@ app.get("/api/auth/verify-email/confirm", async (c) => {
 // **永远回 200 中性体**（防邮箱枚举，不泄漏邮箱是否注册）；仅当 findUserByEmail 命中才 best-effort
 // 发 reset 邮件（链接 → 前端 /reset-password?token=...，吞 EmailSendError）。邮箱不存在 / 非法 JSON
 // → 同样 200、但不发信、不落 token。绝不用状态码区分「邮箱注册过没有」。
+//
+// §25 限流：挂 rateLimit(PASSWORD_RESET_RATE_LIMIT)（per-IP 4/小时，bucket "pwreset"）——护
+// 共享 Resend（每次命中邮箱即发 reset 信）。本期仅 per-IP（per-email 与 §24.1 防枚举冲突，留后续，
+// §25.4）。挂在 cors() 之后、本 handler 之前；超限 429 + Retry-After。implementer 接线：
+//   app.post("/api/auth/password-reset/request", rateLimit(PASSWORD_RESET_RATE_LIMIT), async (c) => { ... });
 app.post("/api/auth/password-reset/request", async (c) => {
   let email = "";
   try {
@@ -396,6 +434,11 @@ app.post("/api/auth/password-reset/confirm", async (c) => {
 // (no signal distinguishing 邮箱不存在 vs 密码错, anti-enumeration baked into
 // authenticateUser). Server misconfig (AUTH_SECRET unset) → 500. The plaintext
 // password / signing secret never appear in the response (§17.3 / §17.6).
+//
+// §25 限流：挂 rateLimit(LOGIN_RATE_LIMIT)（per-IP 10/分钟，bucket "login"）——防密码爆破，
+// 叠加 §17.3 已有的防枚举 + 等耗时。挂在 cors() 之后、本 handler 之前；超限 429 + Retry-After。
+// implementer 接线：
+//   app.post("/api/auth/login", rateLimit(LOGIN_RATE_LIMIT), async (c) => { ... });
 app.post("/api/auth/login", async (c) => {
   // Server misconfiguration is a deploy error, NOT an auth failure — it must not
   // collapse into a 401 that would let everyone in or lock everyone out (§17.3).
@@ -575,6 +618,12 @@ app.post("/api/config/test", async (c) => {
 // exchanges them for a tenant_access_token, then writes one record. The owner's
 // app_secret / tenant_access_token stay in-Worker and never appear in any
 // response, header, or log. See SPEC.md §15.
+//
+// §25 限流：挂 SUBMIT_RATE_LIMITS（per-IP 10/分钟 且 100/小时，bucket "submit"，双窗口任一命中
+// 即拒）——护 owner 飞书写额度（被刷烧 owner 飞书写额度，§15）。挂在 cors() 之后、本 handler 之前；
+// 超限 429 + Retry-After（取命中窗口剩余秒），不进 formExists / 不换 token / 不写记录。implementer
+// 接线（两条同 bucket、不同窗口的中间件，任一拒即短路）：
+//   app.post("/api/submit", ...SUBMIT_RATE_LIMITS.map(rateLimit), async (c) => { ... });
 app.post("/api/submit", async (c) => {
   // 1) Parse + validate the request body. Non-JSON / missing / empty / mis-shaped
   //    answers → 400, nothing forwarded upstream.

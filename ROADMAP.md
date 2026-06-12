@@ -38,7 +38,7 @@
 ## 🚧 进行中
 
 - **前端 UI 已全闭环**（设计 / 集成设置 / 发布管理 / 公开填写 / 数据后台均接通后端）+ 多租户 / 开放注册 + 邮箱鉴权（验证 / 找回密码）+ 飞书端到端，**均已上线**（见「已完成」）。
-- **当前在做：公开端点限流 / 防刷**——BYOK 下保护 owner 飞书额度（被刷的 `POST /api/submit` 烧 owner 飞书写额度）+ **共享 Resend 免费档**（被刷的 `register` / `password-reset/request` 一波打满 100/天、全员发不出邮件）+ 登录防爆破；走 Cloudflare **KV** 计数器、按 IP 滑窗、超限 429 + `Retry-After`、KV 故障 fail-open。注：owner-only 的 `/api/chat` 各烧自己 DeepSeek 额度，不在限流范围（SPEC §11）。
+- **当前在做：公开端点限流 / 防刷**——BYOK 下保护 owner 飞书额度（被刷的 `POST /api/submit` 烧 owner 飞书写额度）+ **共享 Resend 免费档**（被刷的 `register` / `password-reset/request` 一波打满 100/天、全员发不出邮件）+ 登录防爆破；走 Cloudflare **KV** 计数器、按 IP 固定窗口、超限 429 + `Retry-After`、KV 故障 fail-open。注：owner-only 的 `/api/chat` 各烧自己 DeepSeek 额度，不在限流范围（SPEC §11）。
 
 ---
 

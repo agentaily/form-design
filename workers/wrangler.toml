@@ -16,6 +16,19 @@ database_id = "9666fb73-cf26-471c-b159-a08e42f94762"
 # 一次性数据 backfill 不在此目录（见 runbooks/，手动 runbook）。
 migrations_dir = "migrations"
 
+# KV — 公开端点限流 / 防刷的固定窗口计数器（§25）。Worker 读它为 `env.RATE_LIMIT`
+# （ratelimit.ts 的 rateLimit 中间件）；键 = hash(ip)+bucket+windowStart，值是计数、
+# TTL = 窗口长度（到期自动清，§25.2）。**只**服务公开端点限流（submit / register /
+# pwreset / login）；owner-only 与 /health 不读它。
+#   * prod：`wrangler kv namespace create RATE_LIMIT`（yarnbcoder 账户）拿到真实 id 后
+#     由 release-eng 填进下面的占位 id；schema-less，无需迁移。
+#   * 测试：vitest-pool-workers 下 binding 跑在本地 miniflare KV，id 仅对真实部署有意义——
+#     vitest.config.ts 的 cloudflareTest 接 wrangler.toml 的 kv_namespaces，自动提供本地 KV，
+#     implementer 无需在 miniflare.bindings 里手注 binding 值。
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "PLACEHOLDER_RATE_LIMIT_KV_ID" # ← 由 release-eng 填真实 id（wrangler kv namespace create RATE_LIMIT）
+
 # CONFIG_KEY (AES-GCM master key for encrypting owner secrets) is set via
 # `wrangler secret put CONFIG_KEY` in prod, never committed. For tests it's
 # injected as a miniflare binding in vitest.config.ts (a throwaway 256-bit key).

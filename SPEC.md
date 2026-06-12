@@ -395,7 +395,7 @@ fetch('https://api.anthropic.com/v1/messages', {
 });
 ```
 
-- 每个用户烧自己的额度 → 你没有共担 token 成本、不用做限流。
+- 每个用户烧自己的额度 → 你没有共担 token 成本、不用做限流。**注意此话只对「烧自己额度」的 owner-only 端点成立**（如 `POST /api/chat`）；被匿名访客刷、却烧 owner 飞书额度或共享 Resend 额度的**公开端点**（`POST /api/submit` / `register` / `password-reset/request` / `login`）仍需限流，见 §25。
 - key 暴露在客户端是这条路的固有代价：必须防 XSS，生成代码的 iframe 沙箱隔离在这里尤其关键。
 - 模型可换（不同 provider 各有浏览器直连方式），但 tool use 的协议要对齐。
 
@@ -1017,7 +1017,7 @@ CREATE TABLE IF NOT EXISTS forms (
 >
 > **不在本节（迁出）：** 邮箱验证 + 发信（已增量，独立成 §22 发信 / §23 邮箱验证）、找回密码（§24）。
 >
-> **仍不在范围：** 刷新 token / 登出黑名单、限流 / 防爆破 / 验证码、RBAC / 细粒度权限、前端登录注册页 UI。这些留后续 feature。
+> **仍不在范围：** 刷新 token / 登出黑名单、验证码、RBAC / 细粒度权限、前端登录注册页 UI。这些留后续 feature。登录防爆破 / `register` 限流走 §25（公开端点限流）。
 >
 > **数据迁移（运维一次性，不在本节细化）：** 现有线上 `owner_config` / `forms` 各有一行 `owner_id='default'`。部署新代码 + 建 `users` 表后，由运维用真实邮箱注册首个账号，再跑一次性 SQL 把 `owner_id='default'` 的行 `UPDATE` 成该账号的 `users.id`（脚本 `workers/migrations/002-migrate-default-owner.sql`，user id 部署时填）。这是运维动作，不属本节契约。
 
@@ -1297,7 +1297,7 @@ CREATE TABLE IF NOT EXISTS users (
 >
 > **本节范围（仅 Worker 端）：** 允许的来源（origins）、允许的方法 / 头、`OPTIONS` 预检应答、挂载范围。
 >
-> **不在本节：** 限流 / 防刷、`Access-Control-Allow-Credentials`（本架构用 `Authorization: Bearer` 头携带 token，**不**用 cookie，故不需要也不应开启 credentials 模式）、CSRF（无 cookie 即无 CSRF 面）。
+> **不在本节：** 限流 / 防刷（公开端点的限流见 §25，挂在 CORS 中间件**之后**、只挂具体公开端点，绝不在 `OPTIONS` 预检上触发）、`Access-Control-Allow-Credentials`（本架构用 `Authorization: Bearer` 头携带 token，**不**用 cookie，故不需要也不应开启 credentials 模式）、CSRF（无 cookie 即无 CSRF 面）。
 
 ### 19.1 端点职责
 
@@ -1602,7 +1602,7 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 >
 > **本节范围（仅 Worker 端）：** `POST /api/auth/password-reset/request`（发起，防枚举）、`POST /api/auth/password-reset/confirm`（确认改密）的契约、状态码、安全。
 >
-> **不在本节：** 限流 / 防刷（公开端点的限流统一留后续 feature）、改密后强制登出其它设备（§17.5 无状态 JWT，不维护黑名单；reset 只作废 reset token，不吊销已签发的 session）、双因素。
+> **不在本节：** 限流 / 防刷（公开端点的限流见 §25：`password-reset/request` 按 per-IP `4/小时` 护共享 Resend）、改密后强制登出其它设备（§17.5 无状态 JWT，不维护黑名单；reset 只作废 reset token，不吊销已签发的 session）、双因素。
 
 ### 24.1 `POST /api/auth/password-reset/request`（公开，发起）
 
@@ -1641,3 +1641,99 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 - 登录框提供「忘记密码？」入口 → 输入邮箱 → 调 `password-reset/request` → 无论是否注册过都显示中性提示「若该邮箱已注册，我们已发送重置链接」。
 - `/reset-password?token=...` 落地页：表单收新密码（+ 确认）→ `POST password-reset/confirm` → 成功提示并引导回登录；token 失效 / 弱密码据 `400` 文案提示。
 - **UI 一律消费 `@agentaily/design-system`**（输入 / 按钮 / 反馈），不手搓组件。
+
+---
+
+## 25. 后端 · 公开端点限流 / 防刷（KV 固定窗口计数，超限 429 + Retry-After）
+
+> **与第 11/15/17 节的关系：** §11 立了 BYOK 成本观——「每个用户烧自己的额度，不用做限流」；那句话**只对 owner-only 端点成立**：`POST /api/chat` 烧的是 owner 自己的 DeepSeek 额度，被刷也只刷到 owner 本人，**不限流**。真正要限的是**公开端点**——它们被匿名访客调用、却消耗 owner 或全平台的**共享资源**：`POST /api/submit` 每次写 owner 的飞书多维表格（被刷烧 owner 飞书写额度，§15）；`POST /api/auth/register` 与 `POST /api/auth/password-reset/request` 每次发邮件走那把**共享 Resend key**（免费档 100/天，§22，被刷一波打满、全员发不出验证 / 重置信）；`POST /api/auth/login` 是密码爆破面（§17.3 已做防枚举 + 等耗时，但仍需挡住高频试密）。本节补上这一横切防护层：用 Cloudflare **KV** 做按 IP 的固定窗口计数器，只挂在具体公开端点上、绝不误伤 owner-only 与 `/health`。
+>
+> **本节范围（仅 Worker 端）：** KV binding、固定窗口算法、计数键设计（不存原始 IP）、各端点限额、429 + `Retry-After` 契约、fail-open、挂载方式（method 级、避开 OPTIONS / owner-only / health）。
+>
+> **不在本节：** owner-only 端点的任何限流（§11，各烧自己额度，不限）、WAF / DDoS（交给 Cloudflare 平台层）、按 user / 按 email 的限流（本期只做 per-IP；§25.4 说明留口）、验证码 / 人机挑战。
+
+### 25.1 为什么只限公开端点（对照 §11）
+
+| 端点 | 谁调用 | 被刷烧谁的资源 | 限流？ |
+|---|---|---|---|
+| `POST /api/chat` | owner（持 token） | owner 自己的 DeepSeek 额度 | **不限**（§11：烧自己的，刷到的也是自己）|
+| 其它 owner-only（config / forms CRUD / submissions / verify-email-request / me） | owner（持 token） | owner 自己的 D1 / 飞书读 | **不限**（已被 §17 鉴权门挡在匿名之外）|
+| `POST /api/submit` | 匿名答题者 | **owner** 的飞书写额度（共享给该 owner 全部答题者）| **限**（§25.4）|
+| `POST /api/auth/register` | 匿名访客 | **全平台共享** Resend 免费档（100/天）| **限**（§25.4）|
+| `POST /api/auth/password-reset/request` | 匿名访客 | **全平台共享** Resend 免费档 | **限**（§25.4）|
+| `POST /api/auth/login` | 匿名访客 | 密码爆破面 | **限**（§25.4）|
+| `GET /api/forms/:slug` | 匿名答题者 | 只读、廉价（一次 D1 读）| 本期**不限**（§25.4，宽松）|
+| `GET /api/auth/verify-email/confirm` | 匿名（点邮件链接）| token 自证、幂等、廉价 | 本期**不限**（§25.4，宽松）|
+| `GET /health` | 监控 / 探活 | 无 | **不限**（探活不该被限掉）|
+| 任意 `OPTIONS` 预检 | 浏览器 | 无（CORS 短路应答，§19.4）| **不限**（绝不在预检上触发，§25.5）|
+
+> **一句话原则：** 「被匿名刷、且烧的是共享 / 别人的资源」才限；「烧自己额度」「已被鉴权挡住」「探活 / 预检」都不限。
+
+### 25.2 KV 固定窗口算法
+
+用 Cloudflare **KV** 做计数器（架构早规划了 Pages/Workers/D1/KV）。选**固定窗口**（fixed window）而非滑动窗口：实现最简、KV 操作最少（每窗口每键一读一写），且天然契合 KV 的 TTL 自动过期——窗口到期键自动消失，**无需手动 GC**。代价是窗口边界处可能短暂放过最多 2 倍配额（经典固定窗口已知特性），对「尽力防滥用」这个目标可接受。
+
+- **窗口对齐：** 把当前时刻按 `windowSeconds` 向下取整成**窗口起点** `windowStart = floor(now / windowSeconds) * windowSeconds`。同一窗口内的所有请求落到同一个计数键；跨入下一窗口即换新键、计数从 0 起。
+- **计数：** 每个键的 KV 值是该窗口内已观测到的请求数（整数）。读当前值 → 若 `≥ limit` 则**拒**；否则 `+1` 写回、**放行**。
+- **TTL = 窗口长度：** 写键时设 `expirationTtl = windowSeconds`（或到窗口结束的剩余秒数，由实现定，但须保证键在窗口结束后不久即过期）。到期 KV 自动清，旧窗口的计数不会无限堆积、也不影响新窗口。
+- **`Retry-After`（秒）：** = 当前窗口剩余秒数 `windowStart + windowSeconds - now`（到窗口重置还有多久）。超限响应回这个值，告诉客户端何时可重试。
+- **多窗口叠加（§25.4 的 submit 用）：** 一个端点可挂多个窗口（如分钟 + 小时），各自独立计数；**命中任一窗口的上限即拒**（取最严的那个）。`Retry-After` 取**命中的那个窗口**的剩余秒数（若多窗口同时命中，取其中较大的剩余秒数，确保客户端等够）。
+
+### 25.3 计数键设计（不存原始 IP，隐私）
+
+- **取客户端 IP：** 读 `CF-Connecting-IP` 请求头——Cloudflare 在 Workers 上注入的**真实访客 IP**（不可被客户端伪造，平台填充）。**不**信任 `X-Forwarded-For`（可伪造）。
+- **IP 缺失兜底：** 若 `CF-Connecting-IP` 缺失（本地 dev / 测试 / 异常），归一到一个**常量兜底桶**（如 `"unknown"`）。该兜底策略下**仍然限流**（所有无 IP 请求共享一个桶，宁可误伤也不开天窗），但因此本地 / 测试环境多个无 IP 客户端会共享配额——这是有意为之的保守选择，写清以免实现误以为「无 IP 就放行」。
+- **键格式（不存原始 IP）：** 计数键 = `hash(ip)` + 端点类别（`bucket`）+ 窗口起点，形如 `rl:<bucket>:<hash(ip)>:<windowStart>`。其中 `hash(ip)` 是 IP 的单向哈希（如 SHA-256 截断的十六进制串），**绝不**把原始 IP 明文写进 KV 键 / 值——KV 里只留「某个匿名标识在某窗口的计数」，不留可回指到具体人的原始 IP（隐私最小化）。哈希用途仅为分桶去重、不需抗碰撞强度，但必须确定性（同 IP 同 bucket 同窗口恒得同键）。
+- **`bucket`（端点类别）：** 由挂载方按端点传入（如 `"submit"` / `"register"` / `"pwreset"` / `"login"`），让不同端点的计数互不串桶——刷 register 不该消耗 login 的配额。多窗口同端点用同一 `bucket` + 不同 `windowSeconds` 自然区分（键里含 windowStart，分钟桶与小时桶的 windowStart 不同）。
+
+### 25.4 各端点限额（默认常量，可在合约内调）
+
+下表是**默认值**，写进 `ratelimit.ts` 的常量、可调；既要挡住刷子、又不误伤正常人（答题者正常一两次提交、访客偶尔注册 / 找回密码）。per-IP。
+
+| 端点 | bucket | 限额 | 窗口语义 | 为什么 |
+|---|---|---|---|---|
+| `POST /api/submit` | `submit` | `10/分钟` **且** `100/小时` | 双窗口叠加，命中任一即拒 | 答题者正常一两次；双窗护 owner 飞书写额度（分钟挡爆刷、小时挡慢速长刷）|
+| `POST /api/auth/register` | `register` | `5/小时` | 单窗口 | 护共享 Resend（注册即发验证邮件，§23.2）；正常人一小时不会注册 5 个号 |
+| `POST /api/auth/password-reset/request` | `pwreset` | `4/小时` | 单窗口 | 护共享 Resend（每次命中邮箱即发 reset 信，§24.1）；本期**仅 per-IP**（不做 per-email，见下）|
+| `POST /api/auth/login` | `login` | `10/分钟` | 单窗口 | 防密码爆破（叠加 §17.3 已有的防枚举 + 等耗时）|
+| `GET /api/forms/:slug` | —（不限）| 本期不限 | — | 公开拉取，只读且廉价（一次 D1 读，无上游 / 无发信 / 无写）；若将来要防爬可加很高的桶（如 `300/分钟`），本期不挂 |
+| `GET /api/auth/verify-email/confirm` | —（不限）| 本期不限 | — | token 自证、幂等、廉价；无 token 的命中只是一次 D1 查空，本期不挂 |
+
+- **per-email 留口（不做）：** `password-reset/request` 理想上还应按目标 email 限（防针对单个受害者邮箱的轰炸），但 per-email 限流会引入「该邮箱是否被限 = 该邮箱是否注册过」的枚举侧信道（与 §24.1 防枚举冲突），且需要额外的 email→hash 桶。**本期只做 per-IP**；per-email 留作后续 feature，若做须保证对外行为仍与「邮箱不存在」不可区分。
+- **`GET` 公开端点为何宽松：** 这两个 `GET` 既不发信、不写飞书、也不烧 owner 额度，被刷的代价仅是 Worker CPU + 一次廉价 D1 读，平台层 / Cloudflare 已兜底大流量；本期把限流预算花在「烧共享 / 别人资源」的 4 个 `POST` 上。
+
+### 25.5 挂载方式（method 级，避开 OPTIONS / owner-only / health）
+
+限流是中间件工厂 `rateLimit({ limit, windowSeconds, bucket })`（§25.6），返回一个 Hono 中间件，**只**挂在 §25.4 表里要限的那几条公开端点上——**method + path 级**精确挂载，与 §17.7 的 `requireAuth` 同样的「逐条点名、绝不宽匹配」纪律：
+
+- **绝不**用 `app.use("/api/*", rateLimit(...))` 之类宽匹配——那会同时误伤 owner-only 端点（违背 §11 / §25.1）、`/health`（探活被限掉)、以及**所有 `OPTIONS` 预检**（CORS 预检被计数甚至 429，浏览器拿不到预检结果、真实请求发不出，违背 §19）。
+- **挂在 method 级**（如 `app.post("/api/submit", rateLimit({ bucket: "submit", ... }), handler)` 的语义）让它只作用于该 method + path 的真实请求；`OPTIONS` 预检由 §19 的 `cors()` 在更前面短路应答、根本不会走到限流中间件。
+- **中间件顺序（与 §19 协同，关键）：** 限流中间件须排在 §19 的 CORS 中间件**之后**——CORS 先短路应答 `OPTIONS`（预检不被计数）；也须排在 owner-only `requireAuth` **无关**的位置（限流只挂公开端点，那几条本就没有 guard）。即对一个公开端点，请求经过的顺序是 `cors`（横切，已在 `/api/*` 上）→ `rateLimit`（该端点）→ handler。限流绝不改变 CORS 行为，也绝不在限流响应上漏掉 CORS 头（限流中间件挂在 `cors()` 之后，429 响应天然带上 CORS 头）。
+- 多窗口端点（submit 的分钟 + 小时）：挂**两个** `rateLimit` 中间件（同 `bucket`、不同 `windowSeconds` + 不同 `limit`），任一拒即短路 429；或由实现把多窗口收进一次中间件调用（合约内择一，对外行为一致：命中任一窗口即拒）。
+
+### 25.6 限流原语 + 中间件工厂契约（`workers/src/ratelimit.ts`）
+
+实现留给 implementer，类型桩在 `workers/src/ratelimit.ts`。两个 seam：
+
+- **`checkRateLimit(kv, { ip, bucket, limit, windowSeconds }, now?)` — 纯固定窗口原语：** 算窗口起点 → 拼 `hash(ip)` 键 → 读 KV 计数 → `≥ limit` → `{ allowed: false, remaining: 0, retryAfter }`；否则 `+1` 写回（TTL=windowSeconds）→ `{ allowed: true, remaining, retryAfter }`。返回 {@link RateLimitDecision}。
+- **`rateLimit({ limit, windowSeconds, bucket })` — Hono 中间件工厂：** 返回的中间件从 `c.req.header('CF-Connecting-IP')`（缺则兜底桶）取 IP → 调 `checkRateLimit(c.env.RATE_LIMIT, ...)` → `allowed===false` → `429 { error }` + `Retry-After: <retryAfter>` 头、**不**调 `next()`（不进 handler）；否则 `await next()`。
+
+### 25.7 fail-open（关键：限流器自身故障绝不打挂正常请求）
+
+限流是「**尽力防滥用**」，不是「强一致门禁」——它的故障**绝不能**反过来拒掉正常请求：
+
+- **KV 读 / 写抛错（KV 不可用 / 超时 / 配额）→ 放行**（`allowed: true`，当作未命中）。`checkRateLimit` 内部 `try/catch` 兜住所有 KV 异常，异常路径一律返回 `allowed: true`。
+- **可观测但不泄漏：** fail-open 时只记 `err.name`（如 `console.error("rate-limit fail-open", err.name)`），**绝不**把 KV 内容 / 原始 IP / 键 写进日志或响应。
+- fail-open 下端点行为与「未限流」完全一致：正常请求照常 `200` / `201`，不因限流器故障变成 `429` / `5xx`。
+
+### 25.8 可观察契约（429 / Retry-After / 正常请求不变）
+
+| 情况 | 状态码 | 响应体 | 头 |
+|---|---|---|---|
+| 未超限（含 fail-open）| 端点本身的状态码（`200` / `201` / …，**不变**）| 端点本身的响应体（**不变**）| 端点本身的头（+ §19 CORS 头）|
+| 超限 | **`429`**（固定，**不是** `503`）| `{ error }`（中性文案，可不泄漏具体限额数字）| `Retry-After: <秒>`（到窗口重置）+ §19 CORS 头 |
+
+- **超限固定 `429 Too Many Requests`**（语义就是「请求太频繁、稍后重试」）——**不**用 `503`（那暗示服务端挂了、会误导监控 / 客户端重试策略）。
+- **`Retry-After` 头**为整数秒（§25.2 算的窗口剩余秒数），让客户端 / 前端能据此显示「请 N 秒后重试」并自动退避。
+- **`{ error }` 文案中性**：表「请求过于频繁，请稍后再试」即可，**不必**回显当前限额 / 剩余次数 / 窗口长度（避免给刷子反馈以便精确卡线；是否回 `remaining` 由实现定，默认不回）。
+- **正常请求零影响：** 未命中限流的请求，状态码 / 响应体 / 其它头与未挂限流时**完全一致**——限流中间件在放行路径上除了一次 KV 自增外不改变任何响应语义。
