@@ -114,11 +114,11 @@ npm run dev          # 开发服务器 http://localhost:5173
 >
 > **为什么用 App token**：`GITHUB_TOKEN` 触发的事件不会再触发新 workflow（GitHub 防递归铁律），所以用它开的 Version PR 会永远卡在「1 workflow awaiting approval」、必需检查永远报不上来。换成 GitHub App 身份开 PR，CI 正常自动跑。
 >
-> 一次性前置（已配好，换机器/换仓库时才需重做）：
+> 凭证已配好（复用**组织级**发版机器人）。换仓库照全局 skill `changesets-auto-release` 的 Path A 接，无需重建 App / 重配私钥：
 >
-> - 建一个 GitHub App（权限 `Contents: RW` + `Pull requests: RW`），装到本仓库；把 App ID 与私钥存为仓库 secret `RELEASE_BOT_APP_ID` / `RELEASE_BOT_PRIVATE_KEY`。
-> - 仓库 Settings → General 开启 **Allow auto-merge**。
-> - 仓库 Settings → Actions → General 允许「Allow GitHub Actions to create and approve pull requests」。
+> - 复用组织 App **`agentaily-release-bot`**（权限 `Contents: RW` + `Pull requests: RW`）；新仓只需在 org GitHub Apps 安装里勾上它。
+> - 两个 secret 是**组织级**（`RELEASE_BOT_APP_ID` / `RELEASE_BOT_PRIVATE_KEY`，可见性 `selected`）；新仓勾进可见列表即可，不必各自生成私钥。私钥可恢复副本在 vault `credentials/github-agentaily-release-bot`。
+> - 仓库 Settings → General 开启 **Allow auto-merge**；Settings → Actions → General 允许「Allow GitHub Actions to create and approve pull requests」。
 
 ---
 
