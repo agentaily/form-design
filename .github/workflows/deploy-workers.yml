@@ -31,6 +31,17 @@ jobs:
           cache: npm
           cache-dependency-path: workers/package-lock.json
       - run: npm ci
+      # Apply pending D1 schema migrations BEFORE deploying new code (expand-first:
+      # the schema is ready before the new Worker serves traffic). Idempotent +
+      # tracked via the d1_migrations table, so re-runs are no-ops. One-time DATA
+      # backfills are NOT here — they live in workers/runbooks/ as manual runbooks.
+      - name: Apply D1 migrations
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_WORKERS_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers
+          command: d1 migrations apply form-design-db --remote
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:

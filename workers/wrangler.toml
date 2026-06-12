@@ -11,6 +11,10 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "form-design-db"
 database_id = "9666fb73-cf26-471c-b159-a08e42f94762"
+# Schema 演进走 wrangler D1 迁移：migrations/*.sql 由 `wrangler d1 migrations apply`
+# 按序、幂等应用（追踪表 d1_migrations）。deploy-workers.yml 在每次部署前自动 apply。
+# 一次性数据 backfill 不在此目录（见 runbooks/，手动 runbook）。
+migrations_dir = "migrations"
 
 # CONFIG_KEY (AES-GCM master key for encrypting owner secrets) is set via
 # `wrangler secret put CONFIG_KEY` in prod, never committed. For tests it's

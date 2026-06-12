@@ -210,7 +210,7 @@ export CLOUDFLARE_API_TOKEN="$(jq -r .values.api_token ~/.claude/skills/vault/da
 export CLOUDFLARE_ACCOUNT_ID="e6ce8ba37ac129ecb40227f2025d4fa6"
 
 npx wrangler deploy                                              # 部署
-npx wrangler d1 execute form-design-db --remote --file=schema.sql -y   # 重建/迁移表
+npx wrangler d1 migrations apply form-design-db --remote        # 应用 schema 迁移（CI 部署前已自动跑，见 RELEASE.md §3）
 npx wrangler secret list                                        # 查 secret（不显值）
 npx wrangler tail                                               # 实时日志
 ```
