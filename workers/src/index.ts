@@ -23,7 +23,7 @@ import {
   answersToFields,
   parseSubmitRequest,
   validateAnswers,
-  writeToBitable,
+  writeRecordWithFieldEnsure,
   BitableWriteError,
   FeishuNotConfiguredError,
   FormNotPublishedError,
@@ -371,13 +371,21 @@ app.post("/api/submit", async (c) => {
     throw err;
   }
 
-  // 5) Map answers → Feishu fields and write one record. The tenant_access_token
-  //    rides ONLY the add-record Authorization header (§15.7); any failure
+  // 5) Map answers → Feishu fields and write one record, self-healing missing
+  //    columns once (§15.8): a steady-state write hits only the add-record
+  //    endpoint; a 1254045 (列不存在) back-fills the missing columns and retries
+  //    once. The tenant_access_token rides ONLY the Authorization headers (§15.7);
+  //    any terminal failure (incl. 自愈后重试仍失败) is a BitableWriteError →
   //    surfaces as 502 with neither token nor secret in the error.
   const fields = answersToFields(request.answers);
   let recordId: string;
   try {
-    ({ recordId } = await writeToBitable(token, feishu.appToken, feishu.tableId, fields));
+    ({ recordId } = await writeRecordWithFieldEnsure(
+      token,
+      feishu.appToken,
+      feishu.tableId,
+      fields,
+    ));
   } catch (err) {
     if (err instanceof BitableWriteError) {
       return c.json({ error: err.message }, 502);

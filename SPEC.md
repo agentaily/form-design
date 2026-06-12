@@ -797,10 +797,13 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 | 步骤 | 上游端点 | 凭据用法 | 判定 |
 |---|---|---|---|
 | 换 token | `POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal` | body `{ app_id, app_secret }`（JSON） | 上游 `200` 且 body `code === 0` → 拿到 `tenant_access_token`；否则视为换 token 失败 |
-| 新增记录 | `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records` | `Authorization: Bearer <tenant_access_token>`，body `{ fields: { <label>: <value>, ... } }` | 上游 `2xx` 且 body `code === 0` → 取 `data.record.record_id`；否则视为写记录失败 |
+| 新增记录 | `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records` | `Authorization: Bearer <tenant_access_token>`，body `{ fields: { <label>: <value>, ... } }` | 上游 `2xx` 且 body `code === 0` → 取 `data.record.record_id`；否则视为写记录失败（`code === 1254045` `FieldNameNotFound` 是其中一种特例，触发 §15.8 自愈）|
+| 列出字段 | `GET https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields?page_size=100` | `Authorization: Bearer <tenant_access_token>`，无 body | 上游 `2xx` 且 body `code === 0` → 取 `data.items[].field_name`；仅在 §15.8 自愈分支调用 |
+| 新建字段 | `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields` | `Authorization: Bearer <tenant_access_token>`，body `{ field_name, type: 1 }`（`type 1` = 文本） | 上游 `2xx` 且 body `code === 0` → 建成；`code === 1254014` `FieldNameDuplicated` 视为**已存在即成功**（幂等）；其它 `code≠0` → 建列失败。仅在 §15.8 自愈分支调用 |
 
-- 飞书的约定是 HTTP `200` 也可能带非 0 业务错误码，所以两步都**必须看 body 的 `code`**，`code === 0` 才算成功（与 §14.2 一致，复用 `FEISHU_OK_CODE`）。
+- 飞书的约定是 HTTP `200` 也可能带非 0 业务错误码，所以每步都**必须看 body 的 `code`**，`code === 0` 才算成功（与 §14.2 一致，复用 `FEISHU_OK_CODE`）。
 - `{app_token}` / `{table_id}` 用 `getOwnerConfig` 解出的 `feishu.appToken` / `feishu.tableId` 填充。
+- 稳态下只走「换 token + 新增记录」两步；后两个「字段」端点**只在**新增记录返回 `1254045`（列不存在）时由 §15.8 触发，正常提交不调用。
 
 ### 15.6 错误响应（状态码 + `{ error }`）
 
@@ -811,10 +814,12 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 | 单条 answer 形状非法（label 空 / value 类型错） | `400` | `{ "error": "..." }` | 不打上游 |
 | 请求体非合法 JSON | `400` | `{ "error": "invalid JSON body" }` | 不打上游 |
 | 换 `tenant_access_token` 失败（非 2xx / `code≠0` / 不可达） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `app_secret`；可携带飞书 `code` / HTTP 状态这类非敏感摘要 |
-| 写记录失败（非 2xx / `code≠0`） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `tenant_access_token` / `app_secret` |
+| 写记录失败（非 2xx / `code≠0`，**含 §15.8 自愈后重试仍失败**） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `tenant_access_token` / `app_secret` |
+| 自愈建列失败（列出/新建字段上游非 2xx / `code≠0`，且非 `1254014` 幂等） | `502` | `{ "error": "..." }` | 同写记录失败：错误体绝不含 `tenant_access_token` / `app_secret`，可带飞书 `code` 摘要 |
 
 - 错误体一律 `application/json` 的 `{ error }`——前端先看状态码与 `ok` 决定成功 / 失败分支。
 - 上游错误状态码归一策略（透传上游码 vs 统一 `502`）由 implementer 在合约内决定，但**必须**满足：(a) 可辨识为「上游 / 配置出错」而非代理自身 bug；(b) 错误体绝不包含 `tenant_access_token` 或 `app_secret`。
+- **`1254045`（列不存在）不是终态错误**：它触发 §15.8 自愈（建列 + 重试一次），只有自愈后**重试仍失败**才落 `502`。
 
 ### 15.7 安全（token/secret 不出网）
 
@@ -822,6 +827,28 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 - **`tenant_access_token` 只进写记录请求的 Authorization 头**：换到后唯一去向是 `POST .../records` 的 `Authorization: Bearer`，绝不写进成功响应（`recordId` 之外）、错误体、HTTP 头回显、日志。
 - **即便上游回错也不拼凭据**：换 token / 写记录的 `code≠0` 或非 2xx 转成 `{ error }` 时，只保留「上游拒绝 / 出错」语义（可带飞书 `code` 或 HTTP 状态这类非敏感摘要供排障），绝不把 `app_secret` / `tenant_access_token` 或其片段拼进 `error`。
 - **沿用 §12 的加密边界：** secret 的解密只发生在 Worker 内（`CONFIG_KEY` + `getOwnerConfig`）；D1 里仍是密文，浏览器侧自始至终拿不到明文。
+
+### 15.8 飞书列自动创建（自愈）
+
+写记录时，飞书要求 `fields` 里每个列名（= answer 的 `label`，§15.3）**在目标表里已存在**，否则整条写入失败并返回 `code 1254045` `FieldNameNotFound`（不产生记录，无副作用）。本期不要求 owner 预先在飞书表里手动建好与表单字段同名的列——后端在写入遇到这个特定码时**自愈**：补建缺失的列、再重试一次。
+
+**触发与流程（仅在需要时发生，稳态零开销）：**
+
+1. 正常写记录（§15.5）。返回 `code === 0` → 照常 `200 { ok, recordId }`，**不触发**任何字段端点。
+2. 若返回 `code === 1254045`（列不存在）→ 进入自愈：
+   a. `GET .../fields`（§15.5）列出该表现有列名集合。
+   b. 对「本次要写入的列名（`Object.keys(fields)`）里、现有列名集合中没有的」每一个，`POST .../fields` 以 `type 1`（文本）新建；建列遇 `code 1254014` `FieldNameDuplicated`（并发下别处刚建）视为**成功**（幂等）。
+   c. 列补齐后**重试一次**写记录。重试成功 → `200 { ok, recordId }`；重试仍失败 / 自愈过程中列出或建列失败 → `502 { error }`（§15.6，错误体不含凭据）。
+3. **只重试一次**：自愈是「补缺列」，不是无限循环；重试后仍 `1254045` 或其它 `code≠0` 一律落 `502`。
+
+**设计要点（合约约束，给 implementer）：**
+
+- **反应式、非预检**：稳态（列已存在）下每次提交仍只打「换 token + 写记录」两步，**不**额外 `GET fields`——只有真的 `1254045` 才付出列出/建列成本。失败的首次写入无副作用（飞书 `1254045` 不产生记录），故重试安全。
+- **列名真相 = 本次写入的 `fields` 键**：自愈只保证「这次要写的列」存在，不强行把整份表单 schema 的所有字段都建成列（未填的可选字段在被首次提交时才出现对应列）。列类型一律文本（`type 1`），多值答案（§15.3 的字符串数组）按现有 §15.3 约定原样写入，本节不改值映射。
+- **凭据边界不变（§15.7）：** 新增的两个字段端点同样只在 `Authorization: Bearer <tenant_access_token>` 头里带 token；列出/建列的失败 `{ error }` 绝不含 `tenant_access_token` / `app_secret`。
+- **幂等与并发：** 自愈先列后建、只建缺失列；`1254014` 当成功，确保两个并发首提交不会因「列已被另一个建好」而失败。
+
+> **后续（不在本期）：** 发布表单时即在飞书表预建列（让 owner 发布后立刻在飞书看到完整列结构）、列类型按字段 `type` 精确映射（数字列 / 单选列 / 日期列而非一律文本）。本期只做「提交不再因缺列而失败」这一最小自愈。
 
 ---
 

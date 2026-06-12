@@ -26,6 +26,7 @@
 - **鉴权 + 数据后台（PR #5）**：`POST /api/auth/login`（密码 → session JWT）+ `requireAuth` 保护 owner-only 端点、`GET /api/forms/:slug/submissions`（读飞书提交列表）
 - **补严**：CORS（白名单跨域）、提交校验（表单状态门 + 必填校验，脏 / 未发布不写飞书）、表单管理 CRUD（`GET /api/forms` 列表 · `PATCH` 改状态 · `DELETE`）、安全收尾（常量时间密码比较、字段递归深度上限、飞书探测 `res.ok`）
 - **部署上线（2026-06-11）**：后端已上线 **https://form-design-api.agentaily.workers.dev** —— D1 `form-design-db`（APAC）建库 + 建表、3 个 runtime secret（`CONFIG_KEY`/`AUTH_SECRET`/`OWNER_PASSWORD`）已设、`wrangler deploy` 跑通、独立 CI `deploy-workers.yml`（push main 且 `workers/**` 变更自动部署）。独立 yarnbcoder 账户，Workers+D1 token 与运行时 secret 均进 vault。冒烟测试全绿（health 200 / 公开拉取 404 / 登录对 200 错 401）。详见 [OPERATIONS.md](./OPERATIONS.md) §12。
+- **飞书列自动创建 · 自愈（SPEC §15.8）**：`POST /api/submit` 写记录遇目标表缺列（飞书 `code 1254045`）时自动补建缺失列（文本列，重复列 `1254014` 幂等）再重试一次，提交不再因「表里没有对应列」而失败；稳态（列已存在）零额外开销，不预检字段端点。owner 不必再手动在飞书表预建与表单字段同名的列。
 
 > 后端全程双循环 TDD（spec → outer → impl → review），凭据进 vault（DeepSeek key、飞书自建应用、CF token、runtime secret）。
 
@@ -48,7 +49,9 @@
 
 ### 飞书端到端
 
-- 建多维表格 + 给应用开 `bitable` 读写权限 + 发布（可能需管理员审批）→ `app_token` / `table_id` 配进 `/api/config`
+- ✅ **端到端已打通（2026-06-12）**：应用用自身 `tenant_access_token` 自建多维表格（绕开「纯 API 应用加不进已有表协作者」的墙）→ `app_token`/`table_id` 配进 `/api/config`；`设计→发布→公开填写→写飞书→数据后台` 全链路在生产验证通过（含真实 UI 填写）。
+- ✅ **提交自愈建列**（见上「已完成 · 后端」）——去掉了「owner 须手动预建同名列」这一步。
+- 增强（待办）：发布表单时即在飞书表**预建**列（owner 发布后立刻看到完整列结构）、列类型按字段 `type` 精确映射（数字 / 单选 / 日期列，而非一律文本）、`/submissions` 按 `formSlug` 过滤（现读整张表，多表单共用一张表会混）。
 
 ### 前端接入后端（`src/`，分阶段）
 
