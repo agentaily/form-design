@@ -47,6 +47,12 @@ import { runDesignerTurn } from "./core/designerLoop";
 import { streamDesignerChat } from "./core/designerChat";
 import { ApiError } from "./core/apiClient";
 import {
+  getOrCreateDesignSessionId,
+  loadChatSession as loadChatSessionClient,
+  saveChatTurns as saveChatTurnsClient,
+  toPersistedTurns,
+} from "./core/chatSessionClient";
+import {
   isLoggedIn as authIsLoggedIn,
   logout as authLogout,
   requestEmailVerification as authRequestEmailVerification,
@@ -188,6 +194,10 @@ function DesignerApp({
   publicFormUrl,
   // 数据后台「看提交」(§18). Defaults to the real submissionsClient; injectable for tests.
   listSubmissions,
+  // 设计对话持久化 (§26, owner-only). Defaults to the real chatSessionClient; injectable so
+  // the load-on-mount / save-at-turn-end wiring is driven deterministically in tests.
+  loadChatSession = loadChatSessionClient,
+  saveChatTurns = saveChatTurnsClient,
   // 邮箱未验证 banner 的「重新发送」(§23.3 owner-only). Defaults to the real
   // core/auth.requestEmailVerification (POST with Bearer); injectable for tests.
   requestEmailVerification = authRequestEmailVerification,
@@ -236,19 +246,44 @@ function DesignerApp({
   const historyRef = useRef(null);
   if (!historyRef.current) historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
 
+  // 设计对话持久化 (§26). The stable, client-minted, localStorage-backed design session id
+  // (keyed (owner_id, sessionId)); minted once on mount and reused across reloads / publish.
+  const sessionIdRef = useRef(null);
+  if (!sessionIdRef.current) sessionIdRef.current = getOrCreateDesignSessionId();
+  // The published form's slug once this session's form is published (§26.2): carried on every
+  // subsequent turn-end save so the session row gets associated; null before publish.
+  const publishedSlugRef = useRef(null);
+  // Guard so the load-on-mount restore runs exactly once per logged-in mount (§26 restore).
+  const restoredRef = useRef(false);
+  // Always-current mirror of `messages` so the turn-end save reads the latest thread
+  // without a stale closure (and without abusing a setState updater as a getter).
+  const messagesRef = useRef([]);
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", t.theme === "light" ? "light" : "dark");
   }, [t.theme]);
 
   const setValue = useCallback((id, v) => setValuesState((s) => ({ ...s, [id]: v })), []);
+  // All thread mutations go through setMessagesTracked. We compute `next` synchronously off
+  // `messagesRef.current` (the canonical thread snapshot) and update the ref *before* calling
+  // setMessages — so the ref is the latest thread the instant the call returns, and the §26
+  // turn-end save (which reads messagesRef synchronously) sees the final prose text. setMessages
+  // gets the already-computed value, never an updater fn — React defers updater bodies to
+  // render/commit, which left the ref stale (and StrictMode double-invokes updaters). Multiple
+  // calls in one tick accumulate correctly: each computes off the prior call's messagesRef.
+  const setMessagesTracked = (updater) => {
+    const next = typeof updater === "function" ? updater(messagesRef.current) : updater;
+    messagesRef.current = next; // sync: ref is always the latest thread snapshot
+    setMessages(next); // only to trigger a render
+  };
   const pushMsg = (m) => {
     const id = uid("msg");
-    setMessages((ms) => [...ms, { id, ...m }]);
+    setMessagesTracked((ms) => [...ms, { id, ...m }]);
     return id;
   };
   const patchMsg = (id, patch) =>
-    setMessages((ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)));
-  const removeMsg = (id) => setMessages((ms) => ms.filter((m) => m.id !== id));
+    setMessagesTracked((ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  const removeMsg = (id) => setMessagesTracked((ms) => ms.filter((m) => m.id !== id));
   // Clear the entrance-animation flag ~600ms after a field appears — on the model AND
   // the rendered mirror, so a later sync won't re-trigger it.
   const clearNew = (fid) =>
@@ -345,6 +380,46 @@ function DesignerApp({
     if (loggedIn) refreshMe();
   }, [loggedIn, refreshMe]);
 
+  // 设计对话恢复 (§26 restore): when logged in, load this session's persisted conversation
+  // ONCE and rebuild both transcripts — the visible thread (`messages`) and the loop's LLM
+  // history (`historyRef`, incl. the leading system prompt) — so the owner resumes the same
+  // thread AND the Agent keeps the prior context. A never-persisted id → { session: null } →
+  // stay in the初始空态 (current behavior). Signed-out owners never load (§26.5). A 401 means
+  // the session lapsed → route into /signin. best-effort: any other failure leaves the empty
+  // thread intact (the next turn-end save re-establishes the row).
+  useEffect(() => {
+    if (!loggedIn || restoredRef.current) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { session } = await loadChatSession(sessionIdRef.current);
+        if (cancelled || !session) return;
+        // StrictMode-safe: only mark as restored once the async result actually
+        // applies (success + not cancelled). Marking eagerly in the effect body would
+        // let StrictMode's cancelled first run "consume" the flag, so the second run
+        // early-returns and setMessages never fires. StrictMode dev double-fires the
+        // GET (intentional); production runs it once.
+        restoredRef.current = true;
+        if (Array.isArray(session.turns) && session.turns.length > 0) {
+          setMessagesTracked(session.turns.map((tn) => ({ ...tn })));
+        }
+        if (Array.isArray(session.history) && session.history.length > 0) {
+          // Re-seed the loop's LLM history verbatim (incl. the system message) so the
+          // Agent continues with full context (§26.6 / 「Agent 记得之前的上下文」).
+          historyRef.current = session.history.map((h) => ({ ...h }));
+        }
+        if (session.formSlug) publishedSlugRef.current = session.formSlug;
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 401) needLogin("登录后恢复你的设计对话");
+        // else: best-effort — leave the empty thread; the next save re-establishes the row.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loggedIn]);
+
   // Returning from /signin: if signed in and an intent was stashed, run it once.
   useEffect(() => {
     if (!loggedIn) return;
@@ -432,7 +507,7 @@ function DesignerApp({
       // 「对话给出后续修改建议」). The DS ConversationThread has no persistent followups
       // slot, so they ride the last assistant text turn → renderChatTurn's Suggestions.
       if (modelRef.current.fields.length > 0) {
-        setMessages((ms) => {
+        setMessagesTracked((ms) => {
           for (let i = ms.length - 1; i >= 0; i--) {
             if (ms[i].role === "assistant" && ms[i].kind === "text") {
               const next = ms.slice();
@@ -449,6 +524,30 @@ function DesignerApp({
       if (e instanceof ApiError && e.status === 401) needLogin("登录后继续对话设计");
     }
     syncModel();
+    // 持久化 (§26.4): at TURN END (here, after the §4 loop settled — never during the
+    // streaming onText above), flush the full snapshot — the complete UI thread + LLM
+    // history — once. Signed-out owners never persist (§26.5).
+    persistTurn();
+  };
+
+  // Persist the current full conversation snapshot for this session (§26.3/§26.4): the
+  // complete UI thread (serialized to PersistedTurn[], `streaming` stripped) + the loop's
+  // LLM history (`historyRef`, incl. system) + the published slug (once published). Reads
+  // the latest thread from `messagesRef` (kept current by setMessagesTracked) so a
+  // just-settled turn is included. best-effort: a non-401 failure does NOT break the
+  // conversation (the next turn's full PUT overwrites idempotently); a 401 routes into
+  // /signin (§26.4 失败不阻断 + 401 例外).
+  const persistTurn = () => {
+    if (!loggedIn) return; // 未登录不持久化 (§26.5)
+    const input = {
+      turns: toPersistedTurns(messagesRef.current),
+      history: historyRef.current,
+      ...(publishedSlugRef.current ? { formSlug: publishedSlugRef.current } : {}),
+    };
+    Promise.resolve(saveChatTurns(sessionIdRef.current, input)).catch((e) => {
+      if (e instanceof ApiError && e.status === 401) needLogin("登录后继续对话设计");
+      // else: best-effort, swallow — the next turn-end PUT overwrites (§26.4).
+    });
   };
 
   // One message queue for the whole session (§4.1): connect-send N times → exactly one
@@ -738,7 +837,15 @@ function DesignerApp({
         fields={fields}
         publishForm={publishForm}
         publicFormUrl={publicFormUrl}
-        onPublished={() => setPublished(true)}
+        onPublished={(res) => {
+          setPublished(true);
+          // 发布把 slug 关联进会话行 (§26.2)，session id 不变：记下 slug 并立刻持久化一次，
+          // 这样即便不再发新回合，刷新后会话也已带上该 slug。
+          if (res && res.slug) {
+            publishedSlugRef.current = res.slug;
+            persistTurn();
+          }
+        }}
       />
     </React.Fragment>
   );

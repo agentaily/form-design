@@ -1146,6 +1146,8 @@ owner **未配飞书 / 飞书连不上 / token 换取失败 / 建列失败** →
 | `POST /api/config` | owner | **owner-only** | 保存**当前 owner**的配置（§12） |
 | `POST /api/config/test` | owner | **owner-only** | 测**当前 owner**的连接（§14） |
 | `POST /api/chat` | owner（设计态） | **owner-only** | LLM 代理（§13），用**当前 owner**的 DeepSeek key |
+| `GET /api/chat/session/:sessionId` | owner（设计器） | **owner-only** | 读回**当前 owner**按 `(owner_id, sessionId)` 持久化的设计对话；从未持久化 → `{ session: null }`（§26）|
+| `PUT /api/chat/session/:sessionId` | owner（设计器） | **owner-only** | upsert**当前 owner**该会话的 UI 回合 + LLM 历史（§26）|
 | `POST /api/forms` | owner（设计器） | **owner-only** | 发布表单，归属**当前 owner**（§16） |
 | `GET /api/forms` | owner（管理台） | **owner-only** | 只列**当前 owner**的表单（§21） |
 | `PATCH /api/forms/:slug` | owner | **owner-only** | 改表单，须属**当前 owner**，否则 404（§17.9 / §21） |
@@ -1847,3 +1849,135 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 - **`Retry-After` 头**为整数秒（§25.2 算的窗口剩余秒数），让客户端 / 前端能据此显示「请 N 秒后重试」并自动退避。
 - **`{ error }` 文案中性**：表「请求过于频繁，请稍后再试」即可，**不必**回显当前限额 / 剩余次数 / 窗口长度（避免给刷子反馈以便精确卡线；是否回 `remaining` 由实现定，默认不回）。
 - **正常请求零影响：** 未命中限流的请求，状态码 / 响应体 / 其它头与未挂限流时**完全一致**——限流中间件在放行路径上除了一次 KV 自增外不改变任何响应语义。
+
+---
+
+## 26. 后端 · 设计对话持久化 + 刷新恢复（绑账号，按 design session 隔离）
+
+> **与第 4 / 13 / 17 节的关系：** §4 / §4.1 定义了设计器左侧的对话回合（ReAct loop + 消息队列），§13 让对话经 `POST /api/chat` 代理 DeepSeek，§17 把设计态端点收成 owner-only。但对话**只活在浏览器内存里**：`DesignerApp` 的 UI 消息（`messages`，`src/App.jsx`）与 LLM 历史（`historyRef`，OpenAI `ChatMessage[]`，`src/core/designerLoop`）刷新即丢。本节补上持久化：把一段设计对话随聊天写进后端 D1，登录态重载 / 换设备时按原顺序恢复、可继续往下聊。PR #48。
+>
+> **本节范围：** keying 决策、未登录态、新增 D1 表 `chat_sessions` 列契约、`GET/PUT /api/chat/session/:sessionId`（owner-only）、写入时机（批量、非每 token）、跨设备恢复、隔离 / 横向越权约束。
+>
+> **不在本节：** 多会话列表 / 切换 UI（本期单 owner 单活跃会话即可，多会话留 follow-up）、历史裁剪 / 上下文窗口压缩、对话搜索、删除单条回合、协作 / 实时同步。
+
+### 26.1 端点职责与鉴权
+
+| 端点 | 谁调 | 鉴权 | 职责 |
+|---|---|---|---|
+| `GET /api/chat/session/:sessionId` | owner（设计器） | **owner-only**（§17） | 按 `(owner_id, sessionId)` 读回一段已持久化的设计对话；从未持久化 → `{ session: null }`（非 404）|
+| `PUT /api/chat/session/:sessionId` | owner（设计器） | **owner-only**（§17） | 按 `(owner_id, sessionId)` upsert（整段替换）该会话的 UI 回合 + LLM 历史；可附 `formSlug` 关联已发布表单 |
+
+> 两端点都 owner-only，挂 §17 的 `requireAuth` 中间件，`ownerId = c.get('session').sub`。设计对话本就 owner-only（§13 `POST /api/chat`），持久化沿用同一道门——陌生人读不到任何 owner 的对话。
+
+### 26.2 keying 决策（本节的 load-bearing 取舍）
+
+**问题：** 发布前没有稳定的表单 id——`slug` 仅在 `POST /api/forms` 发布后才生成（§16.3），发布前表单模型只在前端 `modelRef.current`（§16 引言 / `src/App.jsx`）。所以**不能**按表单 id 给会话 keying。
+
+**决策（已拍定）：会话按【客户端生成、localStorage 持久化的稳定 `designSessionId`】绑定，键 = `(owner_id, sessionId)`。**
+
+- **id 来源：** 首次进入设计器（`getOrCreateDesignSessionId`，`src/core/chatSessionClient.ts`）时生成一个高熵 id（`crypto.randomUUID()`），写入 localStorage（`agentaily_forms_design_session`）。后续每次进入复用同一个 id。
+- **跨刷新不变：** id 在 localStorage，重载页面读回同一个 → 续上同一段对话。
+- **跨发布不变：** 发布**不换** session id；只把生成的 `slug` **关联进**该会话行（`chat_sessions.form_slug`，§26.6）。「同一段设计对话，可能先没表单、后发布出一个 slug」始终是**同一行**。
+- **跨账号隔离：** 数据键是 `(owner_id, sessionId)`，`owner_id` 取自 session JWT 的 `sub`（§17.5）。`sessionId` 仅在 owner 自己名下有意义；A 即便猜到 B 的 sessionId 也读不到 B 的对话（`WHERE owner_id=? AND session_id=?`，§26.7）。
+- **「无表单时的新对话」态（明确定义）：** owner 进设计器还没建任何字段、就开始聊——会话照样按 `designSessionId` 持久化，`form_slug` 为 `NULL`。这正是 keying 不绑表单的根本原因：对话先于表单存在。发布后 `form_slug` 被填上，会话与该 slug 关联，但**不依赖**它定位。
+
+> **为什么不引入服务端「新建会话」握手拿 id：** 客户端生成 id 零往返、离线可用、未登录也能先持有 id（只是不写库）；服务端只在 `PUT` 落库时按 `(owner_id, sessionId)` upsert，天然幂等。比「先 POST 建会话拿 id 再写」更简单，且契合「id 必须跨刷新稳定」这一硬需求。
+>
+> **多会话留口（不做）：** 本期一个 owner 在一个浏览器只维护**一个**活跃 `designSessionId`（localStorage 单键）。「多份草稿对话并存 + 列表切换」需要 owner 侧会话列表 UI + 显式新建/切换，留 follow-up；后端 `(owner_id, sessionId)` 的多行能力已为此预留（D1 主键是复合键，不限一行）。
+
+### 26.3 API 契约
+
+#### `GET /api/chat/session/:sessionId` — 读回会话（owner-only）
+
+响应体（`LoadChatSessionResult`，JSON）：
+
+```jsonc
+{
+  "session": {
+    "sessionId": "b3f1…-uuid",
+    "turns":   [ /* PersistedTurn[]：UI 回合，按原顺序，§26.6 */ ],
+    "history": [ /* ChatMessage[]：OpenAI 形状的 LLM 历史，含起首 system 消息 */ ],
+    "formSlug": "f8Kq2pXa",            // 已发布则为 slug；未发布为 null
+    "createdAt": "2026-06-13T08:00:00.000Z",
+    "updatedAt": "2026-06-13T08:05:00.000Z"
+  }
+}
+```
+
+- 命中：`200`，`{ session }`（存的原样回）。
+- **该 owner 从未持久化过这个 sessionId：** `200`，`{ "session": null }`——「没这段对话」是正常态（首次进入 / 清过 localStorage / 换了设备还没写过），**不是 404**。前端据 `null` 走「初始空态」分支。
+- 缺 / 坏 / 过期 token：`401 { error }`，auth 中间件拦截（§17.6），不进入 handler。
+
+#### `PUT /api/chat/session/:sessionId` — 写入 / 替换会话（owner-only）
+
+请求体（`SaveChatSessionInput`，JSON）：
+
+```jsonc
+{
+  "turns":   [ /* PersistedTurn[]：到本回合为止的全部 UI 回合 */ ],
+  "history": [ /* ChatMessage[]：到本回合为止的全部 LLM 历史（含 system） */ ],
+  "formSlug": "f8Kq2pXa"             // 可选；发布后带上以关联该会话到此 slug
+}
+```
+
+- 成功：`200`，`{ "sessionId", "updatedAt" }`（`SaveChatSessionResult`）。
+- **整段替换（upsert 单行，last-write-wins）：** 每次 `PUT` 写**到目前为止的完整快照**，按 `(owner_id, sessionId)` 已存在则更新、不存在则插入；`updated_at` 刷新。单 owner 单编辑器场景下 last-write-wins 是最简且正确的语义（同一浏览器内只有一个消费者循环在跑，§4.1 单消费者），不引入增量 diff / 乐观锁。
+- `formSlug` 缺省时：**不清空**已存的 `form_slug`（只在显式传入时更新），避免一次普通对话写入把已关联的 slug 抹掉。
+- 缺 / 坏 / 过期 token：`401 { error }`。
+- 请求体非合法 JSON / `turns` 或 `history` 非数组：`400 { error }`，不落库。
+
+> **为什么用 `PUT` + 整段替换而非 `POST` 增量 append：** 前端本就持有完整的 `messages` / `historyRef`（§4.1 单消费者，内存里始终是全量），整段 `PUT` 让「前端内存 = 后端快照」对账最简、幂等可重试；增量 append 要处理「哪些回合已写过」的游标与去重，对单 owner 单会话不划算。代价是每次写传全量——对一段设计对话的体量可接受，且写入频率被 §26.4 压到「每回合一次」。
+
+### 26.4 写入时机（批量，绝不每 token）
+
+- **触发点 = 回合结束。** §4 的 ReAct loop 跑完一个回合（`runDesignerTurn` 返回，不再有 tool call、助手给出收尾文本）后，前端把当前完整的 `turns` + `history` 通过 `saveChatTurns(sessionId, …)` 一次性 `PUT` 上去。与 §4 的「渲染 debounce」「§4.1 flush 在回合结束」同纪律——一个回合一次写，**不是**每个流式 `delta` / 每个 token 写一次。
+- **流式过程不写库。** 助手文本逐字流入（`callChat` 的 `onText`，`src/App.jsx`）期间**不**发持久化请求；只在回合 settle 后写最终态。这避免把 D1 写成「每 token 一次」的高频风暴（成本 + 限流面）。
+- **失败不阻断对话。** 持久化 `PUT` 失败（网络 / `5xx`）**不**打断正在进行的设计对话——best-effort，前端可重试或留待下个回合的全量 `PUT` 覆盖（整段替换天然幂等，丢一次写不会留下半截状态）。`401` 例外：会话失效要引导去 `/signin`（§26.5）。
+
+### 26.5 未登录态（明确定义，无未定义态）
+
+设计对话本就 owner-only（§13 `POST /api/chat` + §17）。持久化沿用同一前提：
+
+- **不持久化：** 未登录（无 token）时前端**不**调 `loadChatSession` / `saveChatTurns`——对话仅活在内存。
+- **不引入 localStorage 兜底存对话正文：** 未登录唯一进 localStorage 的是 `designSessionId`（`getOrCreateDesignSessionId`，为登录后能续上同一 id），**不**把对话回合明文存浏览器（隐私 + 与「会话归账号」语义一致）。
+- **发送即 401 → 引导登录：** 未登录在设计器发消息，`POST /api/chat` 本就 `401`（§13/§17），前端走现有 `needLogin` → `/signin`（`src/App.jsx` 已有）。本节**不改变**这一现状，只是明确「未登录 = 不持久化 + 现状 401 引导」，而非留一个未定义的半持久化态。
+
+### 26.6 持久化的对话 / 回合形状（`PersistedChatSession` / `PersistedTurn`）
+
+会话同时持久化**两份**转写，对应前端两套内存形状：
+
+- **UI 回合 `turns`（`PersistedTurn[]`）：** chat.jsx 消息模型（`renderChatTurn` 约定 `{ id, role, kind, text, suggestions, name, args, result, status, steps, duration }`）的**可序列化**形式——恢复时直接喂回 `<ConversationThread>` 渲染可见对话。`role`：`user | assistant`；`kind`：`text | tool | reasoning | error`。**不持久化**瞬态 `streaming` 标记与活的 React 句柄。
+- **LLM 历史 `history`（`ChatMessage[]`）：** OpenAI 原生 `role/content/tool_calls/tool_call_id`（`src/core/designerLoop` 的 `ChatMessage`），**含起首 system 消息**（`DESIGNER_SYSTEM`）——恢复时重新 seed `historyRef`，让 Agent 带着完整上下文续聊（§26 恢复场景「Agent 记得之前的上下文」）。
+- **为什么存两份而非一份推导：** UI 回合（给人看，含 tool 卡 / 思考块 / 建议 chip）与 LLM 历史（给模型看，含 tool_call_id 配对）形状不同、不能无损互推（§7 已把 `chat` 与 `llmMessages` 分开）。恢复要同时还原「看见的对话」与「模型的上下文」，故两份都持久化。
+- **不含凭据：** 两份转写都**绝不**承载 owner 凭据（DeepSeek key / 飞书 secret）——它们在 `owner_config`（§12），不在对话里。
+
+类型契约见 `src/core/chatSessionClient.ts`（`PersistedChatSession` / `PersistedTurn` / `PersistedTurnRole` / `PersistedTurnKind` + `SaveChatSessionInput` / `LoadChatSessionResult` / `SaveChatSessionResult`）。
+
+### 26.7 D1 表结构（`chat_sessions`，新增 migration）
+
+新增一张 `chat_sessions` 表（每个 `(owner_id, sessionId)` 一行）。**migration 文件本身由 implementer / release-eng 落地**（接在 `0002_auth_tokens.sql` 之后，文件名按序号），本节只给**列契约**：
+
+```sql
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  owner_id     TEXT NOT NULL,    -- owner 的真实 user id（users.id，§17.11）；隔离键
+  session_id   TEXT NOT NULL,    -- 客户端生成的稳定 design session id（§26.2）
+  turns_json   TEXT NOT NULL,    -- 序列化的 PersistedTurn[]（UI 回合，按原顺序）
+  history_json TEXT NOT NULL,    -- 序列化的 ChatMessage[]（OpenAI LLM 历史，含 system）
+  form_slug    TEXT,             -- 发布后关联的 forms.slug（§26.2）；未发布为 NULL，可空
+  created_at   TEXT NOT NULL,    -- ISO-8601，首次写入
+  updated_at   TEXT NOT NULL,    -- ISO-8601，每次写入刷新
+  PRIMARY KEY (owner_id, session_id)
+);
+```
+
+- **复合主键 `(owner_id, session_id)`：** 每个 owner 的每个 session 一行；同 owner 重复 `PUT` upsert 自己那行。复合键天然让「同一 session id 在不同 owner 名下互不相干」——隔离不靠运行期过滤，靠键本身（§26.2）。
+- **`owner_id` 与 `users.id` 的关系：** 同 `owner_config` / `forms` 的约定（§17.11）——是发起持久化的 owner 的真实 user id，所有读 / 写按它隔离。
+- **`form_slug` 与 `forms.slug` 的关系（弱关联，可空）：** 发布后填入，**软引用** `forms.slug`；不设强外键（一段对话可能始终没发布 → 恒 `NULL`；slug 删除后会话不必连删，留作历史）。它只用于「这段对话设计的是哪张表」的关联查询，不参与定位会话（定位永远靠复合主键）。
+- **`turns_json` / `history_json`：** 序列化的两份转写（§26.6），整段 `PUT` 时整列覆盖。表只存对话转写 + 关联 slug，**绝不**存任何凭据（§26.6）。
+
+### 26.8 多租户数据隔离 + 横向越权（沿用 §17.9 纪律）
+
+- **所有读 / 写按 `(owner_id, sessionId)` 隔离：** `GET` / `PUT` 的数据层 `WHERE owner_id=? AND session_id=?`，`ownerId = c.get('session').sub`。owner 只能读 / 写自己名下的会话行。
+- **A 读不到 B 的对话：** 即便 A 拿到 B 的 sessionId（高熵随机，本就难猜），`GET /api/chat/session/:sessionId` 仍按 A 自己的 `owner_id` 查——查不到 B 那行，返回 `{ session: null }`（与「该 id 自己从没写过」同结果，**不暴露**「B 有这段对话」）。
+- **凭据不出网：** 会话转写不含凭据（§26.6）；响应 `{ session }` / `{ sessionId, updatedAt }` 也不含任何 owner 凭据。
+- **限流：** 两端点 owner-only（已被 §17 鉴权门挡在匿名之外），按 §25.1 **不限流**（owner 烧自己的 D1，刷到的也是自己）。

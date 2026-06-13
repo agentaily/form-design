@@ -1,0 +1,1 @@
+- [jsdom 无 localStorage](project_jsdom-no-localstorage.md) — form-design 的 vitest/jsdom 不给 localStorage 全局；碰存储的单测要自己 stub fake
