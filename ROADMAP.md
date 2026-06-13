@@ -41,7 +41,8 @@
 
 ## 🚧 进行中
 
-- 当前无活跃进行项 —— 上一批后端能力（飞书列按类型预建 / **改字段标签同步** / 公开端点限流）均已上线（见「已完成」）。
+- **设计对话持久化 + 刷新恢复（PR #48，绑账号）**：把设计器左侧对话（UI 回合 `messages` + LLM 历史 `historyRef`，本只活在浏览器内存、刷新即丢）随聊天写进后端 D1，登录态重载 / 换设备时按原顺序恢复、可继续往下聊。会话按【客户端生成、localStorage 持久化的稳定 `designSessionId`】绑定，键 = `(owner_id, session_id)`（发布前没稳定表单 id，故不按表单 keying；发布只把 slug 关联进会话行，id 不变）。未登录 = 不持久化（沿用现状 401→/signin）；写入按**回合结束批量**整段 `PUT`（绝不每 token）。新增 D1 表 `chat_sessions`（migration `0003`，复合主键）+ owner-only `GET/PUT /api/chat/session/:sessionId`。**已完成**：前端 client（`src/core/chatSessionClient.ts`：`getOrCreateDesignSessionId` / `loadChatSession` / `saveChatTurns` / `toPersistedTurns`）+ App 接线（`src/App.jsx`：登录态 load-on-mount 恢复两份转写、turn-end best-effort save、发布关联 slug）+ 后端（`workers/src/chatSessions.ts` + 路由）；内环单测 + workers API 测试全绿。**待**：outer-tester 的 integration/e2e realize（`features/chat-session-persistence.feature`）+ 评审 + CI 绿后合。SPEC [§26](./SPEC.md)。
+- 上一批后端能力（飞书列按类型预建 / **改字段标签同步** / 公开端点限流）均已上线（见「已完成」）。
 - **下一步候选（待办）**：飞书增强剩余（`listBitableColumns` >100 列分页、list 故障时降级到无类型写值而非 502、`/submissions` 按 `formSlug` 过滤）、数据后台增强（CSV 导出 / 分页 / 统计）、**限流加固**（小时窗 429 外环补测、双窗 `Retry-After` 取较大值;**Durable Objects 替 KV** 求强一致、精确无漏限流；**全局 Resend 日发送封顶** —— 无论多少 IP，当天总发送够 N 封即停，直接护住 100/天那条线，补 per-IP 挡不住分布式的缺口）。
 
 ---

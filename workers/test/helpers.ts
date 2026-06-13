@@ -16,12 +16,14 @@ import { env, SELF } from "cloudflare:test";
 import { vi } from "vitest";
 import initialSchema from "../migrations/0001_initial_schema.sql?raw";
 import authTokensSchema from "../migrations/0002_auth_tokens.sql?raw";
+import chatSessionsSchema from "../migrations/0003_chat_sessions.sql?raw";
 
 // Schema migrations applied to the test D1, in order — mirrors what prod gets via
 // `wrangler d1 migrations apply`. Append future schema migrations to this list.
 //   0001 — users / owner_config / forms.
 //   0002 — auth_tokens (邮箱验证 + 找回密码的一次性 token，§22.4 / §23 / §24).
-const SCHEMA_MIGRATIONS = [initialSchema, authTokensSchema];
+//   0003 — chat_sessions (设计对话持久化 + 刷新恢复，§26).
+const SCHEMA_MIGRATIONS = [initialSchema, authTokensSchema, chatSessionsSchema];
 
 /** The bindings the owner-config + owner-auth features rely on, surfaced for the tests. */
 export interface TestEnv {
@@ -109,6 +111,16 @@ export async function resetUsers(): Promise<void> {
  */
 export async function resetAuthTokens(): Promise<void> {
   await testEnv.DB.exec("DELETE FROM auth_tokens");
+}
+
+/**
+ * Empty the `chat_sessions` table between scenarios (§26). The chat-session-persistence
+ * outer-loop / api tests upsert + read sessions per scenario (and assert on isolation /
+ * last-write-wins), so each must start from a clean table. `applySchema` already builds
+ * it (0003 migration).
+ */
+export async function resetChatSessions(): Promise<void> {
+  await testEnv.DB.exec("DELETE FROM chat_sessions");
 }
 
 /**

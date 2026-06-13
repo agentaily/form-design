@@ -75,6 +75,7 @@ import {
 import { issueToken, consumeToken } from "./tokens";
 import { sendEmail, buildVerifyEmail, buildResetEmail, EmailSendError } from "./email";
 import { listSubmissions, BitableReadError } from "./submissions";
+import { loadChatSession, upsertChatSession } from "./chatSessions";
 import {
   rateLimit,
   SUBMIT_RATE_LIMITS,
@@ -233,6 +234,13 @@ async function sendResetEmail(env: Env, userId: string, to: string): Promise<voi
 app.use("/api/config", guard);
 app.post("/api/config/test", guard);
 app.post("/api/chat", guard);
+// 设计对话持久化 (§26.1)，owner-only。逐条点名 method+path（不用宽匹配，与 /api/forms 同纪律）：
+//   - GET /api/chat/session/:sessionId → owner 读回自己的会话（命中 { session } / 无 { session:null }）。
+//   - PUT /api/chat/session/:sessionId → owner upsert 自己的会话（整段替换，last-write-wins）。
+// 二者都按 (owner_id, session_id) 隔离（ownerId = c.get("session").sub）。POST /api/chat 是
+// 另一条已 guard 的对话代理（§13），与这两条按 method+精确路径区分，互不影响。
+app.get("/api/chat/session/:sessionId", guard);
+app.put("/api/chat/session/:sessionId", guard);
 // POST /api/auth/verify-email/request → owner-only 重发验证邮件（§23.3）。其它三个邮件端点
 // （verify-email/confirm、password-reset/request、password-reset/confirm）是**公开**，不挂 guard。
 app.post("/api/auth/verify-email/request", guard);
@@ -936,6 +944,51 @@ app.get("/api/forms/:slug/submissions", async (c) => {
   // 6) Success → only the projected submissions + count; never owner creds,
   //    tenant_access_token, app_token / table_id, or owner_id (§18.6).
   return c.json({ submissions, count: submissions.length }, 200);
+});
+
+// GET /api/chat/session/:sessionId — 读回一段已持久化的设计对话（owner-only，已挂 guard，§26.3）。
+// 命中 → 200 { session }（存的原样回）；该 owner 从未持久化过这个 sessionId（含「A 猜 B 的 id」越权
+// 读）→ 200 { session: null }（正常空态，**非 404**，§26.3/§26.8）。隔离靠 (owner_id, sessionId)
+// 复合键（ownerId = session JWT 的 sub）——绝不暴露别的 owner 的对话。响应不含 owner_id / 凭据（§26.8）。
+app.get("/api/chat/session/:sessionId", async (c) => {
+  const ownerId = c.get("session").sub;
+  const sessionId = c.req.param("sessionId");
+  const session = await loadChatSession(c.env.DB, ownerId, sessionId);
+  // null（未命中 / 越权）回 { session: null }，与「该 id 自己从没写过」同结果，不暴露 B 有这段对话。
+  return c.json({ session }, 200);
+});
+
+// PUT /api/chat/session/:sessionId — 写入 / 整段替换会话（owner-only，已挂 guard，§26.3）。
+// 按 (owner_id, sessionId) upsert（last-write-wins），updated_at 刷新；可附 formSlug 关联已发布表单
+// （缺省不清空已存的 slug，§26.3）。非法 JSON / turns|history 非数组 → 400，不落库。成功 → 200
+// { sessionId, updatedAt }。表只存对话转写 + 关联 slug，绝不存任何 owner 凭据（§26.6）。
+app.put("/api/chat/session/:sessionId", async (c) => {
+  const ownerId = c.get("session").sub;
+  const sessionId = c.req.param("sessionId");
+
+  // 1) 解析 + 形状校验。非 JSON → 400，不落库（§26.3）。
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const body = (raw ?? {}) as { turns?: unknown; history?: unknown; formSlug?: unknown };
+  // turns / history 必须是数组（§26.3）。非数组 → 400，不落库。
+  if (!Array.isArray(body.turns) || !Array.isArray(body.history)) {
+    return c.json({ error: "turns 和 history 必须是数组" }, 400);
+  }
+  // formSlug 可选：未传 → undefined（保留原值）；显式 string → 关联；其它（含 null）→ 不更新关联。
+  const formSlug = typeof body.formSlug === "string" ? body.formSlug : undefined;
+
+  // 2) 整段 upsert（last-write-wins），按 (owner_id, sessionId) 隔离。
+  const result = await upsertChatSession(c.env.DB, ownerId, sessionId, {
+    turns: body.turns,
+    history: body.history,
+    formSlug,
+  });
+
+  return c.json(result, 200);
 });
 
 export default app;
