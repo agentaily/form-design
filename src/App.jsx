@@ -264,15 +264,18 @@ function DesignerApp({
   }, [t.theme]);
 
   const setValue = useCallback((id, v) => setValuesState((s) => ({ ...s, [id]: v })), []);
-  // All thread mutations go through setMessagesTracked so `messagesRef` (the snapshot the
-  // §26 turn-end save reads) stays current the instant state is queued — no stale closure,
-  // no abuse of a setState updater as a getter.
-  const setMessagesTracked = (updater) =>
-    setMessages((ms) => {
-      const next = typeof updater === "function" ? updater(ms) : updater;
-      messagesRef.current = next;
-      return next;
-    });
+  // All thread mutations go through setMessagesTracked. We compute `next` synchronously off
+  // `messagesRef.current` (the canonical thread snapshot) and update the ref *before* calling
+  // setMessages — so the ref is the latest thread the instant the call returns, and the §26
+  // turn-end save (which reads messagesRef synchronously) sees the final prose text. setMessages
+  // gets the already-computed value, never an updater fn — React defers updater bodies to
+  // render/commit, which left the ref stale (and StrictMode double-invokes updaters). Multiple
+  // calls in one tick accumulate correctly: each computes off the prior call's messagesRef.
+  const setMessagesTracked = (updater) => {
+    const next = typeof updater === "function" ? updater(messagesRef.current) : updater;
+    messagesRef.current = next; // sync: ref is always the latest thread snapshot
+    setMessages(next); // only to trigger a render
+  };
   const pushMsg = (m) => {
     const id = uid("msg");
     setMessagesTracked((ms) => [...ms, { id, ...m }]);
@@ -386,12 +389,17 @@ function DesignerApp({
   // thread intact (the next turn-end save re-establishes the row).
   useEffect(() => {
     if (!loggedIn || restoredRef.current) return;
-    restoredRef.current = true;
     let cancelled = false;
     (async () => {
       try {
         const { session } = await loadChatSession(sessionIdRef.current);
         if (cancelled || !session) return;
+        // StrictMode-safe: only mark as restored once the async result actually
+        // applies (success + not cancelled). Marking eagerly in the effect body would
+        // let StrictMode's cancelled first run "consume" the flag, so the second run
+        // early-returns and setMessages never fires. StrictMode dev double-fires the
+        // GET (intentional); production runs it once.
+        restoredRef.current = true;
         if (Array.isArray(session.turns) && session.turns.length > 0) {
           setMessagesTracked(session.turns.map((tn) => ({ ...tn })));
         }
