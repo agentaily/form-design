@@ -20,21 +20,21 @@
 ## 消费的设计系统
 
 - **`@agentaily/design-system` ^0.8.0**:**UI 一律消费,不手搓**;升级随上游流过来(DS 0.2 → 0.8 全面上移见 ROADMAP)。
-- 关键组件:`DesignerShell`(双栏外壳 + 移动端切换)· `ConversationThread`(对话线程,纯渲染 + `controller`)· `AccountControl`(账户下拉)· `SignInPage`(登录)· `SettingsSheet` › `IntegrationSettings` › `DeepSeekCard` / `FeishuCard` + `SettingsSaveBar`(0.8.0 起集成设置 = 浮层 settings 页 › 集成分区 › 纯展示连接卡 + 显式保存栏)· `MarkupLayer`(指向修改)· `Form.useForm`(表单校验)· `Icon` / `BrandMark`。
+- 关键组件:`DesignerShell`(双栏外壳 + 移动端切换;`brand` 槽放 `BrandMark`)· `ConversationThread`(对话线程,纯渲染 + `controller`)· `AccountControl`(账户下拉,`onProfile` 开账户 tab)· `SignInPage`(登录)· `SettingsSheet`(0.8.0 起设置 = 浮起浮层,`nav` 双 tab 账户 + 集成)› 账户 tab:`PageSection` + `Avatar` + `Field`/`Input` + `SettingsSaveBar`(`form` 模式);集成 tab:`IntegrationSettings` › `DeepSeekCard` / `FeishuCard` + `SettingsSaveBar`(显式保存)· `MarkupLayer`(指向修改)· `Form.useForm`(表单校验)· `Icon` / `BrandMark`。
 - 缺组件 / 缺 seam → 往上游反馈(下游定契约、上游照做;**叫人**)。
 
 ## 页面 / 界面清单(+ 设计状态)
 
-| 页面 / 界面             | 设计状态                                                                                           | 对应代码                                             |
-| ----------------------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| 设计器(左对话 / 右预览) | 已设计(DS 0.6 上移)                                                                                | `App.jsx`(DesignerShell)+ `chat.jsx` + `preview.jsx` |
-| 登录 `/signin`          | 已设计(独立路由页)                                                                                 | `signin.jsx`(SignInPage)                             |
-| 集成设置 `/settings`    | 已设计(DS 0.8 浮层链:SettingsSheet › IntegrationSettings › 连接卡 + SettingsSaveBar;后端 400 回显) | `settings.jsx`(SettingsScreen)                       |
-| 我的表单                | 已设计                                                                                             | `forms-panel.jsx`                                    |
-| 公开表单(答题者填写)    | 已设计                                                                                             | `public-form.jsx`                                    |
-| 提交结果查看            | 已设计                                                                                             | `submissions-view.jsx`                               |
-| 邮箱验证 / 找回密码     | 已设计                                                                                             | `verify-email.jsx` / `reset-password.jsx`            |
-| 发布 / 分享(QR 对话框)  | 已设计                                                                                             | (分享 dialog)                                        |
+| 页面 / 界面             | 设计状态                                                                                                                                                                                                            | 对应代码                                                        |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| 设计器(左对话 / 右预览) | 已设计(DS 0.6 上移;0.8 chrome 对齐:顶栏 `BrandMark` + 面包屑左对齐、桌面切换=显示器图标)                                                                                                                            | `App.jsx`(DesignerShell)+ `chat.jsx` + `preview.jsx`            |
+| 登录 `/signin`          | 已设计(独立路由页)                                                                                                                                                                                                  | `signin.jsx`(SignInPage)                                        |
+| 设置浮层(账户 + 集成)   | 已设计(DS 0.8 浮层 `SettingsSheet` 双 tab;**route-reflected overlay**:开浮层反映 `/settings` URL 但不卸载设计器,✕/Esc/后退复原。账户 tab=头像/邮箱+可编辑显示名+退出;集成 tab=连接卡+SettingsSaveBar+后端 400 回显) | `settings.jsx`(`SettingsOverlay` → `AccountSection` / 集成 tab) |
+| 我的表单                | 已设计                                                                                                                                                                                                              | `forms-panel.jsx`                                               |
+| 公开表单(答题者填写)    | 已设计                                                                                                                                                                                                              | `public-form.jsx`                                               |
+| 提交结果查看            | 已设计                                                                                                                                                                                                              | `submissions-view.jsx`                                          |
+| 邮箱验证 / 找回密码     | 已设计                                                                                                                                                                                                              | `verify-email.jsx` / `reset-password.jsx`                       |
+| 发布 / 分享(QR 对话框)  | 已设计                                                                                                                                                                                                              | (分享 dialog)                                                   |
 
 ## 设计 ↔ 代码映射
 

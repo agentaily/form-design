@@ -289,16 +289,20 @@ describe("邮箱验证 (features/email-verification.feature, §23)", () => {
     const res = await SELF.fetch(`${AUTH_BASE}/api/auth/me`, { headers: authHeader(token) });
     expect(res.status).toBe(200);
 
-    // The whole raw response must carry ONLY email + emailVerified — never any password
-    // material (§17.12). Scan the raw text + assert the exact projected shape.
+    // The whole raw response must carry ONLY email + emailVerified + displayName —
+    // never any password material (§17.12). displayName is the owner-profile field
+    // (§17 个人资料, null when unset); it is non-secret, plaintext, and safe to project.
+    // Scan the raw text + assert the exact projected shape.
     const raw = await res.clone().text();
     expect(raw).not.toMatch(/password/i);
     expect(raw).not.toMatch(/hash/i);
     expect(raw).not.toMatch(/salt/i);
     expect(raw).not.toMatch(/iterations/i);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(["email", "emailVerified"]);
+    expect(Object.keys(body).sort()).toEqual(["displayName", "email", "emailVerified"]);
     expect(body.email).toBe(email);
+    // A freshly registered owner has no display name yet (回退用邮箱).
+    expect(body.displayName).toBeNull();
   });
 
   it("Scenario: GET /api/auth/me — 无 token / 坏 token → 401", async () => {

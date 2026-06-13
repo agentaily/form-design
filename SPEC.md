@@ -1127,7 +1127,9 @@ owner **未配飞书 / 飞书连不上 / token 换取失败 / 建列失败** →
 >
 > **仍不在范围：** 刷新 token / 登出黑名单、验证码、RBAC / 细粒度权限。这些留后续 feature。登录防爆破 / `register` 限流走 §25（公开端点限流）。
 >
-> **前端登录 UI（已落地，2026-06-12）：** owner 登录是一个**独立 `/signin` 路由页**（`src/signin.jsx`，DS `SignInPage` 接 `core/auth` 的 login/register/找回密码），不是应用内弹窗；未登录触发受限操作（分享/发布/我的表单/集成设置）→ 跳 `/signin?return=&reason=`，intent 经 sessionStorage 跨页、登录回跳后续跑。顶栏账户区用 DS `AccountControl`（账户下拉：我的表单 / 集成设置 / 退出登录）。路由匹配器 `matchSignIn` 见 `src/core/router.ts`。
+> **前端登录 UI（已落地，2026-06-12）：** owner 登录是一个**独立 `/signin` 路由页**（`src/signin.jsx`，DS `SignInPage` 接 `core/auth` 的 login/register/找回密码），不是应用内弹窗；未登录触发受限操作（分享/发布/我的表单/集成设置/账户）→ 跳 `/signin?return=&reason=`，intent 经 sessionStorage 跨页、登录回跳后续跑。顶栏账户区用 DS `AccountControl`（头像下拉：邮箱行→账户 tab / 集成设置 / 我的表单 / 退出登录）。路由匹配器 `matchSignIn` 见 `src/core/router.ts`。
+>
+> **设置浮层（DS 0.8.0 起，PR #52）：** 「设置」不再是独立 `/settings` 路由页，而是**设计器内浮起浮层**（`src/settings.jsx` → `SettingsOverlay`，DS `SettingsSheet` 双 tab：账户 + 集成），叠在设计器之上、**不卸载它**。打开浮层会经 `history.pushState` **反映 `/settings` URL**（浏览器后退 / ✕ / Esc 关闭并复原进入前的页面状态），而非整页跳转——`App.jsx` 因此不在路由分流里 branch `/settings`，只用它决定浮层初始开合（deep-link）。账户 tab = 头像/邮箱 + 可编辑显示名（走 §17.13 profile 后端）+ 退出登录；集成 tab = §12/§14 的 BYOK 配置/测试（接线不变）。
 >
 > **数据迁移（运维一次性，不在本节细化）：** 现有线上 `owner_config` / `forms` 各有一行 `owner_id='default'`。部署新代码 + 建 `users` 表后，由运维用真实邮箱注册首个账号，再跑一次性 SQL 把 `owner_id='default'` 的行 `UPDATE` 成该账号的 `users.id`（脚本 `workers/migrations/002-migrate-default-owner.sql`，user id 部署时填）。这是运维动作，不属本节契约。
 
@@ -1137,7 +1139,8 @@ owner **未配飞书 / 飞书连不上 / token 换取失败 / 建列失败** →
 |---|---|---|---|
 | `POST /api/auth/register` | 任意访客 | **公开**（注册入口自身不保护） | body `{ email, password }` → 创建 user（注册即登录）→ 201 `{ token }`（`sub`=新 user.id）；邮箱占用 → 409；非法 email / 弱密码(<8) → 400 |
 | `POST /api/auth/login` | owner | **公开**（登录入口自身不保护） | body `{ email, password }` → 查 user + 校验密码 → 200 `{ token }`（`sub`=user.id）；失败**统一 401** |
-| `GET /api/auth/me` | owner | **owner-only** | 回**当前登录 owner**的 `{ email, emailVerified }`，供前端 banner 跨刷新拿真实验证位；sub 指向已删账号 → 401（§17.12）|
+| `GET /api/auth/me` | owner | **owner-only** | 回**当前登录 owner**的 `{ email, emailVerified, displayName }`，供前端 banner 跨刷新拿真实验证位 + 账户控件显示名；sub 指向已删账号 → 401（§17.12）|
+| `PUT /api/auth/profile` | owner | **owner-only** | body `{ displayName }` → 写当前 owner 显示名（trim；空→NULL 清空）→ 200 同 `/me` 形；缺/非 string/非 JSON 或超 64 字 → 400；sub 指向已删账号 → 401（§17.13）|
 | `POST /api/auth/verify-email/request` | owner | **owner-only** | 给**当前登录 owner**重发验证邮件；已验证则 no-op。**永远成功**（200/204，§23.3）|
 | `GET /api/auth/verify-email/confirm?token=` | 任意 | **公开** | 校验一次性 verify token → 置 `email_verified=1` → 重定向落地页带结果（§23.4）|
 | `POST /api/auth/password-reset/request` | 任意 | **公开** | body `{ email }` → **永远 200**（防枚举）；仅邮箱存在才发 reset 邮件（§24.1）|
@@ -1302,6 +1305,7 @@ CREATE TABLE IF NOT EXISTS users (
 - **明文密码绝不入库：** 只存 `password_hash` / `password_salt` / `iterations`（§17.4）。
 - **`email_verified` 已升级为真实状态位（§23）：** 注册 / 覆盖时为 0，完成邮箱验证（§23.4）置 1。它**不门禁**任何功能（§23.1），唯一后端作用是 §17.2 去重三态（未验证可覆盖、已验证锁死）+ 前端 banner。列定义不变（`0001` 的 `email_verified INTEGER NOT NULL DEFAULT 0` 既已含默认 0，无需改表），只是从「恒 0、不读」变成「真实读写」。一次性 token 落新表 `auth_tokens`（§22.4 / migration `0002`），不动 `users` 表结构。
 - **`owner_config` / `forms` 的 `owner_id` 升级为多租户键：** 二表的 `owner_id` 由「恒 `'default'`」改为「真实 user id」；`owner_config` 由单行升级为按 `owner_id` 多行（每 owner 一行配置，§12.5）。schema 列不变，只更新表头注释。
+- **`display_name` 列（§17.13 个人资料，migration `0004_owner_display_name.sql`）：** `ALTER TABLE users ADD COLUMN display_name TEXT`——owner 的可空显示名，明文存（非凭据、可前端回显），空 / NULL = 未设置 → 回退用邮箱显示。改它**不动** `email` / `password_*` / `email_verified`。`ALTER ADD COLUMN` 非幂等，但 prod 走 `d1_migrations` 追踪只跑一次（测试每 case 是 fresh 隔离 D1），故安全；SQLite 无列级 `IF NOT EXISTS`，不加。
 
 ### 17.12 `GET /api/auth/me` 契约（当前 owner 身份摘要）
 
@@ -1309,10 +1313,23 @@ CREATE TABLE IF NOT EXISTS users (
 
 `GET /api/auth/me`（**owner-only**，挂 §17 的 auth 中间件）：
 
-- 成功：`200`，`{ "email": "owner@example.com", "emailVerified": 0 }`。`emailVerified` 为 `0|1`（与 `users.email_verified` 同形，§17.11）。后端流程：`ownerId = c.get('session').sub` → `findUserById(db, ownerId)` → 投影 `{ email, emailVerified }`。
+- 成功：`200`，`{ "email": "owner@example.com", "emailVerified": 0, "displayName": null }`。`emailVerified` 为 `0|1`（与 `users.email_verified` 同形，§17.11）；`displayName` 为 `string | null`（§17.13，NULL=未设置→前端回退用邮箱）。后端流程：`ownerId = c.get('session').sub` → `findUserById(db, ownerId)` → 投影 `{ email, emailVerified, displayName }`。
 - 缺 / 坏 / 过期 token：`401 { error }`，auth 中间件拦截（§17.6），不进入 handler。
 - token 验签通过但 `sub` 指向的 user **已不存在**（如该邮箱被「未验证可覆盖」重注册换了新 id，旧 token 的 `sub` 已失效，§17.2）：`401 { error: "未授权" }`——会话失效，让前端清掉本地 token 重新登录（与 §17.6 统一「未授权」语义一致，不把它当成一个还存在的空账号）。
-- **只投影 `email` + 验证位**：`password_hash` / `password_salt` / `iterations` 等敏感字段**绝不**出网（`UserRow` 不整体回客户端，§17.11）。owner-only + 凭 `sub` 隔离，A 拿不到 B 的身份。
+- **只投影 `email` + 验证位 + 显示名**：`password_hash` / `password_salt` / `iterations` 等敏感字段**绝不**出网（`UserRow` 不整体回客户端，§17.11）。owner-only + 凭 `sub` 隔离，A 拿不到 B 的身份。
+
+### 17.13 `PUT /api/auth/profile` 契约（owner 个人资料 · 显示名）
+
+**用途：** owner 在「账户设置」里给自己起一个对外显示名（出现在其创建的表单 / 提交记录里，替代裸邮箱作为可读身份）。前端契约见 `src/core/auth.ts`（`updateProfile(displayName)` + `CurrentUser.displayName`），UI 见 `src/settings.jsx`（`SettingsOverlay` → `AccountSection`，账户 tab）。**真实持久化进 D1，非 localStorage 假桩。**
+
+`PUT /api/auth/profile`（**owner-only**，挂 §17 的 auth 中间件）：
+
+- 请求体 `{ "displayName": "陈伟" }`（`displayName` 可为 `""` 以清空）。
+- 成功：`200`，`{ "email": ..., "emailVerified": 0|1, "displayName": "陈伟" | null }`——**与 `GET /api/auth/me` 同形**，投影写后的最新值。存的值是 `displayName.trim()`；trim 后为空 → 存 `NULL`（清空，回退用邮箱）。后端流程：`ownerId = sub` → 校验 → `updateDisplayName(db, ownerId, toStore)` → 投影。
+- 缺 `displayName` / 非 string / body 非 JSON：`400 { error: "缺少 displayName" }`（不落库）。
+- trim 后长度 > `MAX_DISPLAY_NAME_LENGTH`（64）：`400 { error: "显示名称过长" }`（不落库，原值不变）。前端账户表单的 `maxLength` 规则会在提交前先拦下，后端 400 为纵深防御。
+- 缺 / 坏 / 过期 token：`401`（auth 中间件，§17.6）；token `sub` 指向已删账号：`401 { error: "未授权" }`（与 /me 一致）。
+- **绝不**触碰 `email` / `password_*` / `email_verified`，也绝不投影任何密码字段。
 
 ---
 

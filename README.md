@@ -64,11 +64,14 @@ request as a Bearer header (`core/auth` + the standalone `/signin` page in
   the real owner auth (`core/auth` login / register / password-reset), using its
   `error` / `submitting` seams for backend errors + async busy, plus a small
   找回密码 dialog (the one bit SignInPage doesn't cover).
-- `src/settings.jsx` — the standalone `/settings` page (`SettingsScreen`): the DS 0.8.0
-  floating settings chain `SettingsSheet › IntegrationSettings › DeepSeekCard + FeishuCard`
-  (pure-display connection cards) with a `SettingsSaveBar` footer (explicit save), wired to
-  the real BYOK backend via `core/configClient` (masked secrets kept, backend-400 field
-  errors surfaced, 401 → `/signin`).
+- `src/settings.jsx` — the floating settings overlay (`SettingsOverlay`): the DS 0.8.0
+  `SettingsSheet` with a two-tab nav (账户 / 集成) that floats OVER the designer (it does not
+  unmount it). Opening reflects a `/settings` URL via `history.pushState`; ✕ / Esc / browser
+  Back close it and restore the prior page. 账户 tab = `Avatar` + email + an editable 显示名
+  (persisted via `core/auth.updateProfile` → `PUT /api/auth/profile`, SPEC §17.13) + 退出登录.
+  集成 tab = the pure-display `DeepSeekCard` + `FeishuCard` over the real BYOK backend
+  (`core/configClient`: masked secrets kept, backend-400 field errors surfaced, 401 →
+  `onNeedLogin` → `/signin`). Each tab has its own `SettingsSaveBar` footer (explicit save).
 - `src/preview.jsx` — live form: `Field` / `Input` / `Textarea` / `Select` / `RadioGroup` / `Checkbox` / `Button`, with validation via the DS `Form.useForm` hook.
 - `src/app.css` — layout-only styles (page chrome, split, form-card shell); all values reference DS tokens.
 - `src/core/` — the **SPEC architecture's testable core** (TypeScript, strict),
@@ -119,9 +122,10 @@ live form model that `preview.jsx` renders; failed tool calls backfill as errors
 the model self-heals. Tests inject a fake `chat` into `<App chat={…} />` for
 deterministic builds. `/api/chat` is owner-only — the owner-login/Bearer flow is
 wired (`core/auth` + the standalone `/signin` page `src/signin.jsx`; a 401 navigates to
-`/signin`). The owner connects DeepSeek + 飞书 on the standalone `/settings` page
-(`src/settings.jsx` = `SettingsScreen`, the DS 0.8.0 `SettingsSheet › IntegrationSettings ›
-DeepSeekCard + FeishuCard` chain with a `SettingsSaveBar` footer, over `core/configClient`, SPEC
-§12/§14): mount → `GET /api/config` echoes the masked config, save → `POST /api/config`
-(masked secrets kept, never re-sent), test → `POST /api/config/test`; a 401 routes to
-`/signin`. The publish/submit endpoints land in later phases (see `ROADMAP.md`).
+`/signin`). The owner manages 账户 (显示名) + 集成 (DeepSeek + 飞书) in the floating settings overlay
+(`src/settings.jsx` = `SettingsOverlay`, the DS 0.8.0 `SettingsSheet` two-tab sheet, opened from
+the `AccountControl`; it reflects a `/settings` URL without unmounting the designer, SPEC
+§12/§14/§17): the 集成 tab fetches `GET /api/config` (masked echo), saves `POST /api/config`
+(masked secrets kept, never re-sent), tests `POST /api/config/test`; the 账户 tab edits the
+display name via `PUT /api/auth/profile`. A 401 hands off to login (`/signin`). The
+publish/submit endpoints land in later phases (see `ROADMAP.md`).

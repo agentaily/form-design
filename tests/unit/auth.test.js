@@ -8,6 +8,7 @@ import {
   confirmPasswordReset,
   requestEmailVerification,
   getCurrentUser,
+  updateProfile,
 } from "../../src/core/auth";
 import { getToken, setToken, clearToken } from "../../src/core/apiClient";
 
@@ -254,7 +255,8 @@ describe("auth · getCurrentUser (§23.6 — 读真实验证状态)", () => {
     expect(url).toContain("/api/auth/me");
     expect(init.method).toBe("GET");
     expect(init.headers.authorization).toBe("Bearer owner-jwt");
-    expect(me).toEqual({ email: "owner@example.com", emailVerified: false });
+    // displayName defaults to null when the backend omits it (account never named).
+    expect(me).toEqual({ email: "owner@example.com", emailVerified: false, displayName: null });
   });
 
   it("returns emailVerified=true when the backend says the email is verified", async () => {
@@ -267,6 +269,21 @@ describe("auth · getCurrentUser (§23.6 — 读真实验证状态)", () => {
     await expect(getCurrentUser()).resolves.toEqual({
       email: "owner@example.com",
       emailVerified: true,
+      displayName: null,
+    });
+  });
+
+  it("surfaces the owner's displayName when the backend returns one (§17 个人资料)", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ email: "owner@example.com", emailVerified: true, displayName: "陈伟" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getCurrentUser()).resolves.toEqual({
+      email: "owner@example.com",
+      emailVerified: true,
+      displayName: "陈伟",
     });
   });
 
@@ -278,7 +295,7 @@ describe("auth · getCurrentUser (§23.6 — 读真实验证状态)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const me = await getCurrentUser();
-    expect(me).toEqual({ email: "owner@example.com", emailVerified: false });
+    expect(me).toEqual({ email: "owner@example.com", emailVerified: false, displayName: null });
     expect(me.emailVerified).toBe(false);
   });
 
@@ -306,6 +323,56 @@ describe("auth · getCurrentUser (§23.6 — 读真实验证状态)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(getCurrentUser()).resolves.toBeNull();
+  });
+});
+
+describe("auth · updateProfile (§17 个人资料 — 写显示名,owner-only)", () => {
+  it("PUTs { displayName } to /api/auth/profile WITH a Bearer header and returns the updated profile", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ email: "owner@example.com", emailVerified: true, displayName: "陈伟" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const me = await updateProfile("陈伟");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/auth/profile");
+    expect(init.method).toBe("PUT");
+    expect(init.headers.authorization).toBe("Bearer owner-jwt");
+    expect(JSON.parse(init.body)).toEqual({ displayName: "陈伟" });
+    expect(me).toEqual({ email: "owner@example.com", emailVerified: true, displayName: "陈伟" });
+  });
+
+  it("returns displayName=null when cleared (backend echoes null)", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ email: "owner@example.com", emailVerified: true, displayName: null }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const me = await updateProfile("");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ displayName: "" });
+    expect(me).toEqual({ email: "owner@example.com", emailVerified: true, displayName: null });
+  });
+
+  it("propagates a 401 ApiError (会话失效 → 引导先登录) — unlike getCurrentUser this is a user action", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(updateProfile("陈伟")).rejects.toMatchObject({ name: "ApiError", status: 401 });
+  });
+
+  it("propagates a 400 ApiError (显示名称过长) for the UI to surface", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "显示名称过长" }, { status: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(updateProfile("x".repeat(99))).rejects.toMatchObject({
+      name: "ApiError",
+      status: 400,
+    });
   });
 });
 

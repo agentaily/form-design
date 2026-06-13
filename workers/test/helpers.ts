@@ -17,13 +17,15 @@ import { vi } from "vitest";
 import initialSchema from "../migrations/0001_initial_schema.sql?raw";
 import authTokensSchema from "../migrations/0002_auth_tokens.sql?raw";
 import chatSessionsSchema from "../migrations/0003_chat_sessions.sql?raw";
+import ownerDisplayName from "../migrations/0004_owner_display_name.sql?raw";
 
 // Schema migrations applied to the test D1, in order — mirrors what prod gets via
 // `wrangler d1 migrations apply`. Append future schema migrations to this list.
 //   0001 — users / owner_config / forms.
 //   0002 — auth_tokens (邮箱验证 + 找回密码的一次性 token，§22.4 / §23 / §24).
 //   0003 — chat_sessions (设计对话持久化 + 刷新恢复，§26).
-const SCHEMA_MIGRATIONS = [initialSchema, authTokensSchema, chatSessionsSchema];
+//   0004 — users.display_name（owner 显示名，§17 个人资料）.
+const SCHEMA_MIGRATIONS = [initialSchema, authTokensSchema, chatSessionsSchema, ownerDisplayName];
 
 /** The bindings the owner-config + owner-auth features rely on, surfaced for the tests. */
 export interface TestEnv {
@@ -66,13 +68,31 @@ function toStatements(sql: string): string[] {
 }
 
 /**
- * Apply the schema migrations to the test D1 (idempotent — each migration uses
- * `CREATE TABLE IF NOT EXISTS`). Call in `beforeAll`.
+ * Apply the schema migrations to the test D1. Call in `beforeAll`.
+ *
+ * Re-applicable within a single test file: storage isolation is per-file, so a file
+ * with multiple `describe` blocks each calling `applySchema()` in their own `beforeAll`
+ * runs this more than once against the SAME storage. The `CREATE TABLE/INDEX IF NOT
+ * EXISTS` migrations (0001–0003) are naturally idempotent, but `ALTER TABLE ADD COLUMN`
+ * (0004 — users.display_name) is NOT: SQLite has no column-level `IF NOT EXISTS`, so a
+ * second apply throws `duplicate column name`. We swallow exactly that error so repeated
+ * applies stay a no-op — without changing prod behavior (prod runs each migration once
+ * via the `d1_migrations` tracker, so it never hits the duplicate path).
  */
 export async function applySchema(): Promise<void> {
   for (const migration of SCHEMA_MIGRATIONS) {
     for (const stmt of toStatements(migration)) {
-      await testEnv.DB.exec(stmt);
+      try {
+        await testEnv.DB.exec(stmt);
+      } catch (err) {
+        // Tolerate ONLY「列已存在」on a repeated apply (non-idempotent ADD COLUMN);
+        // any other SQL error is a real failure and must propagate.
+        const message = err instanceof Error ? err.message : String(err);
+        if (/duplicate column name/i.test(message)) {
+          continue;
+        }
+        throw err;
+      }
     }
   }
 }

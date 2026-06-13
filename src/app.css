@@ -354,9 +354,56 @@ body {
   gap: 18px;
 }
 
-/* integration settings page (/settings, §12 + §14): layout is now fully owned by the DS
-   0.8.0 floating chain — SettingsSheet › IntegrationSettings (hero + readiness rail + card
-   slot) › DeepSeekCard/FeishuCard, with a SettingsSaveBar footer. No local wrapper CSS. */
+/* ── top bar: left-aligned breadcrumb + brandmark (override DesignerShell's centered title) ── */
+/* The shell renders a BrandMark + crumb on the left; pull the title block left (not centered),
+   keep it on one line, and give it breathing room from the crumb. Matches the design handoff. */
+.ax-dshell .ax-dshell__title {
+  justify-content: flex-start;
+  white-space: nowrap;
+  padding-left: 16px;
+}
+
+/* 设置浮层 (§12 + §14 + §17): the floating chain — SettingsSheet › (账户 AccountSection |
+   集成 IntegrationSettings › DeepSeekCard/FeishuCard) + a per-tab SettingsSaveBar footer — is
+   owned by the DS 0.8.0 components. Only the 账户 tab's identity block + field stack need local
+   composition CSS (the design's settings.css .acct-* set); everything else maps onto DS tokens. */
+.acct-id {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  margin-bottom: 24px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-3);
+  background: var(--surface-card);
+}
+.acct-id__txt {
+  flex: 1;
+  min-width: 0;
+}
+.acct-id__name {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 500;
+  color: var(--text-body);
+  letter-spacing: var(--tracking-tight);
+  line-height: 1.2;
+}
+.acct-id__email {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acct-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 460px;
+}
 
 /* ───────────────────────── responsive: phone (preview inner only) ───────────────────────── */
 /* The shell/thread/mobile-switch responsiveness is owned by DesignerShell + ConversationThread;
