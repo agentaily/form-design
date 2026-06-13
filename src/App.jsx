@@ -807,22 +807,7 @@ function DesignerApp({
                       variant={device === "full" ? "solid" : "outline"}
                       onClick={() => setDevice("full")}
                     >
-                      {/* monitor glyph — the DS Icon set has no "monitor", so the design's inline
-                          SVG (a display + stand) is reproduced here to match the handoff exactly. */}
-                      <svg
-                        width="13"
-                        height="13"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                      >
-                        <rect x="2" y="3" width="20" height="14" rx="2"></rect>
-                        <path d="M8 21h8M12 17v4"></path>
-                      </svg>
+                      <Icon name="monitor" size={13} />
                     </IconButton>
                     <IconButton
                       label="手机宽度"
