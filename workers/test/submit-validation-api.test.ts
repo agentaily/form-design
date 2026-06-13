@@ -1,6 +1,14 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { applySchema, resetConfig, resetForms, testEnv, login, authHeader } from "./helpers";
+import {
+  applySchema,
+  resetConfig,
+  resetForms,
+  resetSubmissions,
+  testEnv,
+  login,
+  authHeader,
+} from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
@@ -255,6 +263,18 @@ async function setStatus(slug: string, status: "draft" | "closed" | "published")
   await testEnv.DB.prepare("UPDATE forms SET status = ? WHERE slug = ?").bind(status, slug).run();
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Short settle so any background best-effort sync (feishu-configured happy paths) drains. */
+const settle = () => sleep(50);
+
+/** Count rows in the D1 submissions store (the primary store, §15). */
+async function countSubmissions(): Promise<number> {
+  const row = await testEnv.DB.prepare("SELECT COUNT(*) AS n FROM submissions").first<{
+    n: number;
+  }>();
+  return row?.n ?? 0;
+}
+
 // POST /api/submit is PUBLIC (§17.1) → no Authorization header.
 function postSubmit(body: unknown): Promise<Response> {
   return SELF.fetch(`${BASE}/api/submit`, {
@@ -278,6 +298,7 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
   beforeEach(async () => {
     await resetConfig();
     await resetForms();
+    await resetSubmissions();
     token = await login();
   });
 
@@ -301,15 +322,14 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
     // When 提交填齐了所有必填字段的作答
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "姓名", value: "张三" }] });
 
-    // Then 200 + ok 为真
+    // Then 200 + ok 为真 + 落 D1 主存（飞书同步是后台 best-effort，本节只验「过了门、落了库」）。
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok?: boolean };
+    const body = (await res.json()) as { ok?: boolean; id?: string };
     expect(body.ok).toBe(true);
-    expect(mock.tokenCalls).toHaveLength(1);
-    expect(mock.recordCalls).toHaveLength(1);
-    // §15.8 升级：稳态提交先列出列真实类型一次（姓名 已存在 → 不自愈建列）。
-    expect(mock.fieldsListCalls).toHaveLength(1);
-    expect(mock.fieldCreateCalls).toHaveLength(0);
+    expect(body.id).toBeTypeOf("string");
+    expect(await countSubmissions()).toBe(1);
+    // Let the background feishu sync drain (token+record configured → succeeds, no throw).
+    await settle();
   });
 
   it("Scenario: 向已关闭表单提交返回 409 且不打飞书上游", async () => {
@@ -331,12 +351,13 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
     // 文案为「表单未开放提交」语义，且 *不是*「未配飞书」。
     expect(body.error).not.toContain("未配置飞书");
 
-    // And 没有向上游飞书发起任何请求
+    // And 没有提交被写入 D1 主存 + 没有向上游飞书发起任何请求
+    expect(await countSubmissions()).toBe(0);
     expect(mock.tokenCalls).toHaveLength(0);
     expect(mock.recordCalls).toHaveLength(0);
   });
 
-  it("Scenario: 向草稿表单提交返回 409 且不打飞书上游", async () => {
+  it("Scenario: 向草稿表单提交返回 409 且不落 D1 不同步飞书", async () => {
     await configureOwner({ feishu: true });
     const slug = await publishForm([REQUIRED_NAME]);
     await setStatus(slug, "draft");
@@ -345,11 +366,12 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "姓名", value: "张三" }] });
 
     expect(res.status).toBe(409);
+    expect(await countSubmissions()).toBe(0);
     expect(mock.tokenCalls).toHaveLength(0);
     expect(mock.recordCalls).toHaveLength(0);
   });
 
-  it("Scenario: 漏填必填字段返回 400 且不打飞书上游", async () => {
+  it("Scenario: 漏填必填字段返回 400 且不落 D1 不同步飞书", async () => {
     // Given 完整飞书凭据 + 含必填字段「姓名」且 published 的表单
     await configureOwner({ feishu: true });
     const slug = await publishForm([REQUIRED_NAME]);
@@ -358,10 +380,11 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
     // When 提交一份不含「姓名」答案的作答（带一条无关答案以过 parseSubmitRequest 的非空数组校验）
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "其它", value: "x" }] });
 
-    // Then 400 + 不打上游
+    // Then 400 + 不落 D1 + 不打上游
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toBeTypeOf("string");
+    expect(await countSubmissions()).toBe(0);
     expect(mock.tokenCalls).toHaveLength(0);
     expect(mock.recordCalls).toHaveLength(0);
   });
@@ -375,6 +398,7 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "姓名", value: "" }] });
 
     expect(res.status).toBe(400);
+    expect(await countSubmissions()).toBe(0);
     expect(mock.tokenCalls).toHaveLength(0);
     expect(mock.recordCalls).toHaveLength(0);
   });
@@ -388,6 +412,7 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "兴趣", value: [] }] });
 
     expect(res.status).toBe(400);
+    expect(await countSubmissions()).toBe(0);
     expect(mock.tokenCalls).toHaveLength(0);
     expect(mock.recordCalls).toHaveLength(0);
   });
@@ -407,11 +432,12 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
     // When 只填了必填字段（缺非必填的「年龄」）
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "姓名", value: "张三" }] });
 
-    // Then 200 + ok 为真
+    // Then 200 + ok 为真 + 落 D1 主存
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok?: boolean };
     expect(body.ok).toBe(true);
-    expect(mock.recordCalls).toHaveLength(1);
+    expect(await countSubmissions()).toBe(1);
+    await settle();
   });
 
   it("Scenario: 状态门在校验失败时绝不触碰 owner 配置", async () => {
@@ -430,6 +456,7 @@ describe("submit validation gates POST /api/submit (workers/features/submit-vali
     const body = (await res.json()) as { error?: string };
     expect(body.error).toBeTypeOf("string");
     expect(body.error).not.toContain("未配置飞书");
+    expect(await countSubmissions()).toBe(0);
     expect(mock.tokenCalls).toHaveLength(0);
     expect(mock.recordCalls).toHaveLength(0);
   });

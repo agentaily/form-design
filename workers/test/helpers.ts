@@ -18,6 +18,7 @@ import initialSchema from "../migrations/0001_initial_schema.sql?raw";
 import authTokensSchema from "../migrations/0002_auth_tokens.sql?raw";
 import chatSessionsSchema from "../migrations/0003_chat_sessions.sql?raw";
 import ownerDisplayName from "../migrations/0004_owner_display_name.sql?raw";
+import submissionsSchema from "../migrations/0005_submissions.sql?raw";
 
 // Schema migrations applied to the test D1, in order — mirrors what prod gets via
 // `wrangler d1 migrations apply`. Append future schema migrations to this list.
@@ -25,7 +26,14 @@ import ownerDisplayName from "../migrations/0004_owner_display_name.sql?raw";
 //   0002 — auth_tokens (邮箱验证 + 找回密码的一次性 token，§22.4 / §23 / §24).
 //   0003 — chat_sessions (设计对话持久化 + 刷新恢复，§26).
 //   0004 — users.display_name（owner 显示名，§17 个人资料）.
-const SCHEMA_MIGRATIONS = [initialSchema, authTokensSchema, chatSessionsSchema, ownerDisplayName];
+//   0005 — submissions (提交落 D1 主存 + 飞书可选同步回执，§15 / §18).
+const SCHEMA_MIGRATIONS = [
+  initialSchema,
+  authTokensSchema,
+  chatSessionsSchema,
+  ownerDisplayName,
+  submissionsSchema,
+];
 
 /** The bindings the owner-config + owner-auth features rely on, surfaced for the tests. */
 export interface TestEnv {
@@ -141,6 +149,15 @@ export async function resetAuthTokens(): Promise<void> {
  */
 export async function resetChatSessions(): Promise<void> {
   await testEnv.DB.exec("DELETE FROM chat_sessions");
+}
+
+/**
+ * Empty the `submissions` table between scenarios (§15 / §18). The submit / data-backend
+ * outer-loops write + read submissions per scenario (and assert on counts / owner isolation),
+ * so each must start from a clean table. `applySchema` already builds it (0005 migration).
+ */
+export async function resetSubmissions(): Promise<void> {
+  await testEnv.DB.exec("DELETE FROM submissions");
 }
 
 /**

@@ -43,7 +43,7 @@ Feature: 表单发布与公开填写拉取 POST /api/forms 与 GET /api/forms/:s
     When 答题者无鉴权地拉取该 slug 对应的表单
     Then 响应状态码为 404
 
-  Scenario: submit 带合法 slug 时正常走飞书写入
+  Scenario: submit 带合法 slug 时正常落 D1 并后台同步飞书
     Given 一个已保存完整飞书凭据的 owner
     And 一份已发布的表单
     And 上游飞书 tenant_access_token 接口将返回 code 为 0
@@ -51,7 +51,7 @@ Feature: 表单发布与公开填写拉取 POST /api/forms 与 GET /api/forms/:s
     When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
     Then 响应状态码为 200
     And 响应体的 ok 为真
-    And 写记录请求打到了 owner 配置的 app token 与 table id 对应的端点
+    And 后台同步的写记录请求打到了 owner 配置的 app token 与 table id 对应的端点
 
   Scenario: submit 带不存在的 slug 返回 404 且不打飞书上游
     Given 一个已保存完整飞书凭据的 owner

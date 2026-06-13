@@ -1,65 +1,54 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { applySchema, resetConfig, resetForms, login, authHeader } from "./helpers";
+import {
+  applySchema,
+  resetConfig,
+  resetForms,
+  resetSubmissions,
+  testEnv,
+  login,
+  authHeader,
+} from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
-// POST /api/submit stays PUBLIC (SPEC.md §17.1) — answerers send NO token, and
-// these scenarios' behaviour is unchanged. But the SETUP they rely on now hits
-// owner-only endpoints (POST /api/config to save creds, POST /api/forms to
-// publish a form), so those setup calls carry a `Authorization: Bearer <jwt>`
-// from login(). postSubmit itself never sends a token.
-
-// Outer-loop acceptance specs for the submit-to-Bitable endpoint `POST /api/submit`,
-// driven through the real Hono app in workerd via SELF.fetch, with ALL Feishu
-// upstreams mocked locally — never hits open.feishu.cn (see installFeishuMock).
+// POST /api/submit stays PUBLIC (SPEC.md §17.1) — answerers send NO token; postSubmit
+// never sends one. Its SETUP (POST /api/config to save creds, POST /api/forms to
+// publish) hits owner-only endpoints, so those carry a Bearer from login().
 //
-// §15.8 升级（既有列冲突兜底方案 a，SPEC §16.8）：稳态提交现在写记录前**先**
-// `GET .../fields?page_size=100`（listBitableColumns）拿每列真实类型再格式化值。所以
-// 即便不走自愈，每次提交也会列出一次字段——mock 必须放行该 GET（否则 default-deny THROW → 502）。
-// 此外，发布作为 setup（POST /api/forms，owner 已配飞书）会在 waitUntil 后台触发
-// preCreateBitableColumnsBestEffort（换 token + 列出 + 建列），打到 mock；setup 后 drain 掉
-// 这股后台扇出再 reset 捕获，使断言阶段的 token/record 计数仍精确反映 *提交本身*。
+// 架构转向（PR-2）：提交主存翻转到 **D1**，飞书降为**可选后台同步**。Outer-loop acceptance
+// specs for POST /api/submit, driven through the real Hono app via SELF.fetch with ALL
+// Feishu upstreams mocked locally — never hits open.feishu.cn (installFeishuMock).
 //
-// Realizes every scenario of workers/features/submit.feature:
-//   1. 飞书已配 + 两段 OK → 200 { ok:true, recordId }
-//   2. answers 正确映射进飞书 fields（写记录 URL 用配置的 app_token/table_id；body fields 正确）
-//   3. 飞书未配 → 409，不打任何上游
-//   4. 空 answers → 400，不打上游
-//   5. 缺 answers → 400，不打上游
-//   6. 换 token 失败（code≠0）→ 可辨识错误、不泄漏 app_secret、不再打第二段
-//   7. 写记录 code≠0 → 可辨识错误、不泄漏 token / app_secret
-//   8. 整个响应（body + headers）不含明文 app_secret / tenant_access_token
+// 关键时序：飞书同步现在在 `c.executionCtx.waitUntil(...)` 后台跑（响应返回后才发生）。所以：
+//   - 断言「提交是否落库」直接查 D1（同步、立即可见）；
+//   - 断言「同步上游调用 / 回执」前，先 `waitForSyncSettled(id)` 轮询 D1 直到回执（record_id
+//     或 sync_error）落定，再看 mock 捕获的 token/record/fields 调用。
+//   - 未配飞书 / 校验拒收 → 没有后台同步，用 `settle()` 短暂静置后断言零飞书调用。
+// 此外，发布作为 setup（owner 已配飞书）会在 waitUntil 触发 preCreateBitableColumnsBestEffort，
+// 打到 mock；setup 后 drain 掉这股后台扇出再 reset 捕获，使断言只反映提交本身的同步。
 //
+// Realizes workers/features/submit.feature（D1 主存 + 飞书可选后台同步）+ §15.8 自愈（后台）。
 // Contract: SPEC.md §15、§16.8.
 
 const BASE = "https://api.local";
 
-// Concrete owner credential fixtures. Distinctive + long enough that, were any to
-// ever leak into a response body / message / header, a substring scan catches it
-// unmistakably. These are the plaintext values written into D1 via POST /api/config
-// (encrypted at rest); the tests then assert they never reappear in any response.
+// Concrete owner credential fixtures — distinctive + long so any leak into a response
+// (body / message / header) is caught by a substring scan (§15.7).
 const OWNER_DEEPSEEK_KEY = "sk-owner-DEEPSEEK-secret-0123456789abcdef";
 const OWNER_FEISHU_APP_ID = "cli_fixtureAppId9999";
 const OWNER_FEISHU_APP_SECRET = "feishu-APP-SECRET-qrstuvwxyz-7777-SHHH";
 const OWNER_FEISHU_APP_TOKEN = "bascnFixtureAppTokenXYZ";
 const OWNER_FEISHU_TABLE_ID = "tblFixture123";
 
-// The token the mocked exchange (stage ①) hands back; it must ONLY ever appear on
-// stage ②'s Authorization header — never in any /api/submit response (§15.7).
 const UPSTREAM_TENANT_TOKEN = "t-xxxxxxxxxxxxxxxx-SECRET-9999";
 const UPSTREAM_RECORD_ID = "rec-xxxxxxxxxxxxxx";
 
-// The exact add-record URL the route must hit: the template with the owner's
-// app_token / table_id filled in (SPEC.md §15.5).
 const BITABLE_URL = FEISHU_BITABLE_RECORDS_URL.replace(
   "{app_token}",
   OWNER_FEISHU_APP_TOKEN,
 ).replace("{table_id}", OWNER_FEISHU_TABLE_ID);
 
-// The fields endpoint (list columns / create column) for the owner's table. The
-// lister appends `?page_size=100`; the creator POSTs the bare URL — so we match on
-// the pathname (query stripped). §15.8 升级让稳态提交也 GET 这里列出列真实类型。
 const BITABLE_FIELDS_URL = FEISHU_BITABLE_FIELDS_URL.replace(
   "{app_token}",
   OWNER_FEISHU_APP_TOKEN,
@@ -71,9 +60,8 @@ function pathKey(url: string): string {
 }
 const BITABLE_FIELDS_PATH = pathKey(BITABLE_FIELDS_URL);
 
-// A list-columns OK body: the table already has 姓名(text) + 兴趣(multi-select), so
-// the steady-state listBitableColumns finds every submitted label as an existing
-// column and writes values by their real type (text / string[]) — no self-heal.
+// list-columns OK body: table already has 姓名(text) + 兴趣(multi-select), so the
+// steady-state listBitableColumns finds every submitted label — no self-heal.
 const FIELDS_LIST_BODY = JSON.stringify({
   code: 0,
   msg: "success",
@@ -101,39 +89,22 @@ const BITABLE_OK_BODY = JSON.stringify({
 });
 const BITABLE_BAD_BODY = JSON.stringify({ code: 1254000, msg: "FieldNameNotFound" });
 
-// --- Two-stage Feishu fetch mock (default-deny, ordered) ----------------------
-//
-// The submit flow fans out to TWO upstreams IN ORDER: first exchange the owner's
-// app_id/app_secret for a tenant_access_token (stage ①), then write one record
-// with that token (stage ②). We dispatch on the exact upstream URL; any unmatched
-// URL THROWS. The throw is load-bearing:
-//   - omit `token` ⇒ the route must NOT exchange a token (e.g. unconfigured / bad
-//     request) — if it did, the throw records a violation.
-//   - omit `record` ⇒ the route must NOT reach stage ② (e.g. token exchange
-//     failed) — proving "不再打第二段".
-// We assert per-stage call counts to prove "zero upstream calls" / "only stage ①".
+// --- Feishu fetch mock (default-deny, dispatched on URL + method) -------------
+// Same shape as before: omit `token`/`record` ⇒ a call to it THROWS (load-bearing
+// for "没有向上游飞书发起任何请求"). list-fields GET + create-field POST share a path,
+// split by method.
 
 interface UpstreamReply {
   status: number;
   body: string;
   headers?: Record<string, string>;
 }
-
 interface FeishuMockOpts {
-  /** Reply for the tenant_access_token exchange (stage ①). Omit ⇒ must NOT be called. */
   token?: UpstreamReply;
-  /** Reply for the Bitable add-record write (stage ②). Omit ⇒ must NOT be called. */
   record?: UpstreamReply;
-  /**
-   * Reply for the list-fields GET (§15.8 升级：稳态提交先列出列真实类型). Defaults to a
-   * body declaring the submitted labels as existing columns, so the steady-state
-   * write goes straight through (no self-heal). Omit-via-`null` ⇒ must NOT be called.
-   */
   fieldsList?: UpstreamReply | null;
-  /** Reply for each create-field POST (only the self-heal / pre-create paths hit it). */
   fieldCreate?: UpstreamReply;
 }
-
 interface CapturedCall {
   url: string;
   method: string;
@@ -141,17 +112,11 @@ interface CapturedCall {
   bodyText: string;
   body: unknown;
 }
-
 interface FeishuMock {
-  /** Stage ① (tenant_access_token exchange) calls, in order. */
   readonly tokenCalls: CapturedCall[];
-  /** Stage ② (Bitable add-record) calls, in order. */
   readonly recordCalls: CapturedCall[];
-  /** list-fields (GET fields) calls, in order. */
   readonly fieldsListCalls: CapturedCall[];
-  /** create-field (POST fields) calls, in order. */
   readonly fieldCreateCalls: CapturedCall[];
-  /** Empty every captured-call array (used to discard the publish background fan-out). */
   resetCalls(): void;
   restore(): void;
 }
@@ -161,9 +126,6 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
   const recordCalls: CapturedCall[] = [];
   const fieldsListCalls: CapturedCall[] = [];
   const fieldCreateCalls: CapturedCall[] = [];
-  // Default list-fields reply: the submitted labels already exist as columns, so
-  // the steady-state listBitableColumns finds them and the write goes straight
-  // through. A test passes `fieldsList: null` to forbid the call entirely.
   const fieldsListReply: UpstreamReply | null =
     opts.fieldsList === undefined ? { status: 200, body: FIELDS_LIST_BODY } : opts.fieldsList;
   const fieldCreateReply: UpstreamReply = opts.fieldCreate ?? {
@@ -191,9 +153,7 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
 
     if (req.url === FEISHU_TENANT_TOKEN_URL) {
       if (!opts.token) {
-        throw new Error(
-          `unexpected token-exchange upstream call to ${req.url} (no reply configured)`,
-        );
+        throw new Error(`unexpected token-exchange upstream call to ${req.url} (no reply)`);
       }
       tokenCalls.push(captured);
       return new Response(opts.token.body, {
@@ -203,7 +163,7 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
     }
     if (req.url === BITABLE_URL) {
       if (!opts.record) {
-        throw new Error(`unexpected add-record upstream call to ${req.url} (no reply configured)`);
+        throw new Error(`unexpected add-record upstream call to ${req.url} (no reply)`);
       }
       recordCalls.push(captured);
       return new Response(opts.record.body, {
@@ -211,8 +171,6 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
         headers: opts.record.headers ?? { "content-type": "application/json" },
       });
     }
-    // §15.8 升级：list-fields (GET) on the steady-state path + create-field (POST)
-    // on the self-heal / pre-create path. Both share a pathname; method splits them.
     if (pathKey(req.url) === BITABLE_FIELDS_PATH) {
       if (req.method === "GET") {
         if (!fieldsListReply) {
@@ -233,8 +191,6 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
       }
       throw new Error(`unexpected method ${req.method} on fields endpoint ${req.url}`);
     }
-    // Default-deny: the route must only ever talk to the Feishu upstreams it is
-    // configured for (and only the configured app_token/table_id URLs).
     throw new Error(
       `unexpected outbound fetch to ${req.url} (only the Feishu token + records + fields are mocked)`,
     );
@@ -259,38 +215,92 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
 }
 
 /**
- * Drain the background `waitUntil(preCreateBitableColumnsBestEffort)` that
- * `POST /api/forms`/`PATCH` kicks off when the owner has Feishu configured (§16.8).
- * It fans out (token exchange → list fields → create columns) on the SAME mock; we
- * poll until the create-field POST(s) land (or a short deadline), then return so the
- * caller can `resetCalls()` and assert on the submit/read traffic alone. The publish
- * form here has 2 leaf fields (姓名 / 兴趣) both pre-existing in FIELDS_LIST_BODY, so
- * the pre-create lists once and creates nothing — we just wait for that list to flush.
+ * Drain the publish-triggered background `preCreateBitableColumnsBestEffort` (§16.8):
+ * wait for its token exchange to land on the mock, then settle so any list/create
+ * follow-ups also land — so the caller can `resetCalls()` and assert on the submit alone.
  */
 async function drainBackgroundPreCreate(mock: FeishuMock): Promise<void> {
   const deadline = Date.now() + 800;
-  // Wait until the background pre-create has reached its FIRST upstream hop (the
-  // token exchange) — whether the token then succeeds (→ list/create follow) or
-  // fails (→ swallowed, nothing follows), this is the signal the fan-out has run.
   while (mock.tokenCalls.length === 0 && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 5));
   }
-  // Settle so the list/create POSTs that may follow a successful token also land
-  // before the caller resets the captured-call arrays.
   await new Promise((r) => setTimeout(r, 25));
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Short settle so any (forbidden) background fan-out would have a chance to fire. */
+const settle = () => sleep(50);
+
+interface Receipt {
+  feishu_record_id: string | null;
+  feishu_synced_at: string | null;
+  feishu_sync_error: string | null;
+}
+
+async function getReceipt(id: string): Promise<Receipt | null> {
+  return testEnv.DB.prepare(
+    "SELECT feishu_record_id, feishu_synced_at, feishu_sync_error FROM submissions WHERE id = ?",
+  )
+    .bind(id)
+    .first<Receipt>();
+}
+
+/** A submission row's stored answers (parsed from answers_json) + receipt. */
+async function getSubmissionRow(
+  id: string,
+): Promise<{ answers: unknown; receipt: Receipt } | null> {
+  const row = await testEnv.DB.prepare(
+    "SELECT answers_json, feishu_record_id, feishu_synced_at, feishu_sync_error FROM submissions WHERE id = ?",
+  )
+    .bind(id)
+    .first<{
+      answers_json: string;
+      feishu_record_id: string | null;
+      feishu_synced_at: string | null;
+      feishu_sync_error: string | null;
+    }>();
+  if (row === null) return null;
+  return {
+    answers: JSON.parse(row.answers_json),
+    receipt: {
+      feishu_record_id: row.feishu_record_id,
+      feishu_synced_at: row.feishu_synced_at,
+      feishu_sync_error: row.feishu_sync_error,
+    },
+  };
+}
+
+async function countSubmissions(): Promise<number> {
+  const row = await testEnv.DB.prepare("SELECT COUNT(*) AS n FROM submissions").first<{
+    n: number;
+  }>();
+  return row?.n ?? 0;
+}
+
 /**
- * Seed D1 with the owner config via the real, already-implemented POST /api/config
- * (secrets encrypted at rest). The submit route reads back THIS config —
- * credentials are never taken from the /api/submit request body (SPEC.md §15.1).
+ * Poll D1 until the submission's background Feishu sync has SETTLED — i.e. its receipt
+ * carries a record_id (success) OR a sync_error (failure). Returns the final receipt.
+ * The background sync runs in `waitUntil` after the 200, so tests await this before
+ * asserting on the mock's captured sync calls. Times out (returns last seen) after ~1.5s.
  */
-// Owner-only setup token (§17.1) for the POST /api/config + POST /api/forms calls.
+async function waitForSyncSettled(id: string): Promise<Receipt> {
+  const deadline = Date.now() + 1500;
+  let row = await getReceipt(id);
+  while (
+    Date.now() < deadline &&
+    (row === null || (row.feishu_record_id === null && row.feishu_sync_error === null))
+  ) {
+    await sleep(5);
+    row = await getReceipt(id);
+  }
+  return row ?? { feishu_record_id: null, feishu_synced_at: null, feishu_sync_error: null };
+}
+
+// Owner-only setup token (§17.1) for POST /api/config + POST /api/forms.
 let token: string;
 
 async function configureOwner(opts: { feishu: boolean }): Promise<void> {
   const body: Record<string, unknown> = {
-    // DeepSeek is the required block — POST /api/config 400s without it.
     deepseek: { apiKey: OWNER_DEEPSEEK_KEY, model: "deepseek-chat" },
   };
   if (opts.feishu) {
@@ -301,7 +311,6 @@ async function configureOwner(opts: { feishu: boolean }): Promise<void> {
       tableId: OWNER_FEISHU_TABLE_ID,
     };
   }
-  // owner-only setup endpoint (§17.1) → Bearer token.
   const res = await SELF.fetch(`${BASE}/api/config`, {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeader(token) },
@@ -321,17 +330,8 @@ function postSubmit(body: unknown): Promise<Response> {
   });
 }
 
-/**
- * Publish a form via the real POST /api/forms route and return its slug.
- *
- * §16.5 made `formSlug` a required field on POST /api/submit and added a
- * "先校验 form 存在" gate before any Feishu call. So every submit scenario that
- * means to exercise the §15 Feishu write must FIRST publish a form and attach
- * its slug — otherwise it would 400 on the missing slug before reaching Feishu.
- * The §15 behaviour under test is unchanged; the slug is just the new front gate.
- */
+/** Publish a form via the real POST /api/forms and return its slug. */
 async function publishFormAndGetSlug(): Promise<string> {
-  // owner-only setup endpoint (§17.1) → Bearer token.
   const res = await SELF.fetch(`${BASE}/api/forms`, {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeader(token) },
@@ -353,14 +353,8 @@ async function publishFormAndGetSlug(): Promise<string> {
   return json.slug;
 }
 
-/**
- * Setup helper for the Feishu-write scenarios: install the assertion mock FIRST
- * (so the publish background pre-create fan-out lands on it, not the real network),
- * publish the form, drain that fan-out, then `resetCalls()` so the per-stage counts
- * reflect the submit under test alone. Returns the published slug; `mock` is set on
- * the enclosing `mock` variable by the caller's `mock = installFeishuMock(...)` —
- * here we take the already-installed handle.
- */
+/** Publish + drain the publish-background pre-create + reset captures, so the per-stage
+ *  counts reflect the submit's own background sync alone. */
 async function publishWithMockDrained(installed: FeishuMock): Promise<string> {
   const slug = await publishFormAndGetSlug();
   await drainBackgroundPreCreate(installed);
@@ -368,14 +362,21 @@ async function publishWithMockDrained(installed: FeishuMock): Promise<string> {
   return slug;
 }
 
-// A representative submission: one text answer + one multi-select answer. The
-// `formSlug` is filled per-scenario after publishing a form (see makeSubmission).
 const TEXT_ANSWER = { label: "姓名", value: "张三" };
 const MULTI_ANSWER = { label: "兴趣", value: ["阅读", "运动"] };
 
-/** A full, valid submission body for `slug`: required formSlug + the answers. */
 function makeSubmission(slug: string): { formSlug: string; answers: unknown[] } {
   return { formSlug: slug, answers: [TEXT_ANSWER, MULTI_ANSWER] };
+}
+
+/** Submit + assert 200 + return the new submission id from the { ok, id } body. */
+async function submitAndGetId(slug: string): Promise<string> {
+  const res = await postSubmit(makeSubmission(slug));
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { ok?: boolean; id?: string };
+  expect(body.ok).toBe(true);
+  expect(body.id).toBeTypeOf("string");
+  return body.id as string;
 }
 
 describe("submit POST /api/submit (workers/features/submit.feature)", () => {
@@ -388,8 +389,7 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
   beforeEach(async () => {
     await resetConfig();
     await resetForms();
-    // The submit endpoint is public, but its setup (save config / publish form)
-    // hits owner-only endpoints, so we need a session token for those.
+    await resetSubmissions();
     token = await login();
   });
 
@@ -398,58 +398,49 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
     mock = undefined;
   });
 
-  it("Scenario: 飞书已配且上游都 OK 时写入成功并返回 recordId", async () => {
-    // Given 一个已保存完整飞书凭据的 owner
+  it("Scenario: 提交成功落 D1 主存并返回提交 id", async () => {
     await configureOwner({ feishu: true });
-    // And 上游飞书 tenant_access_token 接口将返回 code 为 0
-    // And 上游飞书多维表格新增记录接口将返回 code 为 0 且带 record id
-    // Install the mock FIRST so the publish background pre-create (§16.8) lands on
-    // it, not the real network.
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: { status: 200, body: BITABLE_OK_BODY },
     });
-    // And 一份已发布的表单（§16.5：submit 需带合法 formSlug 才会走飞书写入）。Drain the
-    // publish-triggered background pre-create + reset captures so the counts below
-    // reflect the submit alone.
     const slug = await publishWithMockDrained(mock);
 
-    // When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
     const res = await postSubmit(makeSubmission(slug));
-
-    // Then 响应状态码为 200
+    // Then 200 + ok + id
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok?: boolean; recordId?: string };
-    // And 响应体的 ok 为真
+    const body = (await res.json()) as { ok?: boolean; id?: string; recordId?: string };
     expect(body.ok).toBe(true);
-    // And 响应体带有上游返回的 recordId
-    expect(body.recordId).toBe(UPSTREAM_RECORD_ID);
+    expect(body.id).toBeTypeOf("string");
+    // 提交主存是 D1，不在同步响应里回飞书 recordId（它是异步同步产物）。
+    expect(body.recordId).toBeUndefined();
 
-    // Both upstream stages were hit exactly once, in order.
+    // And 该提交已写入 D1 主存
+    const row = await getSubmissionRow(body.id as string);
+    expect(row).not.toBeNull();
+
+    // And 后台同步成功后该提交回填了飞书 record id
+    const receipt = await waitForSyncSettled(body.id as string);
+    expect(receipt.feishu_record_id).toBe(UPSTREAM_RECORD_ID);
+    expect(receipt.feishu_sync_error).toBeNull();
     expect(mock.tokenCalls).toHaveLength(1);
     expect(mock.recordCalls).toHaveLength(1);
-    // §15.8 升级：稳态提交先列出列真实类型一次，未触发自愈建列。
     expect(mock.fieldsListCalls).toHaveLength(1);
     expect(mock.fieldCreateCalls).toHaveLength(0);
   });
 
-  it("Scenario: answers 正确映射进飞书 fields", async () => {
-    // Given 一个已保存完整飞书凭据的 owner
+  it("Scenario: answers 正确映射进后台同步的飞书 fields", async () => {
     await configureOwner({ feishu: true });
-    // And 两段上游都将返回 code 为 0
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: { status: 200, body: BITABLE_OK_BODY },
     });
-    // And 一份已发布的表单（带 slug 提交的前置门，§16.5），drain 掉发布预建扇出。
     const slug = await publishWithMockDrained(mock);
 
-    // When 答题者提交含一个文本答案与一个多选答案的作答
-    const res = await postSubmit(makeSubmission(slug));
-    expect(res.status).toBe(200);
+    const id = await submitAndGetId(slug);
+    await waitForSyncSettled(id);
 
-    // The token-exchange request carried the owner's saved app_id/app_secret in
-    // its body (proves the creds came from the saved config, not the request).
+    // The token-exchange request carried the owner's SAVED app_id/app_secret.
     expect(mock.tokenCalls).toHaveLength(1);
     expect(mock.tokenCalls[0].body).toMatchObject({
       app_id: OWNER_FEISHU_APP_ID,
@@ -458,183 +449,162 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
 
     expect(mock.recordCalls).toHaveLength(1);
     const recordCall = mock.recordCalls[0];
-    // And 写记录请求打到了 owner 配置的 app token 与 table id 对应的端点
+    // And 打到了 owner 配置的 app token/table id 端点 + 带 Bearer tenant token（只在这里，§15.7）。
     expect(recordCall.url).toBe(BITABLE_URL);
-    // And the tenant_access_token rode the Authorization header (only here, §15.7).
     expect(recordCall.headers.get("authorization")).toBe(`Bearer ${UPSTREAM_TENANT_TOKEN}`);
 
     const fields = (recordCall.body as { fields?: Record<string, unknown> }).fields;
     expect(fields).toBeTypeOf("object");
-    // Then 写记录请求体的 fields 里文本答案以 label 为键、值原样
     expect(fields?.[TEXT_ANSWER.label]).toBe(TEXT_ANSWER.value);
-    // And 写记录请求体的 fields 里多选答案以 label 为键、值为原样字符串数组
     expect(fields?.[MULTI_ANSWER.label]).toEqual(MULTI_ANSWER.value);
   });
 
-  it("Scenario: 飞书未配时返回 409 且不打上游", async () => {
+  it("Scenario: 未配飞书也照常落 D1 并返回成功且不向飞书发任何请求", async () => {
     // Given 一个未配置飞书的 owner (DeepSeek only).
     await configureOwner({ feishu: false });
-    // And 一份已发布的表单：slug 合法，使 formExists 门通过，让 409「未配飞书」成为
-    // 触发原因（而非 404），以隔离测原本的 §15 未配飞书行为（§16.5）。
     const slug = await publishFormAndGetSlug();
-    // BOTH upstream replies OMITTED: any Feishu call would THROW, proving the route
-    // makes zero outbound calls when Feishu is unconfigured.
+    // ALL replies OMITTED: any Feishu call would THROW → proves zero outbound calls.
     mock = installFeishuMock({});
 
-    // When 答题者带着合法 slug 向 /api/submit 提交一份作答
     const res = await postSubmit(makeSubmission(slug));
 
-    // Then 响应状态码为 409 并提示 owner 未配置飞书
-    expect(res.status).toBe(409);
-    expect(res.headers.get("content-type")).toContain("application/json");
-    const body = (await res.json()) as { error?: string };
-    expect(body.error).toBeTypeOf("string");
-    expect(body.error).toContain("飞书");
+    // Then 200 + ok（语义翻转：未配飞书不再 409）
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok?: boolean; id?: string };
+    expect(body.ok).toBe(true);
+    expect(body.id).toBeTypeOf("string");
+
+    // And 该提交已写入 D1 主存，且飞书回执为空（未同步）
+    await settle();
+    const row = await getSubmissionRow(body.id as string);
+    expect(row).not.toBeNull();
+    expect(row!.receipt.feishu_record_id).toBeNull();
+    expect(row!.receipt.feishu_synced_at).toBeNull();
+    expect(row!.receipt.feishu_sync_error).toBeNull();
 
     // And 没有向上游飞书发起任何请求
     expect(mock.tokenCalls).toHaveLength(0);
     expect(mock.recordCalls).toHaveLength(0);
+    expect(mock.fieldsListCalls).toHaveLength(0);
   });
 
-  it("Scenario: 空 answers 时返回 400 且不打上游", async () => {
-    // Given 一个已保存完整飞书凭据的 owner
+  it("Scenario: 空 answers 时返回 400 且不落 D1 不同步", async () => {
     await configureOwner({ feishu: true });
-    // And 一份已发布的表单：formSlug 合法，使 400 是「空 answers」所致（隔离原断言）。
     const slug = await publishFormAndGetSlug();
-    // Upstream replies OMITTED: a 400 must short-circuit before any Feishu call.
     mock = installFeishuMock({});
 
-    // When 答题者向 /api/submit 提交一份空 answers 的请求（formSlug 合法）
     const res = await postSubmit({ formSlug: slug, answers: [] });
 
-    // Then 响应状态码为 400
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toBeTypeOf("string");
 
-    // And 没有向上游飞书发起任何请求
+    await settle();
+    expect(await countSubmissions()).toBe(0);
     expect(mock.tokenCalls).toHaveLength(0);
     expect(mock.recordCalls).toHaveLength(0);
   });
 
-  it("Scenario: 缺少 answers 时返回 400 且不打上游", async () => {
-    // Given 一个已保存完整飞书凭据的 owner
+  it("Scenario: 缺少 answers 时返回 400 且不落 D1 不同步", async () => {
     await configureOwner({ feishu: true });
-    // And 一份已发布的表单：formSlug 合法，使 400 是「缺 answers」所致（隔离原断言）。
     const slug = await publishFormAndGetSlug();
     mock = installFeishuMock({});
 
-    // When 答题者向 /api/submit 提交缺少 answers 的请求（formSlug 合法）
     const res = await postSubmit({ formSlug: slug, foo: "bar" });
 
-    // Then 响应状态码为 400
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toBeTypeOf("string");
 
-    // And 没有向上游飞书发起任何请求
+    await settle();
+    expect(await countSubmissions()).toBe(0);
     expect(mock.tokenCalls).toHaveLength(0);
     expect(mock.recordCalls).toHaveLength(0);
   });
 
-  it("Scenario: 换 tenant_access_token 失败时返回错误且不泄漏 app secret", async () => {
-    // Given 一个已保存完整飞书凭据的 owner
+  it("Scenario: 同步换 token 失败时提交仍成功并记同步错误且不泄漏 app secret", async () => {
     await configureOwner({ feishu: true });
-    // And 上游飞书 tenant_access_token 接口将返回非 0 的业务错误码 (HTTP 仍 200！)
-    // The add-record reply is OMITTED: reaching stage ② after a failed token
-    // exchange would THROW, proving "不再打第二段". list-fields likewise forbidden
-    // on the submit path (it is never reached after a failed token exchange).
+    // token exchange returns a non-zero business code (HTTP 200!). record-write reply
+    // OMITTED + list-fields forbidden: reaching them after a failed token would THROW.
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_BAD_BODY },
       fieldsList: null,
     });
-    // And 一份已发布的表单（带 slug 提交的前置门，§16.5）。Publish's background pre-create
-    // also fails at the token exchange (same bad body) — drain + reset before the submit.
     const slug = await publishWithMockDrained(mock);
 
-    // When 答题者带着合法 slug 向 /api/submit 提交一份作答
     const res = await postSubmit(makeSubmission(slug));
-
-    // Then 代理返回可辨识的错误响应 (4xx/5xx JSON error — not a 2xx success).
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.headers.get("content-type")).toContain("application/json");
     const raw = await res.clone().text();
-    const body = (await res.json()) as { error?: string };
-    expect(body.error).toBeTypeOf("string");
 
-    // The token endpoint was actually probed (failure is upstream's verdict, not
-    // the route refusing to call).
+    // Then 提交仍成功（D1 主存已写），同步失败被吞
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok?: boolean; id?: string };
+    expect(body.ok).toBe(true);
+
+    const receipt = await waitForSyncSettled(body.id as string);
+    // And 该提交记录了飞书同步失败、无 record id
+    expect(receipt.feishu_sync_error).toBeTypeOf("string");
+    expect(receipt.feishu_record_id).toBeNull();
+    // 该提交确实落了 D1
+    expect(await getSubmissionRow(body.id as string)).not.toBeNull();
+    // token 端点被探了（失败是上游裁决）；记录写端点不该被触达。
     expect(mock.tokenCalls).toHaveLength(1);
-
-    // And 错误响应里不包含 owner 的明文飞书 app secret
-    expect(raw).not.toContain(OWNER_FEISHU_APP_SECRET);
-
-    // And 没有向上游飞书多维表格新增记录接口发起请求
     expect(mock.recordCalls).toHaveLength(0);
+
+    // And 整个响应不含明文 app secret，且 sync_error 也不含（只是错误名）。
+    expect(raw).not.toContain(OWNER_FEISHU_APP_SECRET);
+    expect(receipt.feishu_sync_error).not.toContain(OWNER_FEISHU_APP_SECRET);
   });
 
-  it("Scenario: 写记录上游报错时返回错误且不泄漏 token", async () => {
-    // Given 一个已保存完整飞书凭据的 owner
+  it("Scenario: 同步写记录失败时提交仍成功并记同步错误且不泄漏 token", async () => {
     await configureOwner({ feishu: true });
-    // And 上游飞书 tenant_access_token 接口将返回 code 为 0
-    // And 上游飞书多维表格新增记录接口将返回非 0 的业务错误码 (code 1254000, NOT 1254045 —
-    // a普通写失败而非可自愈的缺列信号，故走 502 而不重试)
+    // token OK, then add-record returns a non-zero code (1254000, NOT 1254045 — a普通
+    // 写失败，不自愈)。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: { status: 200, body: BITABLE_BAD_BODY },
     });
-    // And 一份已发布的表单（带 slug 提交的前置门，§16.5），drain 掉发布预建扇出。
     const slug = await publishWithMockDrained(mock);
 
-    // When 答题者带着合法 slug 向 /api/submit 提交一份作答
     const res = await postSubmit(makeSubmission(slug));
-
-    // Then 代理返回可辨识的错误响应
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.headers.get("content-type")).toContain("application/json");
     const raw = await res.clone().text();
-    const body = (await res.json()) as { error?: string };
-    expect(body.error).toBeTypeOf("string");
 
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok?: boolean; id?: string };
+    expect(body.ok).toBe(true);
+
+    const receipt = await waitForSyncSettled(body.id as string);
+    expect(await getSubmissionRow(body.id as string)).not.toBeNull();
+    expect(receipt.feishu_sync_error).toBeTypeOf("string");
     // Both stages were attempted (token OK, then write failed upstream).
     expect(mock.tokenCalls).toHaveLength(1);
     expect(mock.recordCalls).toHaveLength(1);
 
-    // And 错误响应里不包含换取到的 tenant_access_token
+    // And 整个响应不含 tenant token，且回执只含非敏感错误名。
     expect(raw).not.toContain(UPSTREAM_TENANT_TOKEN);
-    // And 错误响应里不包含 owner 的明文飞书 app secret
-    expect(raw).not.toContain(OWNER_FEISHU_APP_SECRET);
+    expect(receipt.feishu_sync_error).not.toContain(UPSTREAM_TENANT_TOKEN);
+    expect(receipt.feishu_sync_error).not.toContain(OWNER_FEISHU_APP_SECRET);
   });
 
   it("Scenario: 整个响应里不含任何明文凭据", async () => {
-    // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
-    // And 两段上游都将返回 code 为 0 (the success path still must not echo creds).
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: { status: 200, body: BITABLE_OK_BODY },
     });
-    // And 一份已发布的表单（带 slug 提交的前置门，§16.5），drain 掉发布预建扇出。
     const slug = await publishWithMockDrained(mock);
 
-    // When 答题者带着合法 slug 向 /api/submit 提交一份作答
     const res = await postSubmit(makeSubmission(slug));
-
-    // The route must actually serve the submit (200) — guards this leakage scan
-    // from passing vacuously against a 404 with an empty body before the route exists.
     expect(res.status).toBe(200);
 
-    // Scan the ENTIRE raw response (body + every header) for plaintext credentials.
     const raw = await res.clone().text();
-    // Then 整个响应里不包含 owner 的明文飞书 app secret
     expect(raw).not.toContain(OWNER_FEISHU_APP_SECRET);
-    // And 整个响应里不包含换取到的 tenant_access_token
     expect(raw).not.toContain(UPSTREAM_TENANT_TOKEN);
-
-    // Headers must not echo credentials either (SPEC §15.7).
     for (const [, value] of res.headers) {
       expect(value).not.toContain(OWNER_FEISHU_APP_SECRET);
       expect(value).not.toContain(UPSTREAM_TENANT_TOKEN);
     }
   });
+
+  // 注：submit.feature 的 §15.8 自愈场景（后台同步遇缺列建列重试 / 自愈仍失败仍 200 记错误 /
+  // 列已存在只写一次）由 submit-autocols-api.test.ts 在后台同步路径上完整 realize，本文件不重复。
 });

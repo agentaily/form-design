@@ -1,6 +1,14 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { applySchema, resetConfig, resetForms, testEnv, login, authHeader } from "./helpers";
+import {
+  applySchema,
+  resetConfig,
+  resetForms,
+  resetSubmissions,
+  testEnv,
+  login,
+  authHeader,
+} from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
@@ -351,6 +359,7 @@ describe("forms POST /api/forms + GET /api/forms/:slug (workers/features/form-pu
   beforeEach(async () => {
     await resetConfig();
     await resetForms();
+    await resetSubmissions();
     // owner-only setup (POST /api/config + POST /api/forms) needs a token. The
     // public reads (getForm / postSubmit) deliberately don't use it.
     token = await login();
@@ -462,7 +471,7 @@ describe("forms POST /api/forms + GET /api/forms/:slug (workers/features/form-pu
     expect(body.error).toBeTypeOf("string");
   });
 
-  it("Scenario: submit 带合法 slug 时正常走飞书写入", async () => {
+  it("Scenario: submit 带合法 slug 时正常落 D1 并后台同步飞书", async () => {
     // Given 一个已保存完整飞书凭据的 owner
     await configureOwner({ feishu: true });
     // And 上游飞书两段都将返回 code 为 0。先装 mock 再发布，drain 掉发布预建后台扇出（§16.8）。
@@ -478,14 +487,18 @@ describe("forms POST /api/forms + GET /api/forms/:slug (workers/features/form-pu
     // When 答题者带着该表单的 slug 向 /api/submit 提交一份作答
     const res = await postSubmit({ formSlug: slug, answers: SUBMISSION_ANSWERS });
 
-    // Then 响应状态码为 200
+    // Then 响应状态码为 200 + ok（架构转向后提交主存是 D1，返回 { ok, id }）。
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok?: boolean; recordId?: string };
-    // And 响应体的 ok 为真
+    const body = (await res.json()) as { ok?: boolean; id?: string };
     expect(body.ok).toBe(true);
-    expect(body.recordId).toBe(UPSTREAM_RECORD_ID);
+    expect(body.id).toBeTypeOf("string");
 
-    // And 写记录请求打到了 owner 配置的 app token 与 table id 对应的端点
+    // And 后台同步（best-effort）的写记录请求打到了 owner 配置的 app token / table id 端点。
+    // 飞书写入现在跑在 waitUntil 后台，故先 drain 至写记录落定再断言。
+    const deadline = Date.now() + 1500;
+    while (mock.recordCalls.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
     expect(mock.tokenCalls).toHaveLength(1);
     expect(mock.recordCalls).toHaveLength(1);
     expect(mock.recordCalls[0].url).toBe(BITABLE_URL);
