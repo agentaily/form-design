@@ -609,3 +609,86 @@ body {
   color: var(--text-body);
   word-break: break-word;
 }
+
+/* ───────────────────── 我的表单（PanelSheet 内的卡片网格 · PR-5）─────────────────────
+   外壳 PanelSheet / 区块 PageSection / 卡片 Card / Badge / Button / DropdownMenu 都是 DS
+   组件；下面只编排卡片内部的布局,所有值引用 DS token(带兜底)。 */
+.d-forms__loading {
+  display: flex;
+  justify-content: center;
+  padding: 40px 0;
+}
+.d-forms__cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+.d-formcard {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.d-formcard__head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.d-formcard__toprow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.d-formcard__title {
+  margin: 0;
+  font-family: var(--font-display, inherit);
+  font-size: var(--text-lg, 1.0625rem);
+  font-weight: 500;
+  line-height: var(--leading-snug, 1.3);
+  color: var(--text-body);
+  word-break: break-word;
+}
+.d-formcard__sub {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.d-formcard__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.d-formcard__subs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.d-formcard__link {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.d-formcard__link:hover {
+  color: var(--text-muted);
+  text-decoration: underline;
+}
+.d-formcard__foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.d-formcard__foot-sp {
+  flex: 1 1 auto;
+  min-width: 4px;
+}

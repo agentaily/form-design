@@ -88,15 +88,23 @@ function renderPublish(client, extra = {}) {
   );
 }
 
-// The row for a given form, located by its title; row-scoped queries hang off this.
+// The card for a given form, located by its title; card-scoped queries hang off this.
+// Since PR-5 the panel is a PanelSheet of form CARDS (was a Dialog of <li> rows); the
+// per-card lifecycle actions (关闭收集 / 重新发布 / 删除) moved into a `⋯` DropdownMenu.
 function rowFor(title) {
   const titleEl = screen.getByText(title);
-  // Walk up to the nearest list-item/row container, falling back to the dialog.
+  // Walk up to the nearest card/row container (data-slug is kept on the card).
   const row =
     titleEl.closest("li, tr, [role='listitem'], [data-slug]") ||
-    titleEl.closest(".d-formrow, [class*='row']") ||
+    titleEl.closest(".d-formcard, .d-formrow, [class*='card'], [class*='row']") ||
     titleEl.parentElement;
   return within(row || titleEl.parentElement);
+}
+
+// Open the card's `⋯` overflow menu so its menu items (关闭收集 / 重新发布 / 删除) mount,
+// then return a `screen`-scoped query for them (only one menu is ever open at a time).
+function openCardMenu(title) {
+  fireEvent.click(rowFor(title).getByRole("button", { name: /更多操作/ }));
 }
 
 describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
@@ -260,9 +268,9 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       expect(row.getByText(/已发布/)).toBeInTheDocument();
     });
     When("owner 点击关闭该表单", () => {
-      const row = rowFor("活动报名表");
-      // The toggle-to-closed action on the published row.
-      fireEvent.click(row.getByRole("button", { name: /关闭/ }));
+      // The toggle-to-closed action lives in the card's `⋯` menu (关闭收集).
+      openCardMenu("活动报名表");
+      fireEvent.click(screen.getByRole("menuitem", { name: /关闭收集/ }));
     });
     And("后端返回该表单状态已变为关闭", async () => {
       await waitFor(() => expect(client.updateForm).toHaveBeenCalled());
@@ -288,7 +296,9 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       expect(rowFor("已结束的问卷").getByText(/已关闭/)).toBeInTheDocument();
     });
     When("owner 点击重新开放该表单", () => {
-      fireEvent.click(rowFor("已结束的问卷").getByRole("button", { name: /开放|重新开放/ }));
+      // The reopen action lives in the card's `⋯` menu (重新发布).
+      openCardMenu("已结束的问卷");
+      fireEvent.click(screen.getByRole("menuitem", { name: /重新发布|重新开放|开放/ }));
     });
     And("后端返回该表单状态已变为已发布", async () => {
       await waitFor(() => expect(client.updateForm).toHaveBeenCalled());
@@ -311,7 +321,8 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await screen.findByText("活动报名表");
     });
     When("owner 点击删除某份表单", () => {
-      fireEvent.click(rowFor("活动报名表").getByRole("button", { name: /删除/ }));
+      openCardMenu("活动报名表");
+      fireEvent.click(screen.getByRole("menuitem", { name: /删除/ }));
     });
     Then("弹出删除确认提示", async () => {
       // A confirmation step appears (DS Dialog/Alert) before anything is deleted, and
@@ -330,7 +341,8 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     Given("owner 已对某份表单点击删除并看到确认提示", async () => {
       renderPanel(client);
       await screen.findByText("活动报名表");
-      fireEvent.click(rowFor("活动报名表").getByRole("button", { name: /删除/ }));
+      openCardMenu("活动报名表");
+      fireEvent.click(screen.getByRole("menuitem", { name: /删除/ }));
       await screen.findByText(/确认删除|确定删除|删除.*\?|无法撤销|不可恢复/);
     });
     When("owner 确认删除", () => {
@@ -357,7 +369,8 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     Given("owner 已对某份表单点击删除并看到确认提示", async () => {
       renderPanel(client);
       await screen.findByText("活动报名表");
-      fireEvent.click(rowFor("活动报名表").getByRole("button", { name: /删除/ }));
+      openCardMenu("活动报名表");
+      fireEvent.click(screen.getByRole("menuitem", { name: /删除/ }));
       await screen.findByText(/确认删除|确定删除|删除.*\?|无法撤销|不可恢复/);
     });
     When("owner 取消删除", () => {
