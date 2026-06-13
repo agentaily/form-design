@@ -244,28 +244,41 @@ async function sendResetEmail(env: Env, userId: string, to: string): Promise<voi
 // 提交响应、绝不让同步失败影响提交成功（与上面发信 best-effort 同一纪律）。
 
 /**
- * best-effort 同步一条**已落 D1**的提交到 owner 的飞书多维表格（§15）。在 waitUntil 后台跑。
+ * best-effort 同步一条**已落 D1**的提交到 form 所属 owner 的飞书多维表格（§15）。在 waitUntil
+ * 后台跑——**整条链路（含读 + 解密 owner 配置在内）都是 best-effort**：提交早已落 D1 主存、
+ * 200 已返回，这里任何环节出错都绝不影响那条已成功的提交。
  *
- * 流程复用 §15 / §16.8 既有写入路径：换 tenant_access_token → 列出目标表现有列真实类型
- * （listBitableColumns）→ answersToTypedFields 按列类型格式化 → writeRecordWithFieldEnsure
- * 写一条记录（缺列自愈建列、重试一次）。成功 → recordFeishuSync 回填 `feishu_record_id` +
- * `feishu_synced_at`；任意一步抛错 → recordFeishuSyncError 只记**非敏感**错误名（绝不含
- * tenant_access_token / app_secret，§15.7）。
+ * 流程：读 + 解密 form 所属 owner 的配置（**未配飞书 → 直接返回、回执留空、不算失败**）→ 换
+ * tenant_access_token → 列出目标表现有列真实类型（listBitableColumns）→ answersToTypedFields 按
+ * 列类型格式化 → writeRecordWithFieldEnsure 写一条记录（缺列自愈建列、重试一次）。成功 →
+ * recordFeishuSync 回填 `feishu_record_id` + `feishu_synced_at`；除「未配飞书」外的任意一步抛错 →
+ * recordFeishuSyncError 只记**非敏感**错误名（绝不含 tenant_access_token / app_secret，§15.7）。
  *
- * 所有异常都在内部吞掉（后台 promise 不该让 rejection 冒泡）；连回填 error 都失败也静默吞——
- * 主存那行早已写好，提交本身已成功，同步只是尽力而为的外部出口。
+ * **读 config 也在 try 内（F1 修复）：** owner 配置的解密在密文损坏 / CONFIG_KEY 错配时会抛——
+ * 它属于「飞书同步决策」、纯 best-effort，绝不能让它把已落库的提交回成 500。故它和后续同步一起
+ * 被这个 try/catch 包住、在后台跑，失败只记 sync_error。所有异常都在内部吞掉（后台 promise 不该
+ * 让 rejection 冒泡）；连回填 error 都失败也静默吞。
  */
 async function syncSubmissionToFeishu(
   env: Env,
   opts: {
     submissionId: string;
-    feishu: { appId: string; appSecret: string; appToken: string; tableId: string };
+    formOwnerId: string;
     answers: SubmitAnswer[];
     fieldDefs: Field[];
   },
 ): Promise<void> {
-  const { submissionId, feishu, answers, fieldDefs } = opts;
+  const { submissionId, formOwnerId, answers, fieldDefs } = opts;
   try {
+    // 读 + 解密 form 所属 owner 的配置（决定是否 / 用谁的凭据同步）。解密失败也在本 try 内吞，
+    // 绝不影响已落库的提交（F1 修复：原先此读在同步请求路径上，抛错会把 200 变 500）。
+    const key = await importConfigKey(env.CONFIG_KEY);
+    const owner = await getOwnerConfig(env.DB, key, formOwnerId);
+    // 未配飞书 → 不同步、回执留空（这不是失败，不记 sync_error）。
+    if (owner.feishu === null) {
+      return;
+    }
+    const feishu = owner.feishu;
     const token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
     const columnTypes = await listBitableColumns(token, feishu.appToken, feishu.tableId);
     const fields = answersToTypedFields(answers, columnTypes, fieldDefs);
@@ -823,22 +836,20 @@ app.post(
       return c.json({ error: "提交保存失败" }, 500);
     }
 
-    // 4) 飞书降为**可选外部同步**（§15 语义翻转）：读 form 所属 owner 的配置，**仅当配了飞书**
-    //    才经 waitUntil 在后台 best-effort 同步（换 token → 写记录 → 回填 record_id；失败只记
-    //    feishu_sync_error，绝不影响本响应）。**未配飞书不再 409**——照常落 D1、返回成功（飞书
-    //    从「唯一落库目标」降为可选出口）。同步绝不阻塞此响应。
-    const key = await importConfigKey(c.env.CONFIG_KEY);
-    const owner = await getOwnerConfig(c.env.DB, key, formOwnerId);
-    if (owner.feishu !== null) {
-      c.executionCtx.waitUntil(
-        syncSubmissionToFeishu(c.env, {
-          submissionId,
-          feishu: owner.feishu,
-          answers: request.answers,
-          fieldDefs: fieldsDef,
-        }),
-      );
-    }
+    // 4) 飞书降为**可选外部同步**（§15 语义翻转）：在后台（waitUntil）best-effort 同步——读
+    //    form 所属 owner 的配置、未配飞书则跳过、配了则换 token → 写记录 → 回填 record_id；失败
+    //    只记 feishu_sync_error，绝不影响本响应。**整条同步链路（含读 + 解密 config）都在
+    //    syncSubmissionToFeishu 的 try/catch 里**——故 config 解密失败也不会把已落库的提交回成
+    //    500（F1 修复）。**未配飞书不再 409**——照常落 D1、返回成功（飞书从「唯一落库目标」降为
+    //    可选出口）。同步绝不阻塞此响应。
+    c.executionCtx.waitUntil(
+      syncSubmissionToFeishu(c.env, {
+        submissionId,
+        formOwnerId,
+        answers: request.answers,
+        fieldDefs: fieldsDef,
+      }),
+    );
 
     // 5) Success → 提交已落 D1 主存。只回 ok + 新提交 id；绝不回 answers / token / 任何凭据。
     //    （飞书 record_id 现在是异步同步产物，不在此同步返回——数据后台投影飞书同步状态，§18。）
