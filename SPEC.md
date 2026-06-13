@@ -726,38 +726,40 @@ Worker 内部流程：
 
 ---
 
-## 15. 后端 · 提交写飞书多维表格 `POST /api/submit`（答题落库）
+## 15. 后端 · 提交落 D1 主存 `POST /api/submit`（飞书降为可选后台同步）
 
-> **与第 8/12/14 节的关系：** §8.2 描述「纯设计器」形态——答题数据写托管 BaaS。本节面向**发布型表单**形态（见项目记忆 `form-design-byok-feishu-architecture`）：答题者在公开填写页提交一份作答，Worker 用 owner **已保存的**飞书凭据（由 §12 加密、`getOwnerConfig` 解密得到）把这份作答写进 owner 自己的飞书多维表格。owner 的 `app_secret` / `tenant_access_token` 全程留在 Worker 内、永不出网。
-> §14「连接测试」只验自建应用凭据能否换到 `tenant_access_token`；本节在此之上**真正写一条记录**进 `app_token` / `table_id` 指向的那张表。
+> **架构转向（PR-2，本节已重写）：** 提交数据的**主存**从飞书翻转到 **D1**。答题者在公开填写页提交一份作答，Worker 校验门全过后**先把作答写进 D1 `submissions` 主存（必成）**、返回成功；飞书自此降为**可选外部同步出口**——仅当该 form 所属 owner 配了飞书，才在响应返回后于后台（`ctx.waitUntil`）**best-effort 同步**一条记录进 owner 的多维表格，同步成功回填 `feishu_record_id`、失败只记 `feishu_sync_error`，**绝不影响提交成功**。**语义翻转：未配飞书不再 409 拒收**，照常落 D1。
+> **已与产品负责人确认：干净起步、零回填**——生产为自测态（仅 owner 本人），D1 只从改版后开始存新提交，不写任何历史回填。
 >
-> **本节范围（第一刀，仅 Worker 端）：** `POST /api/submit` 的请求形状、写入流程（换 token → 新增记录）、`answers` → 飞书 `fields` 的映射约定、响应/错误的状态码与体、安全（token/secret 不出网）。
+> **与第 8/12/14 节的关系：** §8.2 描述「纯设计器」形态。本节面向**发布型表单**形态（见项目记忆 `form-design-byok-feishu-architecture`），但落库主存现在是 owner 控制面之外、平台自管的 D1（owner 仍可经飞书同步把数据导进自己的租户）。owner 的 `app_secret` / `tenant_access_token` 全程留在 Worker 内、永不出网。
 >
-> **不在本节：** 建多维表格本身、字段类型的精确映射（select 选项 id、日期/数字/附件等结构化转换）、防刷 / 限流 / 校验答案是否符合 schema、公开填写页前端。
+> **本节范围（仅 Worker 端）：** `POST /api/submit` 的请求形状、**写 D1 主存** + 飞书 best-effort 后台同步流程、`answers` → 飞书 `fields` 的映射约定（同步时用，§15.3）、响应/错误的状态码与体、安全（token/secret 不出网）。`submissions` 表定义见 migration `0005_submissions.sql`（`id` / `form_slug` / `owner_id` / `answers_json` / `created_at` + 飞书同步回执三列）。
 >
-> **多租户（§16.5 / §17.9 第 5 条）：** 本端点**公开**、没有「当前登录 owner」。`formSlug`（§16 在请求体加入）通过 `formExists` 后，须用 `getFormOwner(db, slug)` **反查该 form 所属 owner 的 `owner_id`**，再用该 `ownerId` 调 `getOwnerConfig(env.DB, key, ownerId)` 读**那个 owner**的飞书配置写入——陌生人匿名提交某 slug，落进这张表所属那个 owner 的飞书租户，而非固定 / 任意 owner。下面 §15.1 的裸流程是早期单 owner 形态，按 §16.5 / §20 已演化为「先 formExists / 状态门 / 必填校验 → getFormOwner → 读该 owner 飞书」。
+> **不在本节：** 字段类型的精确映射（在 §16.8）、防刷 / 限流、公开填写页前端、历史回填（已确认不做）。
+>
+> **多租户（§16.5 / §17.9 第 5 条）：** 本端点**公开**、没有「当前登录 owner」。`formSlug`（§16 在请求体加入）通过 `formExists` 后，须用 `getFormOwner(db, slug)` **反查该 form 所属 owner 的 `owner_id`**——它既是 D1 提交行的**隔离键**（`submissions.owner_id`），也用于读**那个 owner**的飞书配置决定是否同步。陌生人匿名提交某 slug，落进这张表所属那个 owner 名下的 D1，并（若配了飞书）同步进那个 owner 的飞书租户，而非固定 / 任意 owner。
 
 ### 15.1 端点职责
 
-`POST /api/submit` 吃一份答题者作答，读取 owner 已保存的飞书凭据，向飞书自建应用换一个 `tenant_access_token`，再用它向「多维表格新增记录」端点写一条记录，成功后回报新记录 id。
+`POST /api/submit` 吃一份答题者作答，校验门全过后**先把它写进 D1 `submissions` 主存**，返回新提交 id；随后**仅当 form 所属 owner 配了飞书**，在后台 best-effort 同步一条记录进其多维表格。
 
 Worker 内部流程：
 
 ```
-1) parseSubmitRequest(body)                          ← 校验请求体；空 answers → 400 不打上游
-   （§16.5/§20：formExists / 状态门 / 必填校验 在此之后、读 owner 配置之前）
-2) importConfigKey(env.CONFIG_KEY)                    ← AES-GCM 主密钥（§12.2）
-2.5) ownerId = getFormOwner(env.DB, formSlug)         ← 按 slug 反查 form 所属 owner（§16.5 / §17.9 第 5 条）
-3) getOwnerConfig(env.DB, key, ownerId)               ← 读**该 owner**那行 + 解密 → OwnerConfig 内部视图
-4) 若 owner.feishu === null（未配飞书）              → 409 { error }，不打上游
-5) getFeishuTenantToken(appId, appSecret)             ← 用该 owner 凭据换 tenant_access_token（§15.5 共享 helper）
-6) answersToFields(answers)                           ← answers 直转飞书 fields（§15.3 映射约定）
-7) writeToBitable(token, appToken, tableId, fields)   ← POST 多维表格新增记录
-8) 上游 code === 0    → 200 { ok:true, recordId }
-   换 token 失败 / 写记录 code≠0 / 非 2xx → 可辨识错误（状态码 + { error }），不泄漏 token/secret
+1) parseSubmitRequest(body)                          ← 校验请求体；空 answers → 400，不落 D1、不同步
+   （§16.5/§20：formExists / 状态门 / 必填校验 在此之后、写 D1 之前；拒收都不落 D1）
+2) ownerId = getFormOwner(env.DB, formSlug)          ← 按 slug 反查 form 所属 owner（隔离键，§16.5 / §17.9 第 5 条）
+3) insertSubmission(env.DB, {id, formSlug, ownerId,  ← **写 D1 主存（必成）**；id=crypto.randomUUID()，
+   answers, createdAt})                                createdAt=ISO-8601。D1 写失败 → 500（提交未落库）
+4) getOwnerConfig(env.DB, key, ownerId)              ← 读**该 owner**配置（判断是否配了飞书）
+5) 若 owner.feishu !== null（配了飞书）             → ctx.waitUntil(syncSubmissionToFeishu(...))：后台
+   换 token → listBitableColumns → answersToTypedFields → writeRecordWithFieldEnsure（缺列自愈，§15.8）
+   → 成功 recordFeishuSync 回填 feishu_record_id / 失败 recordFeishuSyncError 记非敏感错误名（§15.7）
+   若 owner.feishu === null（未配飞书）             → 跳过同步（**不再 409**）
+6) 200 { ok:true, id }                               ← 提交已落 D1 主存；id 是 submissions 主键
 ```
 
-> **解密后的明文 secret 只进换 token 请求；换来的 `tenant_access_token` 只进写记录请求的 `Authorization` 头**：两者都绝不写进返回给前端的任何字段、HTTP 头回显、或日志（§15.6）。
+> **同步是 best-effort 后台续体**：飞书同步的任何失败（换 token / 写记录 / 自愈仍失败 / 不可达）都被 `syncSubmissionToFeishu` 内部吞掉、只记 `feishu_sync_error`，**绝不让提交从 200 变成错误码**。解密后的明文 secret 只进换 token 请求、`tenant_access_token` 只进写记录请求的 `Authorization` 头；两者及 `feishu_sync_error` 都绝不含凭据片段（§15.7）。
 
 ### 15.2 请求契约（`SubmitRequest`）
 
@@ -790,11 +792,12 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 `200`，`application/json`：
 
 ```jsonc
-{ "ok": true, "recordId": "recXXXXXXXX" }
+{ "ok": true, "id": "<submission uuid>" }
 ```
 
-- `recordId` 取自飞书新增记录响应体的 `data.record.record_id`。
-- 成功响应里**只**含 `ok` 与 `recordId`，不回显写入的 `fields`、token、或任何 owner 凭据。
+- `id` 是 D1 `submissions` 主键（`crypto.randomUUID()`）——提交落主存的凭据。
+- **不再回 `recordId`**：飞书 `record_id` 现在是**异步后台同步**的产物，提交返回时尚未产生（且未配飞书时根本没有）。需要查飞书同步状态时看数据后台投影的 `feishu` 回执（§18.2）。
+- 成功响应里**只**含 `ok` 与 `id`，不回显写入的 `answers`、token、或任何 owner 凭据。
 
 ### 15.5 写入的上游端点与判定
 
@@ -813,17 +816,18 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 
 | 情况 | 状态码 | 响应体 | 说明 |
 |---|---|---|---|
-| owner 未配飞书（`owner.feishu === null`） | `409` | `{ "error": "owner 未配置飞书" }` | 不打上游；前端据此引导去「集成设置」（§12）|
-| `answers` 缺失 / 非数组 / 空 | `400` | `{ "error": "answers is required" }` | 不打上游 |
-| 单条 answer 形状非法（label 空 / value 类型错） | `400` | `{ "error": "..." }` | 不打上游 |
-| 请求体非合法 JSON | `400` | `{ "error": "invalid JSON body" }` | 不打上游 |
-| 换 `tenant_access_token` 失败（非 2xx / `code≠0` / 不可达） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `app_secret`；可携带飞书 `code` / HTTP 状态这类非敏感摘要 |
-| 写记录失败（非 2xx / `code≠0`，**含 §15.8 自愈后重试仍失败**） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `tenant_access_token` / `app_secret` |
-| 自愈建列失败（列出/新建字段上游非 2xx / `code≠0`，且非 `1254014` 幂等） | `502` | `{ "error": "..." }` | 同写记录失败：错误体绝不含 `tenant_access_token` / `app_secret`，可带飞书 `code` 摘要 |
+| `answers` 缺失 / 非数组 / 空 | `400` | `{ "error": "answers is required" }` | 不落 D1、不同步 |
+| 单条 answer 形状非法（label 空 / value 类型错） | `400` | `{ "error": "..." }` | 不落 D1、不同步 |
+| 请求体非合法 JSON | `400` | `{ "error": "invalid JSON body" }` | 不落 D1、不同步 |
+| `formSlug` 不存在 | `404` | `{ "error": "form not found" }` | 不落 D1、不同步（§16.5）|
+| 表单非 published（draft/closed，§20.2） | `409` | `{ "error": "表单未开放提交" }` | 状态门拒收，不落 D1、不同步 |
+| 必填字段缺失/空值（§20.3） | `400` | `{ "error": "..." }` | 校验拒收，不落 D1、不同步 |
+| **D1 主存写入失败**（真实服务端错误） | `500` | `{ "error": "提交保存失败" }` | 提交未落库；不暴露 D1 内部细节 |
 
+- **未配飞书不再 409**：照常落 D1、返回 `200`（语义翻转——飞书从「唯一落库目标」降为可选出口）。
+- **飞书同步失败不影响响应**：换 token / 写记录 / 自愈仍失败 / 不可达，都在后台被吞、只记 `feishu_sync_error`（§15.7），提交仍 `200`。先前 §15 的 `409 未配飞书` / `502 上游失败` 分支**均已移除**。
+- **`1254045`（列不存在）**：仍触发 §15.8 自愈（建列 + 重试一次），但现在跑在后台同步里；重试仍失败 → 记 `feishu_sync_error`（不再 `502`）。
 - 错误体一律 `application/json` 的 `{ error }`——前端先看状态码与 `ok` 决定成功 / 失败分支。
-- 上游错误状态码归一策略（透传上游码 vs 统一 `502`）由 implementer 在合约内决定，但**必须**满足：(a) 可辨识为「上游 / 配置出错」而非代理自身 bug；(b) 错误体绝不包含 `tenant_access_token` 或 `app_secret`。
-- **`1254045`（列不存在）不是终态错误**：它触发 §15.8 自愈（建列 + 重试一次），只有自愈后**重试仍失败**才落 `502`。
 
 ### 15.7 安全（token/secret 不出网）
 
@@ -834,16 +838,18 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 
 ### 15.8 飞书列自动创建（自愈）
 
+> **架构转向后（PR-2）：自愈现在跑在 best-effort 后台同步里**（`syncSubmissionToFeishu`，`ctx.waitUntil`），不在提交的主响应路径上。下面流程的「列出 / 建列 / 重试一次」机制**完全不变**，只是它的成功 / 失败不再决定 HTTP 状态码：提交早已落 D1 主存、返回 `200 { ok, id }`；自愈**重试仍失败 / 列出建列失败**只记 `feishu_sync_error`（§15.7），**不再 `502`**。下文中的「`200 { ok, recordId }`」「`502`」是早期同步形态的描述，按本注解映射为「后台同步成功回填 `feishu_record_id`」「后台同步失败记 `feishu_sync_error`」。
+
 写记录时，飞书要求 `fields` 里每个列名（= answer 的 `label`，§15.3）**在目标表里已存在**，否则整条写入失败并返回 `code 1254045` `FieldNameNotFound`（不产生记录，无副作用）。本期不要求 owner 预先在飞书表里手动建好与表单字段同名的列——后端在写入遇到这个特定码时**自愈**：补建缺失的列、再重试一次。
 
-**触发与流程（自愈建列仅在需要时发生；列出列改为每次提交都做，见 §16.8.4 方案 a）：**
+**触发与流程（自愈建列仅在需要时发生；列出列改为每次同步都做，见 §16.8.4 方案 a）：**
 
-1. 正常写记录（§15.5）。返回 `code === 0` → 照常 `200 { ok, recordId }`，**不触发**任何字段端点。
+1. 正常写记录（§15.5）。返回 `code === 0` → 同步成功、回填 `feishu_record_id`，**不触发**任何字段端点。
 2. 若返回 `code === 1254045`（列不存在）→ 进入自愈：
    a. `GET .../fields`（§15.5）列出该表现有列名集合。
    b. 对「本次要写入的列名（`field.label`）里、现有列名集合中没有的」每一个，`POST .../fields` 以**该字段 `type` 对应的飞书列类型**（`toBitableFieldType(field.type)`，单选 / 多选带 `property.options`，§16.8.2）新建——**不再一律文本**；建列遇 `code 1254014` `FieldNameDuplicated`（并发下别处刚建）视为**成功**（幂等）。
-   c. 列补齐后**重试一次**写记录。重试成功 → `200 { ok, recordId }`；重试仍失败 / 自愈过程中列出或建列失败 → `502 { error }`（§15.6，错误体不含凭据）。
-3. **只重试一次**：自愈是「补缺列」，不是无限循环；重试后仍 `1254045` 或其它 `code≠0` 一律落 `502`。
+   c. 列补齐后**重试一次**写记录。重试成功 → 回填 `feishu_record_id`；重试仍失败 / 自愈过程中列出或建列失败 → 记 `feishu_sync_error`（提交本身仍 `200`，§15.6）。
+3. **只重试一次**：自愈是「补缺列」，不是无限循环；重试后仍 `1254045` 或其它 `code≠0` 一律记 `feishu_sync_error`。
 
 **设计要点（合约约束，给 implementer）：**
 
@@ -963,8 +969,8 @@ Worker 内部流程（在 §15.1 的步骤前插入校验）：
 
 ```
 0) parseSubmitRequest(body)        ← 形状校验：formSlug 非空 + answers 非空数组（否则 400，不打上游）
-0.5) formExists(db, formSlug)      ← 查 forms 表：不存在 → 404 { error }，不打任何飞书上游
-1)..8) 同 §15.1（换 token → 映射 fields → 写记录 → 200 { ok, recordId }）
+0.5) formExists(db, formSlug)      ← 查 forms 表：不存在 → 404 { error }，不落 D1、不同步
+1)..  同 §15.1（架构转向后：getFormOwner → 写 D1 主存 → 仅配飞书时后台 best-effort 同步 → 200 { ok, id }）
 ```
 
 - **`formSlug` 缺失 / 空：** `400 { "error": "formSlug is required" }`，不打上游（与 §15.2 的形状级校验同级）。
@@ -982,7 +988,7 @@ Worker 内部流程（在 §15.1 的步骤前插入校验）：
 | `POST /api/submit` | 缺 `formSlug` / 为空 | `400` | `{ "error": "formSlug is required" }`（不打上游） |
 | `POST /api/submit` | `formSlug` 对应 form 不存在 | `404` | `{ "error": "..." }`（不打飞书上游） |
 
-- 错误体一律 `application/json` 的 `{ error }`，与成功体（`201 { slug }` / `200 PublicForm` / §15 的 `200 { ok, recordId }`）区分。
+- 错误体一律 `application/json` 的 `{ error }`，与成功体（`201 { slug }` / `200 PublicForm` / §15 的 `200 { ok, id }`）区分。
 
 ### 16.7 D1 表结构（`workers/migrations/0001_initial_schema.sql`）
 
@@ -1062,7 +1068,7 @@ owner **未配飞书 / 飞书连不上 / token 换取失败 / 建列失败** →
 #### 16.8.6 可观察契约
 
 - 发布仍 `201 { slug }`、编辑仍 `200`——**无论**飞书有没有配、预建成没成。
-- 提交成功语义不变：`200 { ok, recordId }`（§15.4）；类型化只改写入飞书的值形态，不改对外响应。
+- 提交成功语义（架构转向后）：`200 { ok, id }`（§15.4）；类型化只改**后台同步**写入飞书的值形态，不改对外响应。
 - 凭据（`app_secret` / `tenant_access_token`）绝不进任何响应 / HTTP 头 / 日志。
 
 #### 16.8.7 改字段标签 → 同步飞书列改名（best-effort，v1 只改名）
@@ -1335,15 +1341,15 @@ CREATE TABLE IF NOT EXISTS users (
 
 ## 18. 后端 · 数据后台 · 提交列表 `GET /api/forms/:slug/submissions`
 
-> **与第 15/16/17 节的关系：** §15 把答题者的作答写进 owner 的飞书多维表格，§16 让 owner 发布表单 / 答题者公开填写，§17 给 owner-only 端点加了鉴权。本节补上 owner 视角的「**读回**」：owner 登录后，在数据后台按 `slug` 拉取这份表单已收集到的提交列表——从 owner 自己的飞书多维表格里读记录，而非另存一份。
+> **架构转向（PR-2，本节已重写）：从 D1 主存读回。** §15 现在把作答写进 **D1 `submissions` 主存**（飞书降为可选后台同步）。本节相应翻转：owner 登录后在数据后台按 `slug` 拉提交列表，**从 D1 按 `(owner_id, form_slug)` SELECT**，而非读飞书。**不再读飞书**——故去掉了「换 token / 读记录上游 / 502」与「未配飞书 → 409」分支：D1 读不依赖飞书配置，未配飞书也照常返回已落库的提交。
 >
-> **本节范围（仅 Worker 端）：** `GET /api/forms/:slug/submissions`（owner-only）的契约、读飞书记录的上游流程、响应形状（提交列表 + count）、错误码、安全（不返回 owner 凭据）。
+> **本节范围（仅 Worker 端）：** `GET /api/forms/:slug/submissions`（owner-only）的契约、**从 D1 读**的流程、响应形状（提交列表 + count，含飞书同步回执投影）、错误码、安全（不返回 owner 凭据 / owner_id）。
 >
-> **不在本节：** 分页 / 游标（MVP 一次性拉，或拉上游一页即可，见 §18.4）、筛选 / 排序 / 搜索、字段级聚合 / 图表统计、导出 CSV、删除 / 编辑提交。这些留后续 feature。
+> **不在本节：** 分页 / 游标（MVP 一次性拉，见 §18.4）、筛选 / 排序 / 搜索、字段级聚合 / 图表统计、导出 CSV、删除 / 编辑提交。这些留后续 feature。
 >
-> **多租户 + 横向越权（§17.9 第 4 条）：** 本端点 owner-only。`formExists` 必须升级为**归属校验**：该 slug 须属于当前登录 owner（`WHERE slug=? AND owner_id=?`）——跨 owner（slug 存在但不归当前 owner）/ 不存在均 → **404**（同码、不暴露存在性），不打任何飞书上游。归属通过后读**当前 owner 自己**的飞书配置（`getOwnerConfig(db, key, ownerId)`，`ownerId=c.get('session').sub`）去拉记录，绝不用别的 owner 的飞书凭据。
+> **多租户 + 横向越权（§17.9 第 4 条）：** 本端点 owner-only。**归属校验**：该 slug 须属于当前登录 owner（`getFormOwner(db,slug) === ownerId`）——跨 owner / 不存在均 → **404**（同码、不暴露存在性）。归属通过后 `listSubmissions(db, ownerId, slug)` 按 `(owner_id, form_slug)` 从 D1 读（owner 隔离照旧），绝不返回别的 owner 的提交。
 >
-> **第 6 步前端接入（已落桩）：** owner 侧「数据后台」是「我的表单」(`src/forms-panel.jsx`) 每份表单行下的「看提交」入口——打开后按该 `slug` 调本端点。前端契约见 `src/core/submissionsClient.ts`（`listSubmissions(slug)` + `Submission` / `SubmissionsResult`，**owner-only**，复用 `apiClient` 的 Bearer 注入 `auth:true`），视图见 `src/submissions-view.jsx`（`SubmissionsView`）。空态友好、`401` → `onNeedLogin` 引导先登录（复用 §17 模式）、`409` 未配飞书 → 引导去集成设置。
+> **第 6 步前端接入（已落桩）：** owner 侧「数据后台」是「我的表单」(`src/forms-panel.jsx`) 每份表单行下的「看提交」入口。前端契约 `src/core/submissionsClient.ts` 的 `Submission` 类型**待 PR-6 跟进对齐 D1 投影形状**（`{ id, answers, createdAt, feishu }`，见 §18.2）——本根只翻转后端，前端面板 / 视图属 PR-6。`401` → `onNeedLogin` 引导先登录（复用 §17 模式）。
 
 ### 18.1 端点职责
 
@@ -1351,18 +1357,13 @@ CREATE TABLE IF NOT EXISTS users (
 
 ```
 0) requireAuth                       ← 缺 / 坏 token → 401（§17.6），不进入下面；ownerId = c.get('session').sub
-0.5) 归属校验（§17.9 第 4 条）        ← 该 slug 属于当前 owner？（WHERE slug=? AND owner_id=?）
-                                        跨 owner / 不存在 → 404 { error }（同码、不暴露存在性），不打飞书上游
-1) importConfigKey(env.CONFIG_KEY)   ← AES-GCM 主密钥（§12.2）
-2) getOwnerConfig(env.DB, key, ownerId) ← 读**当前 owner**那行 + 解密 → OwnerConfig 内部视图
-3) 若 owner.feishu === null（未配飞书）→ 409 { error }，不打上游
-4) getFeishuTenantToken(appId, appSecret)        ← 换 tenant_access_token（§15.5 共享 helper）
-5) listSubmissions(token, appToken, tableId)     ← GET 多维表格记录列表（§18.3）
-6) 上游 code === 0 → 200 { submissions: [...], count }
-   换 token 失败 / 读记录 code≠0 / 非 2xx → 502 { error }，不泄漏 token/secret
+0.5) 归属校验（§17.9 第 4 条）        ← getFormOwner(db, slug) === ownerId？
+                                        跨 owner / 不存在 → 404 { error }（同码、不暴露存在性）
+1) listSubmissions(env.DB, ownerId, slug)  ← **从 D1 主存** SELECT WHERE owner_id=? AND form_slug=?
+2) 200 { submissions: [...], count }       ← 空表 → { submissions: [], count: 0 }（正常态）
 ```
 
-> 复用 §15 的凭据解密 + 换 token 路径；区别在 0.5 的**归属校验**（按 owner 过滤、跨 owner → 404）与第 5 步从「写一条记录」换成「读记录列表」。归属校验可用一个带 owner 维度的探针（如 `getFormOwner(db,slug) === ownerId`，或 `SELECT 1 ... WHERE slug=? AND owner_id=?`），由实现在合约内定。
+> 比早期形态简单得多：不再 `importConfigKey` / `getOwnerConfig` / 换 token / 打飞书上游。归属校验后一次 D1 SELECT 即得结果，**未配飞书也照常返回**（D1 读与飞书配置无关）。
 
 ### 18.2 响应契约
 
@@ -1372,50 +1373,50 @@ CREATE TABLE IF NOT EXISTS users (
 {
   "submissions": [
     {
-      "recordId": "recXXXXXXXX",        // 上游 record_id
-      "fields": { "姓名": "张三", "兴趣": ["阅读", "运动"] },  // 上游记录的 fields，原样投影
-      "createdTime": 1700000000000       // 可选：上游 created_time（毫秒时间戳），无则省略
+      "id": "<submission uuid>",                 // D1 submissions 主键
+      "answers": [                               // 反序列化自 answers_json（§15.2 的 SubmitAnswer[]）
+        { "label": "姓名", "value": "张三" },
+        { "label": "兴趣", "value": ["阅读", "运动"] }
+      ],
+      "createdAt": "2026-06-14T00:00:00.000Z",   // ISO-8601 落库时刻
+      "feishu": {                                // 飞书 best-effort 同步回执（§15）
+        "recordId": "recXXXXXXXX",               // 同步成功的飞书 record_id；未同步 / 未配飞书 → null
+        "syncedAt": "2026-06-14T00:00:01.000Z",  // 同步成功时刻；未同步 → null
+        "error": null                            // 同步失败的非敏感错误摘要；没失败过 → null
+      }
     }
   ],
-  "count": 1                            // submissions 的条数（本期等于本次返回的记录数）
+  "count": 1                                     // submissions 的条数（本期不分页，等于本批条数）
 }
 ```
 
-- `submissions`：把上游 `data.items` 里每条记录映射成简洁形状 `{ recordId, fields, createdTime? }`。空表 → `[]`（正常态，不是错误）。
-- `count`：`submissions.length`（本期不分页，等于这一批的条数；将来分页时可换成上游 `total`）。
-- **响应里绝不含**任何 owner 凭据（DeepSeek key / 飞书 app_secret / app_token / table_id）、`tenant_access_token`、或 `owner_id`——只回提交数据本身（§18.5）。
+- `submissions`：D1 里该 `(owner_id, form_slug)` 的每行映射成 `{ id, answers, createdAt, feishu }`，按 `created_at` 倒序（最新在前）。空 → `[]`（正常态，不是错误）。
+- `count`：`submissions.length`。
+- **响应里绝不含**任何 owner 凭据（DeepSeek key / 飞书 app_secret / app_token / table_id）、`tenant_access_token`、或 `owner_id`——只回提交数据本身 + 飞书同步**状态**（`feishu_sync_error` 仅非敏感摘要）（§18.6）。
 
-### 18.3 读记录的上游端点与判定
+### 18.3 读提交的数据源（D1，不再打飞书上游）
 
-| 步骤 | 上游端点 | 凭据用法 | 判定 |
-|---|---|---|---|
-| 换 token | `POST .../auth/v3/tenant_access_token/internal` | body `{ app_id, app_secret }` | 同 §15.5：`200` 且 `code === 0` → 拿到 token |
-| 读记录 | `GET https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records` | `Authorization: Bearer <tenant_access_token>` | `2xx` 且 body `code === 0` → 取 `data.items`（每项 `{ record_id, fields, created_time? }`）；否则视为读记录失败 |
-
-- 读记录复用与 §15 写记录**同一个** URL 模板（`FEISHU_BITABLE_RECORDS_URL`，`submit.ts` 已导出），区别只是 method 为 `GET`、无 body。
-- 同 §15.5：飞书 HTTP `200` 也可能带非 0 业务码，判定**必须**看 body 的 `code`，复用 `FEISHU_OK_CODE`。
+**架构转向后本端点不再打任何飞书上游**——读提交是一次 D1 SELECT（`listSubmissions(db, ownerId, slug)`，`WHERE owner_id=? AND form_slug=? ORDER BY created_at DESC`）。早期「换 token + GET 多维表格记录列表」两步上游调用**均已移除**。飞书只在 §15 的 submit 后台同步里被写；数据后台只读 D1 主存。
 
 ### 18.4 分页（MVP 从简）
 
-- MVP **不分页**：要么一次性拉（上游默认页大小通常够小数据量用），要么只拉上游第一页即可。是否携带 `page_size` / 跟 `page_token` 翻页由 implementer 在合约内定，但本期对外契约**不暴露**分页参数 / 游标——`count` 反映本次返回的条数即可。
-- 后续接分页时，可在响应里加 `hasMore` / `pageToken`，`count` 换成上游 `total`；本期形状向前兼容。
+- MVP **不分页**：D1 一次性 SELECT 该 `(owner_id, form_slug)` 的全部提交（自测态数据量小够用）。本期对外契约**不暴露**分页参数 / 游标——`count` 反映本次返回的条数即可。
+- 后续接分页时，可在响应里加 `hasMore` / `cursor`，按 `created_at` / `rowid` 游标翻页；本期形状向前兼容。
 
 ### 18.5 错误响应（状态码 + `{ error }`）
 
 | 情况 | 状态码 | 响应体 | 说明 |
 |---|---|---|---|
 | 缺 / 坏 / 过期 token | `401` | `{ "error": "..." }` | auth 中间件拦截（§17.6），不进入 handler |
-| `slug` 不存在 **或** 存在但不属于当前 owner（跨 owner） | `404` | `{ "error": "..." }` | 同码、**不暴露存在性**（§17.9 第 4 条）；不打飞书上游 |
-| owner 未配飞书（当前 owner 的 `owner.feishu === null`） | `409` | `{ "error": "owner 未配置飞书" }` | 不打上游；引导去集成设置（§12） |
-| 换 token 失败 / 读记录失败（非 2xx / `code≠0` / 不可达） | `502` | `{ "error": "..." }` | 错误体**绝不**含 `app_secret` / `tenant_access_token`；可带飞书 `code` / HTTP 状态这类非敏感摘要 |
+| `slug` 不存在 **或** 存在但不属于当前 owner（跨 owner） | `404` | `{ "error": "form not found" }` | 同码、**不暴露存在性**（§17.9 第 4 条）|
 
+- **不再有 `409 未配飞书` / `502 上游失败`**：D1 读不依赖飞书配置、不打任何飞书上游，故这两类错误在本端点不复存在（未配飞书也照常 `200` 返回提交）。
 - 错误体一律 `application/json` 的 `{ error }`。
-- 上游错误状态码归一策略同 §15.6：可辨识为「上游 / 配置出错」、且错误体绝不含凭据。
 
 ### 18.6 安全（不返回 owner 凭据）
 
-- 与 §15.7 同源的边界：明文 `app_secret` 只进换 token 请求体；`tenant_access_token` 只进读记录请求的 `Authorization` 头；二者绝不进响应、HTTP 头回显、日志。
-- 数据后台只投影**提交数据**（`recordId` / `fields` / `createdTime`），不回 owner 的任何凭据 / 配置，也不回 `app_token` / `table_id`（它们是「数据存在哪」的私有信息）。
+- 数据后台只投影**提交数据**（`id` / `answers` / `createdAt`）+ 飞书同步**状态**（`feishu.recordId` / `feishu.syncedAt` / `feishu.error`），不回 owner 的任何凭据 / 配置（DeepSeek key / `app_secret` / `app_token` / `table_id` 都不在 `submissions` 表），也不回 `owner_id`。
+- `feishu.error` 仅含**非敏感**错误摘要（如错误名），绝不含 `tenant_access_token` / `app_secret`（与 §15.7 同源）。
 - 这是 owner-only 端点（§17 保护），陌生人无 token 拿不到任何提交数据。
 
 ---
@@ -1484,10 +1485,10 @@ CREATE TABLE IF NOT EXISTS users (
 0.6) getFormStatus(db, formSlug)       ← 【新】读该 form 的 status；非 'published'（draft/closed）→ 409，不打上游
 0.7) getFormFields(db, formSlug)       ← 【新】读该 form 的 fields（schema 真相）
 0.8) validateAnswers(fields, answers)  ← 【新】按 fields 校验 answers：必填项缺失/空值 → 400，不打上游
-1)..  同 §15.1（读+解密 owner 配置 → 未配飞书 409 → 换 token → 映射 fields → 写记录 → 200 { ok, recordId }）
+1)..  同 §15.1（架构转向后：getFormOwner → **写 D1 主存** → 仅配飞书时后台 best-effort 同步 → 200 { ok, id }）
 ```
 
-> 0.6 / 0.7 可合并成一次 D1 读（一条 `SELECT status, schema_json ...`），是否合并由实现定；对外契约只看「状态非 published 拒收」与「必填缺失拒收」两个可观察行为。两步都在飞书上游之前，确保脏提交**绝不**写进 owner 的表。
+> 0.6 / 0.7 可合并成一次 D1 读（一条 `SELECT status, schema_json ...`），是否合并由实现定；对外契约只看「状态非 published 拒收」与「必填缺失拒收」两个可观察行为。两道门都在**写 D1 之前**，确保脏提交**绝不**落库（也就绝不被后台同步到飞书）。
 
 ### 20.2 表单状态门
 
@@ -1513,16 +1514,15 @@ CREATE TABLE IF NOT EXISTS users (
 | `answers` 缺失 / 非数组 / 空 / 单条形状非法 | `400` | `{ "error": "..." }` | §15.2 / §16.5，不变 |
 | `formSlug` 对应 form 不存在 | `404` | `{ "error": "..." }` | §16.5，不变 |
 | **form 状态非 `published`（draft/closed）** | `409` | `{ "error": "..." }` | 【新】不读 owner 配置、不打飞书上游 |
-| **answers 漏填必填字段（或可选的类型/选项校验失败）** | `400` | `{ "error": "..." }` | 【新】不打飞书上游 |
-| owner 未配飞书 | `409` | `{ "error": "owner 未配置飞书" }` | §15.6，不变（注意与「状态门 409」语义不同，error 文案区分）|
-| 换 token / 写记录失败 | `502` | `{ "error": "..." }` | §15.6，不变 |
+| **answers 漏填必填字段（或可选的类型/选项校验失败）** | `400` | `{ "error": "..." }` | 【新】不落 D1、不同步 |
+| D1 主存写入失败 | `500` | `{ "error": "提交保存失败" }` | 架构转向后：主存写失败属真实服务端错误（§15.6）|
 
-- 两个 `409`（状态门 vs 未配飞书）语义不同，靠 `error` 文案区分；前端据文案 / 上下文决定提示。
+- **架构转向后（PR-2）：状态门的 `409` 是 submit 唯一的 `409`**——「未配飞书 → 409」与「换 token / 写记录 → 502」分支已随 §15 主存翻转移除（未配飞书照常落 D1；飞书同步失败只记 `feishu_sync_error`，不改响应）。
 - 校验失败的 `{ error }` 可携带「哪个字段缺失」这类**非敏感**信息供答题者修正，但**绝不**含 owner 凭据。
 
 ### 20.5 对既有 submit 行为的影响（向后兼容）
 
-- 既有「正常提交」用例：表单是 §16 `POST /api/forms` 发布出来的（发布即 `published`，§16.7），故天然过状态门；只要这些用例的 `answers` 满足表单的必填字段，行为不变（仍 `200 { ok, recordId }`）。
+- 既有「正常提交」用例：表单是 §16 `POST /api/forms` 发布出来的（发布即 `published`，§16.7），故天然过状态门；只要这些用例的 `answers` 满足表单的必填字段，行为不变（架构转向后仍 `200`，响应体为 `{ ok, id }`）。
 - 既有用例若用了「带必填字段但 answers 不含该字段」的构造，会因新必填校验从 `200` 变 `400`——这是**预期的连锁**，需在 outer-tester 侧对齐（见交付里的「现有测试连锁清单」）。
 
 ---

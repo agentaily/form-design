@@ -1,6 +1,14 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { applySchema, resetConfig, resetForms, login, authHeader } from "./helpers";
+import {
+  applySchema,
+  resetConfig,
+  resetForms,
+  resetSubmissions,
+  testEnv,
+  login,
+  authHeader,
+} from "./helpers";
 import {
   FEISHU_BITABLE_RECORDS_URL,
   FEISHU_BITABLE_FIELDS_URL,
@@ -21,12 +29,16 @@ import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 // 缺列自愈路径上 list-fields 会出现 **两次**（稳态写值前 + 自愈补列前）。
 // 此外，发布作为 setup（POST /api/forms，owner 已配飞书）会在 waitUntil 后台触发
 // preCreateBitableColumnsBestEffort（§16.8），打到同一 mock；setup 后 drain + reset 掉这股扇出。
-// This file realizes every §15.8 scenario of workers/features/submit.feature:
-//   1. 写记录遇列不存在 → 补建缺失列 → 重试成功 (200 + recordId)，list-fields 两次
+// 架构转向（PR-2）：自愈现在跑在 best-effort **后台同步**里（提交先落 D1、200 返回后于
+// waitUntil 同步飞书）。所以每个场景：submit → 200 + 提交 id（同步可见）→ waitForSyncSettled
+// 轮询 D1 回执（record_id 成功 / sync_error 失败）落定 → 再断言 mock 捕获的 token/record/field
+// 调用计数（计数本身不变，只是从同步路径搬到后台）。
+// This file realizes every §15.8 scenario of workers/features/submit.feature（后台同步版）:
+//   1. 后台同步遇列不存在 → 补建缺失列 → 重试成功（回填 record id），list-fields 两次
 //   2. 自愈只建缺失的列（已存在的列不重复建）
 //   3. 列已存在（稳态）→ 列出一次列类型但不建任何列
-//   4. 建列遇 FieldNameDuplicated (1254014) → 幂等成功 → 200
-//   5. 自愈后重试仍失败 → 502，响应不含 token / app_secret
+//   4. 建列遇 FieldNameDuplicated (1254014) → 幂等成功 → 回填 record id
+//   5. 自愈后重试仍失败 → 提交仍 200（D1 主存已写）+ 记 feishu_sync_error，不泄漏 token / app_secret
 //
 // Contract: SPEC.md §15.8、§16.8.
 
@@ -284,6 +296,47 @@ async function drainBackgroundPreCreate(mock: FeishuMock): Promise<void> {
   await new Promise((r) => setTimeout(r, 25));
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+interface Receipt {
+  feishu_record_id: string | null;
+  feishu_synced_at: string | null;
+  feishu_sync_error: string | null;
+}
+
+async function getReceipt(id: string): Promise<Receipt | null> {
+  return testEnv.DB.prepare(
+    "SELECT feishu_record_id, feishu_synced_at, feishu_sync_error FROM submissions WHERE id = ?",
+  )
+    .bind(id)
+    .first<Receipt>();
+}
+
+/**
+ * §15.8 自愈现在跑在 best-effort 后台同步里（响应返回后于 waitUntil）。Poll D1 until the
+ * submission's sync has SETTLED — record_id (success) OR sync_error (failure) is set —
+ * so tests can then assert on the mock's captured token/record/field calls. ~1.5s deadline.
+ */
+async function waitForSyncSettled(id: string): Promise<Receipt> {
+  const deadline = Date.now() + 1500;
+  let row = await getReceipt(id);
+  while (
+    Date.now() < deadline &&
+    (row === null || (row.feishu_record_id === null && row.feishu_sync_error === null))
+  ) {
+    await sleep(5);
+    row = await getReceipt(id);
+  }
+  return row ?? { feishu_record_id: null, feishu_synced_at: null, feishu_sync_error: null };
+}
+
+async function countSubmissions(): Promise<number> {
+  const r = await testEnv.DB.prepare("SELECT COUNT(*) AS n FROM submissions").first<{
+    n: number;
+  }>();
+  return r?.n ?? 0;
+}
+
 // Owner-only setup token (§17.1) for the POST /api/config + POST /api/forms calls.
 let token: string;
 
@@ -363,8 +416,19 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
   beforeEach(async () => {
     await resetConfig();
     await resetForms();
+    await resetSubmissions();
     token = await login();
   });
+
+  /** Submit + assert 200, return the new submission id from the { ok, id } body. */
+  async function submitGetId(body: unknown): Promise<string> {
+    const res = await postSubmit(body);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { ok?: boolean; id?: string };
+    expect(json.ok).toBe(true);
+    expect(json.id).toBeTypeOf("string");
+    return json.id as string;
+  }
 
   afterEach(() => {
     mock?.restore();
@@ -392,18 +456,16 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     mock.resetCalls();
 
     // When 答题者带着该表单的 slug 提交作答（两列都缺）
-    const res = await postSubmit(
+    const id = await submitGetId(
       submission(slug, [
         { label: "姓名", value: "张三" },
         { label: "城市", value: "北京" },
       ]),
     );
 
-    // Then 响应状态码为 200，ok 为真，带 recordId
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok?: boolean; recordId?: string };
-    expect(body.ok).toBe(true);
-    expect(body.recordId).toBe(UPSTREAM_RECORD_ID);
+    // Then 提交先落 D1（200 + id，上一步已断言）；自愈在后台同步里发生，drain 后回填 record id。
+    const receipt = await waitForSyncSettled(id);
+    expect(receipt.feishu_record_id).toBe(UPSTREAM_RECORD_ID);
 
     // And 列出过该表的现有字段两次（§15.8 升级：稳态写值前的 listBitableColumns 一次 +
     // 自愈补列前的列出一次）——都是只带 token 的 GET（§15.7）。
@@ -449,15 +511,15 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     mock.resetCalls();
 
     // When 提交含一个已存在列（姓名）与一个缺失列（城市）的作答
-    const res = await postSubmit(
+    const id = await submitGetId(
       submission(slug, [
         { label: "姓名", value: "张三" },
         { label: "城市", value: "北京" },
       ]),
     );
 
-    // Then 200。
-    expect(res.status).toBe(200);
+    // Then 200（已断言）；drain 后台同步（自愈）至落定。
+    await waitForSyncSettled(id);
 
     // And 后端只对缺失的「城市」发起新建字段请求，未对已存在的「姓名」建列。§15.8 升级后
     // 列出共两次（稳态写值前 + 自愈补列前），但建列只发生一次（只对缺的「城市」）。
@@ -489,13 +551,11 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     mock.resetCalls();
 
     // When 提交一份作答。
-    const res = await postSubmit(submission(slug, [{ label: "姓名", value: "张三" }]));
+    const id = await submitGetId(submission(slug, [{ label: "姓名", value: "张三" }]));
 
-    // Then 200。
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok?: boolean; recordId?: string };
-    expect(body.ok).toBe(true);
-    expect(body.recordId).toBe(UPSTREAM_RECORD_ID);
+    // Then 200（已断言）；后台同步成功后回填 record id。
+    const receipt = await waitForSyncSettled(id);
+    expect(receipt.feishu_record_id).toBe(UPSTREAM_RECORD_ID);
 
     // And 稳态写值前列出列类型恰好一次（§15.8 升级），但**不**触发任何建列（列已存在）。
     expect(mock.fieldsListCalls).toHaveLength(1);
@@ -525,24 +585,23 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     mock.resetCalls();
 
     // When 提交一份作答。
-    const res = await postSubmit(submission(slug, [{ label: "姓名", value: "张三" }]));
+    const id = await submitGetId(submission(slug, [{ label: "姓名", value: "张三" }]));
 
-    // Then 200 + ok 为真 —— 1254014 当幂等成功，自愈照常走到重试写入。
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok?: boolean };
-    expect(body.ok).toBe(true);
+    // Then 200（已断言）—— 1254014 当幂等成功，后台同步照常走到重试写入并回填 record id。
+    const receipt = await waitForSyncSettled(id);
+    expect(receipt.feishu_record_id).toBe(UPSTREAM_RECORD_ID);
     // §15.8 升级：列出共两次（稳态写值前 + 自愈补列前）；建列一次（命中 1254014 当幂等成功）。
     expect(mock.fieldsListCalls).toHaveLength(2);
     expect(mock.fieldCreateCalls).toHaveLength(1);
     expect(mock.recordCalls).toHaveLength(2);
   });
 
-  it("Scenario: 自愈后重试写入仍失败时返回 502 且不泄漏凭据", async () => {
+  it("Scenario: 自愈后重试同步仍失败时提交仍成功并记同步错误", async () => {
     // Given owner + 表单。
     await configureOwner();
 
     // And 两次写记录都返回 1254045（补列后仍缺，或别的原因）；列出 / 建列都成功。
-    // record 只配 2 个回复：若路由发起第 3 次写，mock 会 THROW（证明只重试一次）。
+    // record 只配 2 个回复：若后台同步发起第 3 次写，mock 会 THROW（证明只重试一次）。
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
       record: [
@@ -559,22 +618,26 @@ describe("submit auto-create-columns POST /api/submit (workers/features/submit.f
     // When 提交一份作答。
     const res = await postSubmit(submission(slug, [{ label: "姓名", value: "张三" }]));
 
-    // Then 502（自愈后重试仍失败是终态写失败，§15.6）。
-    expect(res.status).toBe(502);
-    expect(res.headers.get("content-type")).toContain("application/json");
+    // Then 提交仍成功（D1 主存已写）——架构转向后，飞书同步失败不再让提交 502（语义翻转）。
+    expect(res.status).toBe(200);
     const raw = await res.clone().text();
-    const body = (await res.json()) as { error?: string };
-    expect(body.error).toBeTypeOf("string");
+    const body = (await res.json()) as { ok?: boolean; id?: string };
+    expect(body.ok).toBe(true);
+    const id = body.id as string;
+
+    // And 后台同步重试仍失败 → 记 feishu_sync_error、无 record id；提交确实在 D1。
+    const receipt = await waitForSyncSettled(id);
+    expect(receipt.feishu_sync_error).toBeTypeOf("string");
+    expect(receipt.feishu_record_id).toBeNull();
+    expect(await countSubmissions()).toBe(1);
 
     // And 只重试一次：record 恰好两次（若有第 3 次 mock 已抛错）。
     expect(mock.recordCalls).toHaveLength(2);
 
-    // And 错误响应里不含 owner 的明文 app secret，也不含换取到的 tenant_access_token（§15.7）。
+    // And 响应与同步回执都不含 owner 的明文 app secret / 换取到的 tenant_access_token（§15.7）。
     expect(raw).not.toContain(OWNER_FEISHU_APP_SECRET);
     expect(raw).not.toContain(UPSTREAM_TENANT_TOKEN);
-    for (const [, value] of res.headers) {
-      expect(value).not.toContain(OWNER_FEISHU_APP_SECRET);
-      expect(value).not.toContain(UPSTREAM_TENANT_TOKEN);
-    }
+    expect(receipt.feishu_sync_error).not.toContain(OWNER_FEISHU_APP_SECRET);
+    expect(receipt.feishu_sync_error).not.toContain(UPSTREAM_TENANT_TOKEN);
   });
 });

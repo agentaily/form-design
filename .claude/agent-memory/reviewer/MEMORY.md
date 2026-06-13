@@ -1,0 +1,1 @@
+- [PR-2 D1 submissions turn + frontend handoff](project_d1-submissions-architecture-turn.md) — submit 主存翻 D1，飞书降可选同步；wire shape 改了但前端故意没改，留给 PR-6

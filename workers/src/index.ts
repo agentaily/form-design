@@ -18,17 +18,16 @@ import {
   type ChatRequest,
 } from "./chat";
 import { testDeepSeek, testFeishu, type ConnProbe, type ConnTestResult } from "./conntest";
-import { getFeishuTenantToken, FeishuTokenError } from "./feishu";
+import { getFeishuTenantToken } from "./feishu";
 import {
   answersToTypedFields,
   parseSubmitRequest,
   validateAnswers,
   writeRecordWithFieldEnsure,
-  BitableWriteError,
-  FeishuNotConfiguredError,
   FormNotPublishedError,
   AnswersValidationError,
   type SubmitRequest,
+  type SubmitAnswer,
 } from "./submit";
 import {
   listBitableColumns,
@@ -50,6 +49,7 @@ import {
   FormValidationError,
   type PublishFormInput,
   type UpdateFormInput,
+  type Field,
 } from "./forms";
 import {
   signSession,
@@ -76,7 +76,12 @@ import {
 } from "./users";
 import { issueToken, consumeToken } from "./tokens";
 import { sendEmail, buildVerifyEmail, buildResetEmail, EmailSendError } from "./email";
-import { listSubmissions, BitableReadError } from "./submissions";
+import {
+  insertSubmission,
+  listSubmissions,
+  recordFeishuSync,
+  recordFeishuSyncError,
+} from "./submissions";
 import { loadChatSession, upsertChatSession } from "./chatSessions";
 import {
   rateLimit,
@@ -228,6 +233,71 @@ async function sendResetEmail(env: Env, userId: string, to: string): Promise<voi
   } catch (err) {
     if (!(err instanceof EmailSendError)) {
       console.error("reset email best-effort failed", err instanceof Error ? err.name : "unknown");
+    }
+  }
+}
+
+// --- best-effort 同步提交到飞书 (§15) ----------------------------------------
+//
+// 架构转向（PR-2）：提交先落 D1 主存（必成），飞书降为**可选外部同步出口**。仅当 owner 配了
+// 飞书时，submit 路由经 `c.executionCtx.waitUntil(...)` 在后台调用本 helper 同步——绝不阻塞
+// 提交响应、绝不让同步失败影响提交成功（与上面发信 best-effort 同一纪律）。
+
+/**
+ * best-effort 同步一条**已落 D1**的提交到 form 所属 owner 的飞书多维表格（§15）。在 waitUntil
+ * 后台跑——**整条链路（含读 + 解密 owner 配置在内）都是 best-effort**：提交早已落 D1 主存、
+ * 200 已返回，这里任何环节出错都绝不影响那条已成功的提交。
+ *
+ * 流程：读 + 解密 form 所属 owner 的配置（**未配飞书 → 直接返回、回执留空、不算失败**）→ 换
+ * tenant_access_token → 列出目标表现有列真实类型（listBitableColumns）→ answersToTypedFields 按
+ * 列类型格式化 → writeRecordWithFieldEnsure 写一条记录（缺列自愈建列、重试一次）。成功 →
+ * recordFeishuSync 回填 `feishu_record_id` + `feishu_synced_at`；除「未配飞书」外的任意一步抛错 →
+ * recordFeishuSyncError 只记**非敏感**错误名（绝不含 tenant_access_token / app_secret，§15.7）。
+ *
+ * **读 config 也在 try 内（F1 修复）：** owner 配置的解密在密文损坏 / CONFIG_KEY 错配时会抛——
+ * 它属于「飞书同步决策」、纯 best-effort，绝不能让它把已落库的提交回成 500。故它和后续同步一起
+ * 被这个 try/catch 包住、在后台跑，失败只记 sync_error。所有异常都在内部吞掉（后台 promise 不该
+ * 让 rejection 冒泡）；连回填 error 都失败也静默吞。
+ */
+async function syncSubmissionToFeishu(
+  env: Env,
+  opts: {
+    submissionId: string;
+    formOwnerId: string;
+    answers: SubmitAnswer[];
+    fieldDefs: Field[];
+  },
+): Promise<void> {
+  const { submissionId, formOwnerId, answers, fieldDefs } = opts;
+  try {
+    // 读 + 解密 form 所属 owner 的配置（决定是否 / 用谁的凭据同步）。解密失败也在本 try 内吞，
+    // 绝不影响已落库的提交（F1 修复：原先此读在同步请求路径上，抛错会把 200 变 500）。
+    const key = await importConfigKey(env.CONFIG_KEY);
+    const owner = await getOwnerConfig(env.DB, key, formOwnerId);
+    // 未配飞书 → 不同步、回执留空（这不是失败，不记 sync_error）。
+    if (owner.feishu === null) {
+      return;
+    }
+    const feishu = owner.feishu;
+    const token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
+    const columnTypes = await listBitableColumns(token, feishu.appToken, feishu.tableId);
+    const fields = answersToTypedFields(answers, columnTypes, fieldDefs);
+    const { recordId } = await writeRecordWithFieldEnsure(
+      token,
+      feishu.appToken,
+      feishu.tableId,
+      fields,
+      fieldDefs,
+    );
+    await recordFeishuSync(env.DB, submissionId, recordId, new Date().toISOString());
+  } catch (err) {
+    // best-effort：同步失败绝不影响已成功的提交（主存那行已写）。只记非敏感错误名（err.name，
+    // 绝不含 tenant_access_token / app_secret，§15.7）；连回执回填都失败也静默吞。
+    const name = err instanceof Error ? err.name : "unknown";
+    try {
+      await recordFeishuSyncError(env.DB, submissionId, name);
+    } catch {
+      /* swallow：回执回填失败不外溢，提交已成功 */
     }
   }
 }
@@ -740,70 +810,50 @@ app.post(
     }
 
     // 2) PUBLIC endpoint — there is no "current owner". Reverse-look up the form's
-    //    owning owner_id by slug (§17.9 第 5 条) so the answer lands in THAT owner's
-    //    Feishu tenant, not a fixed / arbitrary one. (formExists already passed, so
-    //    a null here is an anomaly — treat it as not-found, never touch upstream.)
+    //    owning owner_id by slug (§17.9 第 5 条) so the submission is isolated under
+    //    THAT owner (the data-backend read filters by it). (formExists already passed,
+    //    so a null here is an anomaly — treat it as not-found.)
     const formOwnerId = await getFormOwner(c.env.DB, request.formSlug);
     if (formOwnerId === null) {
       return c.json({ error: "form not found" }, 404);
     }
 
-    // 3) Read + decrypt the FORM-OWNER's config (plaintext, in-Worker view only).
-    const key = await importConfigKey(c.env.CONFIG_KEY);
-    const owner = await getOwnerConfig(c.env.DB, key, formOwnerId);
-
-    // 4) No Feishu configured → 409, never touch upstream.
+    // 3) WRITE D1 (主存，必成，§15)。校验门全过后，把作答写进 submissions 主存——这是提交的
+    //    落库真相（不再依赖飞书）。owner_id = form 所属 owner（隔离键）。主存写失败属真实服务端
+    //    错误（D1 异常）→ 500、提交未落库（让答题者重试），绝不静默吞、绝不收敛成别的码。
+    const submissionId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
     try {
-      if (owner.feishu === null) {
-        throw new FeishuNotConfiguredError();
-      }
-    } catch (err) {
-      if (err instanceof FeishuNotConfiguredError) {
-        return c.json({ error: err.message }, 409);
-      }
-      throw err;
-    }
-    const feishu = owner.feishu;
-
-    // 4) Exchange the owner's saved app_id/app_secret for a tenant_access_token.
-    //    The plaintext app_secret rides ONLY this request body (§15.7); any failure
-    //    surfaces as 502 with no credential in the error.
-    let token: string;
-    try {
-      token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
-    } catch (err) {
-      if (err instanceof FeishuTokenError) {
-        return c.json({ error: err.message }, 502);
-      }
-      throw err;
+      await insertSubmission(c.env.DB, {
+        id: submissionId,
+        formSlug: request.formSlug,
+        ownerId: formOwnerId,
+        answers: request.answers,
+        createdAt,
+      });
+    } catch {
+      // 不暴露内部细节（D1 错误可能带表 / 列名）；只回稳定文案，提交未落库。
+      return c.json({ error: "提交保存失败" }, 500);
     }
 
-    // 5) 类型化写值（§16.8 / §15.8 升级，既有列冲突兜底方案 a）：先列出目标表现有列的**真实
-    //    类型**（listBitableColumns），再把 answers 格成 typed fields（answersToTypedFields，传
-    //    fieldsDef）——**已存在列**按列真实类型写（兜旧文本列 / 类型漂移，飞书不因类型不符整条拒）；
-    //    **缺列**按字段自身映射类型写（与自愈即将建成的列类型匹配，§16.8.4）。再写一条记录，缺列时
-    //    按字段 type 自愈建**对应类型**列后用同一份类型化值重试一次（§15.8）。列出失败 / 写失败
-    //    （含自愈后仍失败）→ BitableWriteError → 502，token / secret 绝不进错误体（§15.7）。
-    let recordId: string;
-    try {
-      const columnTypes = await listBitableColumns(token, feishu.appToken, feishu.tableId);
-      const fields = answersToTypedFields(request.answers, columnTypes, fieldsDef);
-      ({ recordId } = await writeRecordWithFieldEnsure(
-        token,
-        feishu.appToken,
-        feishu.tableId,
-        fields,
-        fieldsDef,
-      ));
-    } catch (err) {
-      if (err instanceof BitableWriteError) {
-        return c.json({ error: err.message }, 502);
-      }
-      throw err;
-    }
+    // 4) 飞书降为**可选外部同步**（§15 语义翻转）：在后台（waitUntil）best-effort 同步——读
+    //    form 所属 owner 的配置、未配飞书则跳过、配了则换 token → 写记录 → 回填 record_id；失败
+    //    只记 feishu_sync_error，绝不影响本响应。**整条同步链路（含读 + 解密 config）都在
+    //    syncSubmissionToFeishu 的 try/catch 里**——故 config 解密失败也不会把已落库的提交回成
+    //    500（F1 修复）。**未配飞书不再 409**——照常落 D1、返回成功（飞书从「唯一落库目标」降为
+    //    可选出口）。同步绝不阻塞此响应。
+    c.executionCtx.waitUntil(
+      syncSubmissionToFeishu(c.env, {
+        submissionId,
+        formOwnerId,
+        answers: request.answers,
+        fieldDefs: fieldsDef,
+      }),
+    );
 
-    // 6) Success → only ok + recordId; never the written fields, token, or creds.
-    return c.json({ ok: true, recordId }, 200);
+    // 5) Success → 提交已落 D1 主存。只回 ok + 新提交 id；绝不回 answers / token / 任何凭据。
+    //    （飞书 record_id 现在是异步同步产物，不在此同步返回——数据后台投影飞书同步状态，§18。）
+    return c.json({ ok: true, id: submissionId }, 200);
   },
 );
 
@@ -931,64 +981,30 @@ app.get("/api/forms/:slug", async (c) => {
 });
 
 // GET /api/forms/:slug/submissions — 数据后台提交列表（owner-only，已挂 requireAuth）。
-// 命中流程（§18.1）：form 存在校验（404，不打上游）→ 读 + 解密 owner 配置 → 未配飞书
-// (409，不打上游) → 换 tenant_access_token（失败 502）→ GET 多维表格记录列表（失败 502）
-// → 200 { submissions, count }。owner 的 app_secret / tenant_access_token 全程留在
-// Worker 内，绝不进响应、头或日志；响应也不含 app_token / table_id / owner_id（§18.6）。
+// 命中流程（§18.1，D1 主存版本）：归属校验（slug 须属当前 owner，否则 404、不暴露存在性）
+// → 从 **D1** 按 (owner_id, form_slug) 读回提交列表 → 200 { submissions, count }。
+// 不再读飞书（飞书已降为可选同步出口，§15）：故**无** 409 未配飞书 / **无** 换 token / 502 上游分支。
+// 响应只投影提交数据本身（含飞书同步状态），绝不含 owner 凭据 / app_token / table_id / owner_id（§18.6）。
 app.get("/api/forms/:slug/submissions", async (c) => {
   const slug = c.req.param("slug");
   const ownerId = c.get("session").sub;
 
   // 1) Ownership gate (§17.9 第 4 条): the form must belong to the LOGGED-IN owner.
   //    Reverse-look up its owner_id; a slug that doesn't exist OR exists but belongs
-  //    to a DIFFERENT owner both → the SAME 404, with NO Feishu upstream touched —
-  //    a cross-owner 404 must be indistinguishable from a not-found 404 (no
-  //    existence leak). 403 / a different body / a different code would leak that
-  //    "this slug exists, just not yours".
+  //    to a DIFFERENT owner both → the SAME 404 (no existence leak). 403 / a different
+  //    body / a different code would leak that "this slug exists, just not yours".
   const formOwnerId = await getFormOwner(c.env.DB, slug);
   if (formOwnerId !== ownerId) {
     return c.json({ error: "form not found" }, 404);
   }
 
-  // 2) Ownership confirmed → read + decrypt THIS owner's config (the form belongs
-  //    to them, so we read their own Feishu creds — never another owner's, §17.9 第 4 条).
-  const key = await importConfigKey(c.env.CONFIG_KEY);
-  const owner = await getOwnerConfig(c.env.DB, key, ownerId);
+  // 2) Ownership confirmed → read THIS owner's submissions for THIS form from D1
+  //    (主存，§18)。owner 隔离照旧（listSubmissions WHERE owner_id+form_slug）。空表 → []。
+  //    读 D1 不依赖飞书：未配飞书也照常返回已落库的提交。
+  const submissions = await listSubmissions(c.env.DB, ownerId, slug);
 
-  // 3) No Feishu configured → 409, never touch upstream (§18.1 step 4).
-  if (owner.feishu === null) {
-    return c.json({ error: "owner 未配置飞书" }, 409);
-  }
-  const feishu = owner.feishu;
-
-  // 4) Exchange the owner's saved app_id/app_secret for a tenant_access_token.
-  //    The plaintext app_secret rides ONLY this request body (§18.6); any failure
-  //    surfaces as 502 with no credential in the error.
-  let token: string;
-  try {
-    token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
-  } catch (err) {
-    if (err instanceof FeishuTokenError) {
-      return c.json({ error: err.message }, 502);
-    }
-    throw err;
-  }
-
-  // 5) GET the Bitable record list with the token; map items → submissions. The
-  //    tenant_access_token rides ONLY the read Authorization header (§18.6); any
-  //    failure surfaces as 502 with neither token nor secret in the error.
-  let submissions;
-  try {
-    submissions = await listSubmissions(token, feishu.appToken, feishu.tableId);
-  } catch (err) {
-    if (err instanceof BitableReadError) {
-      return c.json({ error: err.message }, 502);
-    }
-    throw err;
-  }
-
-  // 6) Success → only the projected submissions + count; never owner creds,
-  //    tenant_access_token, app_token / table_id, or owner_id (§18.6).
+  // 3) Success → only the projected submissions + count; never owner creds, owner_id,
+  //    or where-the-data-lives identifiers (§18.6). feishu_sync_error 仅含非敏感摘要。
   return c.json({ submissions, count: submissions.length }, 200);
 });
 

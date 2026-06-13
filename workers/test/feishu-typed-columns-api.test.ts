@@ -1,6 +1,13 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { applySchema, resetConfig, resetForms, login, authHeader } from "./helpers";
+import {
+  applySchema,
+  resetConfig,
+  resetForms,
+  resetSubmissions,
+  login,
+  authHeader,
+} from "./helpers";
 import {
   FEISHU_BITABLE_RECORDS_URL,
   FEISHU_BITABLE_FIELDS_URL,
@@ -24,7 +31,8 @@ import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 //   2) 提交按列真实类型写值（既有列冲突兜底方案 a）：先 GET .../fields 拿每列真实类型，再按
 //      列真实类型把 answers 格成 typed fields——数字写 JS number、日期写毫秒时间戳、多选写
 //      字符串数组；脏数字 / 坏日期 → 省略该格不整条失败；旧文本列按真实类型写文本；缺列自愈
-//      建对应类型列后重试成功。提交响应只含 { ok, recordId }，绝不漏凭据。
+//      建对应类型列后重试成功。架构转向（PR-2）：提交先落 D1、响应只含 { ok, id }，按列真实
+//      类型写值 + 缺列自愈都跑在 best-effort 后台同步里（断言前 waitForRecords 至写记录落定）。
 //
 // Contract: SPEC.md §16.8、§15.8、§15.5、§15.7.
 
@@ -327,6 +335,20 @@ async function waitForPreCreate(mock: FeishuMock, expectToken = true): Promise<v
   await new Promise((r) => setTimeout(r, 40));
 }
 
+/**
+ * 架构转向（PR-2）：提交先落 D1、200 返回后于 waitUntil best-effort 同步飞书。按列真实类型
+ * 写值（answersToTypedFields）+ 缺列自愈都发生在这后台同步里。Wait until at least `n` add-record
+ * (POST records) calls have landed on the mock, then settle — so the field-value / self-heal
+ * assertions can inspect the captured record bodies.
+ */
+async function waitForRecords(mock: FeishuMock, n: number): Promise<void> {
+  const deadline = Date.now() + 1500;
+  while (mock.recordCalls.length < n && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await new Promise((r) => setTimeout(r, 15));
+}
+
 // A multi-type form: 姓名(text) 年龄(number) 生日(date) 城市(单选) 兴趣(多选).
 const MULTI_TYPE_FIELDS: FieldDef[] = [
   { id: "f_name", type: "text", label: "姓名" },
@@ -378,6 +400,7 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
   beforeEach(async () => {
     await resetConfig();
     await resetForms();
+    await resetSubmissions();
     token = await login();
   });
 
@@ -715,13 +738,14 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
     // When 答题者提交「年龄」为「28」
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "年龄", value: "28" }] });
 
-    // Then 提交成功并返回 recordId
+    // Then 提交成功落 D1 并返回 id（飞书按列类型写值发生在后台同步里）。
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok?: boolean; recordId?: string };
+    const body = (await res.json()) as { ok?: boolean; id?: string };
     expect(body.ok).toBe(true);
-    expect(body.recordId).toBe(UPSTREAM_RECORD_ID);
+    expect(body.id).toBeTypeOf("string");
 
-    // And 「年龄」以数字而非文本写入飞书（fields.年龄 === 28，JS number）。
+    // And 后台同步把「年龄」以数字而非文本写入飞书（fields.年龄 === 28，JS number）。
+    await waitForRecords(mock, 1);
     expect(mock.recordCalls).toHaveLength(1);
     const fields = (mock.recordCalls[0].body as { fields?: Record<string, unknown> }).fields;
     expect(fields?.["年龄"]).toBe(28);
@@ -742,11 +766,12 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
     const dateStr = "2024-03-15";
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "生日", value: dateStr }] });
 
-    // Then 提交成功并返回 recordId。
+    // Then 提交成功落 D1 并返回 id。
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { recordId?: string }).recordId).toBe(UPSTREAM_RECORD_ID);
+    expect(((await res.json()) as { id?: string }).id).toBeTypeOf("string");
 
-    // And 「生日」以毫秒时间戳写入日期列（=== Date.parse(dateStr)，JS number）。
+    // And 后台同步把「生日」以毫秒时间戳写入日期列（=== Date.parse(dateStr)，JS number）。
+    await waitForRecords(mock, 1);
     const fields = (mock.recordCalls[0].body as { fields?: Record<string, unknown> }).fields;
     expect(fields?.["生日"]).toBe(Date.parse(dateStr));
     expect(typeof fields?.["生日"]).toBe("number");
@@ -778,11 +803,12 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
       answers: [{ label: "兴趣", value: ["阅读", "运动"] }],
     });
 
-    // Then 提交成功并返回 recordId。
+    // Then 提交成功落 D1。
     expect(res.status).toBe(200);
     expect(((await res.json()) as { ok?: boolean }).ok).toBe(true);
 
-    // And 「兴趣」以字符串数组写入多选列。
+    // And 后台同步把「兴趣」以字符串数组写入多选列。
+    await waitForRecords(mock, 1);
     const fields = (mock.recordCalls[0].body as { fields?: Record<string, unknown> }).fields;
     expect(fields?.["兴趣"]).toEqual(["阅读", "运动"]);
   });
@@ -817,11 +843,12 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
       ],
     });
 
-    // Then 其余字段照常写入且提交成功。
+    // Then 提交成功落 D1（后台同步写飞书）。
     expect(res.status).toBe(200);
     expect(((await res.json()) as { ok?: boolean }).ok).toBe(true);
+    await waitForRecords(mock, 1);
     const fields = (mock.recordCalls[0].body as { fields?: Record<string, unknown> }).fields;
-    // And 该非数字的「年龄」格被跳过不写入（键不在 fields 里）。
+    // And 后台同步把该非数字的「年龄」格跳过不写入（键不在 fields 里）。
     expect(fields).not.toHaveProperty("年龄");
     // 姓名 照常写入。
     expect(fields?.["姓名"]).toBe("张三");
@@ -842,12 +869,13 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
     // When 答题者提交「年龄」。
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "年龄", value: "28" }] });
 
-    // Then 提交成功并返回 recordId。
+    // Then 提交成功落 D1 并返回 id。
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { recordId?: string }).recordId).toBe(UPSTREAM_RECORD_ID);
+    expect(((await res.json()) as { id?: string }).id).toBeTypeOf("string");
 
-    // And 「年龄」按列的真实类型(文本)写入（值为字符串 "28" 而非数字 28），不被飞书因类型
-    // 不符整条拒掉（验方案 a：按列真实类型而非字段声明类型写）。
+    // And 后台同步把「年龄」按列的真实类型(文本)写入（值为字符串 "28" 而非数字 28），不被飞书因
+    // 类型不符整条拒掉（验方案 a：按列真实类型而非字段声明类型写）。
+    await waitForRecords(mock, 1);
     const fields = (mock.recordCalls[0].body as { fields?: Record<string, unknown> }).fields;
     expect(fields?.["年龄"]).toBe("28");
     expect(typeof fields?.["年龄"]).toBe("string");
@@ -881,14 +909,15 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
     // When 答题者首次提交触发该列缺失。
     const res = await postSubmit({ formSlug: slug, answers: [{ label: "分数", value: "95" }] });
 
-    // Then 后端按该字段类型把缺列建成数字列。
+    // Then 提交成功落 D1（200）；后台同步按该字段类型把缺列建成数字列。
     expect(res.status).toBe(200);
     expect(((await res.json()) as { ok?: boolean }).ok).toBe(true);
+    await waitForRecords(mock, 2);
     const score = createdField(mock, "分数");
     expect(score).toBeDefined();
     expect(score?.type).toBe(NUMBER);
 
-    // And 补列后重试一次写入并提交成功（add-record 恰好两次）。
+    // And 补列后重试一次写入（add-record 恰好两次）。
     expect(mock.recordCalls).toHaveLength(2);
 
     // And 重试写入携带**类型化值**（Bug #1）：缺列按字段映射类型(number)格式化，故两次写入的
@@ -935,11 +964,12 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
     // 不是写入键、子字段「分数」埋在 children 里 → 漏建 → 重试仍缺列。
     expect(res.status).toBe(200);
     expect(((await res.json()) as { ok?: boolean }).ok).toBe(true);
+    await waitForRecords(mock, 2);
     const score = createdField(mock, "分数");
     expect(score).toBeDefined();
     expect(score?.type).toBe(NUMBER);
 
-    // And 补列后重试一次写入并提交成功，且写入的「分数」是类型化的 JS number 88（Bug #1）。
+    // And 补列后重试一次写入，且写入的「分数」是类型化的 JS number 88（Bug #1）。
     expect(mock.recordCalls).toHaveLength(2);
     const retryFields = (mock.recordCalls[1].body as { fields?: Record<string, unknown> }).fields;
     expect(retryFields?.["分数"]).toBe(88);
@@ -950,29 +980,30 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
   // 凭据边界：全程不出网
   // ===========================================================================
 
-  it("Scenario: 提交成功响应只含 ok 与 recordId", async () => {
+  it("Scenario: 提交成功响应只含 ok 与 id", async () => {
     // Given 一份可正常写入的已发布表单。
     await configureOwner({ feishu: true });
     mock = installFeishuMock({
-      fieldsList: [{ status: 200, body: fieldsListBody([{ name: "年龄", type: NUMBER }]) }],
+      fieldsList: [{ status: 200, body: fieldsListBody([{ name: "姓名", type: TEXT }]) }],
     });
-    const slug = await publishFormAndGetSlug([{ id: "f_age", type: "number", label: "年龄" }]);
+    const slug = await publishFormAndGetSlug([{ id: "f_name", type: "text", label: "姓名" }]);
     await waitForPreCreate(mock);
     mock.resetCalls();
 
-    // When 答题者提交。
-    const res = await postSubmit({ formSlug: slug, answers: [{ label: "年龄", value: "28" }] });
+    // When 答题者提交一个**非十六进制**的哨兵值（避免与随机 UUID id 偶然子串相撞）。
+    const SENTINEL = "答案哨兵ZZZ";
+    const res = await postSubmit({ formSlug: slug, answers: [{ label: "姓名", value: SENTINEL }] });
     expect(res.status).toBe(200);
 
-    // Then 响应只含 ok 与 recordId（键集合恰为 {ok, recordId}）。
+    // Then 响应只含 ok 与 id（键集合恰为 {id, ok}；架构转向后提交主存是 D1，不回飞书 recordId）。
     const raw = await res.clone().text();
     const body = (await res.json()) as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(["ok", "recordId"]);
+    expect(Object.keys(body).sort()).toEqual(["id", "ok"]);
     expect(body.ok).toBe(true);
-    expect(body.recordId).toBe(UPSTREAM_RECORD_ID);
+    expect(body.id).toBeTypeOf("string");
 
     // And 响应里绝不含写入的字段值、tenant_access_token 或 app_secret。
-    expect(raw).not.toContain("28"); // 写入的字段值不回显
+    expect(raw).not.toContain(SENTINEL); // 写入的字段值不回显
     expect(raw).not.toContain(UPSTREAM_TENANT_TOKEN);
     expect(raw).not.toContain(OWNER_FEISHU_APP_SECRET);
     expect(raw).not.toContain(OWNER_FEISHU_APP_TOKEN);

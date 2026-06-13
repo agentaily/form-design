@@ -5,6 +5,7 @@ import {
   resetConfig,
   resetForms,
   resetUsers,
+  resetSubmissions,
   registerOwner,
   authHeader,
   type TestOwner,
@@ -208,6 +209,20 @@ async function drainBackgroundPreCreate(mock: FeishuMock, n = 1): Promise<void> 
   await new Promise((r) => setTimeout(r, 25));
 }
 
+/**
+ * 架构转向（PR-2）：飞书写入现在跑在 submit 的 best-effort **后台同步**里。Wait until at least
+ * `n` record-WRITE (POST) calls have landed on the mock (the background sync's add-record),
+ * then settle — so the caller can assert which owner's bitable URL each write hit.
+ */
+async function waitForRecordWrites(mock: FeishuMock, n: number): Promise<void> {
+  const deadline = Date.now() + 1500;
+  const writes = () => mock.recordCalls.filter((c) => c.method === "POST").length;
+  while (writes() < n && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await new Promise((r) => setTimeout(r, 25));
+}
+
 // --- per-owner helpers --------------------------------------------------------
 
 /** Save an owner's config via POST /api/config (owner-only — uses their token). */
@@ -286,6 +301,7 @@ describe("tenant isolation + 横向越权 (workers/features/tenant-isolation.fea
     await resetConfig();
     await resetForms();
     await resetUsers();
+    await resetSubmissions();
   });
 
   afterEach(() => {
@@ -471,45 +487,38 @@ describe("tenant isolation + 横向越权 (workers/features/tenant-isolation.fea
     expect(mock.recordCalls).toHaveLength(0);
   });
 
-  // --- 看提交：读当前 owner 自己的飞书 --------------------------------------
+  // --- 看提交：从 D1 主存读回当前 owner 自己的提交（架构转向 PR-2）------------
 
-  it("Scenario: owner 看提交读的是自己的飞书配置", async () => {
-    // Given owner A 注册并登录 And A 配好了自己的飞书并发布了一份表单. B exists with a
-    // DIFFERENT Feishu config — a buggy "read any owner's creds" handler could pick
-    // B's; the mock proves the read went to A's bitable URL, not B's.
+  it("Scenario: owner 看提交读回的是自己 D1 里的提交", async () => {
+    // Given owner A 与 owner B 各自注册并登录 + 各发布一份表单（不配飞书 → 提交不触发后台同步）。
     const A = await registerOwner();
     const B = await registerOwner();
-    await configureOwner(A.token, { deepseek: { apiKey: A_DEEPSEEK_KEY }, feishu: A_FEISHU });
-    await configureOwner(B.token, { deepseek: { apiKey: B_DEEPSEEK_KEY }, feishu: B_FEISHU });
-    // 先装 mock，再让 A 发布——这样发布预建的后台扇出（§16.8）落在 mock 上；drain + reset
-    // 后，下面的 token/record 计数只反映 A 这次看提交。
-    mock = installFeishuMock();
+    await configureOwner(A.token, { deepseek: { apiKey: A_DEEPSEEK_KEY } });
+    await configureOwner(B.token, { deepseek: { apiKey: B_DEEPSEEK_KEY } });
     const slugA = await publishForm(A.token, "A 的提交表单");
-    await drainBackgroundPreCreate(mock);
-    mock.resetCalls();
+    const slugB = await publishForm(B.token, "B 的提交表单");
+    // 各自表单收到一份内容不同的提交（公开 submit，落各自 owner 的 D1）。
+    await postSubmit({ formSlug: slugA, answers: [{ label: "姓名", value: "A-数据" }] });
+    await postSubmit({ formSlug: slugB, answers: [{ label: "姓名", value: "B-数据" }] });
 
-    // When A 拉取自己那份表单的提交列表
+    // When A 拉取自己那份表单的提交列表（从 D1 按 (owner_id, slug) 读）。
     const res = await getSubmissions(A.token, slugA);
     expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      submissions?: Array<{ answers?: Array<{ value: string | string[] }> }>;
+      count?: number;
+    };
 
-    // Then 后端用 A 自己的飞书凭据去拉记录 — token exchange carried A's app_id/app_secret,
-    // and the record read hit A's app_token/table_id URL.
-    expect(mock.tokenCalls).toHaveLength(1);
-    expect(mock.tokenCalls[0].body).toMatchObject({
-      app_id: A_FEISHU.appId,
-      app_secret: A_FEISHU.appSecret,
-    });
-    expect(mock.recordCalls).toHaveLength(1);
-    expect(mock.recordCalls[0].url).toBe(bitableUrl(A_FEISHU));
-    // And 绝不使用其它 owner 的飞书凭据 — never B's URL / app_secret anywhere.
-    expect(mock.recordCalls[0].url).not.toBe(bitableUrl(B_FEISHU));
-    const allBodies = [...mock.tokenCalls, ...mock.recordCalls].map((c) => c.bodyText).join("\n");
-    expect(allBodies).not.toContain(B_FEISHU.appSecret);
+    // Then 只返回 A 自己表单的提交（count 1，含 A-数据），绝不返回 B 表单的提交。
+    expect(body.count).toBe(1);
+    const raw = JSON.stringify(body);
+    expect(raw).toContain("A-数据");
+    expect(raw).not.toContain("B-数据");
   });
 
-  // --- 公开 submit：写进 slug 所属 owner 的飞书 ------------------------------
+  // --- 公开 submit：落 D1，best-effort 后台同步进 slug 所属 owner 的飞书 -------
 
-  it("Scenario: 匿名提交写进该 slug 所属 owner 的飞书", async () => {
+  it("Scenario: 匿名提交 best-effort 同步进该 slug 所属 owner 的飞书", async () => {
     // Given owner A 与 owner B 各自注册并登录 And A 与 B 各配好了自己的飞书
     // And A 发布了一份表单，得到 slug SA
     const A = await registerOwner();
@@ -527,17 +536,18 @@ describe("tenant isolation + 横向越权 (workers/features/tenant-isolation.fea
     expect(res.status).toBe(200);
     expect(((await res.json()) as { ok?: boolean }).ok).toBe(true);
 
-    // Then 这份作答写进 A（slug SA 所属 owner）的飞书表 — the token exchange used A's
-    // app_secret and the record write hit A's bitable URL.
-    expect(mock.tokenCalls).toHaveLength(1);
+    // Then 后台同步把这份作答写进 A（slug SA 所属 owner）的飞书表 — drain the background sync,
+    // then assert the record WRITE (POST) hit A's bitable URL via A's app_secret.
+    await waitForRecordWrites(mock, 1);
+    const writes = mock.recordCalls.filter((c) => c.method === "POST");
+    expect(writes).toHaveLength(1);
+    expect(writes[0].url).toBe(bitableUrl(A_FEISHU));
+    // And 绝不同步进 B 的飞书表.
+    expect(writes[0].url).not.toBe(bitableUrl(B_FEISHU));
     expect(mock.tokenCalls[0].body).toMatchObject({
       app_id: A_FEISHU.appId,
       app_secret: A_FEISHU.appSecret,
     });
-    expect(mock.recordCalls).toHaveLength(1);
-    expect(mock.recordCalls[0].url).toBe(bitableUrl(A_FEISHU));
-    // And 这份作答绝不写进 B 或任何其它 owner 的飞书表.
-    expect(mock.recordCalls[0].url).not.toBe(bitableUrl(B_FEISHU));
     const allBodies = [...mock.tokenCalls, ...mock.recordCalls].map((c) => c.bodyText).join("\n");
     expect(allBodies).not.toContain(B_FEISHU.appSecret);
   });
@@ -562,14 +572,16 @@ describe("tenant isolation + 横向越权 (workers/features/tenant-isolation.fea
     expect(resA.status).toBe(200);
     expect(resB.status).toBe(200);
 
-    // Then 向 SA 的作答写进 A 的飞书 And 向 SB 的作答写进 B 的飞书 — exactly two record
-    // writes, one to A's bitable URL and one to B's, each via the matching app_secret.
-    expect(mock.recordCalls).toHaveLength(2);
-    const recordUrls = mock.recordCalls.map((c) => c.url).sort();
+    // Then 后台同步分别把两份作答写进各自 owner 的飞书 — drain both background syncs, then
+    // assert exactly two record WRITES (POST), one to A's bitable URL and one to B's.
+    await waitForRecordWrites(mock, 2);
+    const writes = mock.recordCalls.filter((c) => c.method === "POST");
+    expect(writes).toHaveLength(2);
+    const recordUrls = writes.map((c) => c.url).sort();
     expect(recordUrls).toEqual([bitableUrl(A_FEISHU), bitableUrl(B_FEISHU)].sort());
 
-    // The token exchanges used BOTH owners' distinct app_secrets (one each), proving
-    // each slug routed to its own owner's tenant — never a single shared owner.
+    // The token exchanges used BOTH owners' distinct app_secrets, proving each slug
+    // routed to its own owner's tenant — never a single shared owner.
     const tokenSecrets = mock.tokenCalls.map((c) => (c.body as { app_secret?: string }).app_secret);
     expect(tokenSecrets).toContain(A_FEISHU.appSecret);
     expect(tokenSecrets).toContain(B_FEISHU.appSecret);

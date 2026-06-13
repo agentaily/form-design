@@ -63,28 +63,29 @@ Feature: 多租户数据隔离 + 横向越权防护
     Then 两种情况都返回 404
     And 两种情况的响应不可区分（不泄漏 S 确实存在）
 
-  # --- 看提交：读当前 owner 自己的飞书 ----------------------------------------
+  # --- 看提交：从 D1 主存读回当前 owner 自己的提交（架构转向 PR-2）-------------
 
-  Scenario: owner 看提交读的是自己的飞书配置
-    Given owner A 注册并登录
-    And A 配好了自己的飞书并发布了一份表单
+  Scenario: owner 看提交读回的是自己 D1 里的提交
+    Given owner A 与 owner B 各自注册并登录
+    And A 与 B 各发布一份表单
+    And A 的表单与 B 的表单各收到一份内容不同的提交
     When A 拉取自己那份表单的提交列表
-    Then 后端用 A 自己的飞书凭据去拉记录
-    And 绝不使用其它 owner 的飞书凭据
+    Then 只返回 A 自己表单的提交（从 D1 按 owner 隔离读）
+    And 绝不返回 B 表单的提交
 
-  # --- 公开 submit：写进 slug 所属 owner 的飞书 -------------------------------
+  # --- 公开 submit：落 A 的 D1，并 best-effort 同步进 slug 所属 owner 的飞书 ---
 
-  Scenario: 匿名提交写进该 slug 所属 owner 的飞书
+  Scenario: 匿名提交 best-effort 同步进该 slug 所属 owner 的飞书
     Given owner A 与 owner B 各自注册并登录
     And A 与 B 各配好了自己的飞书
     And A 发布了一份表单，得到 slug SA
     When 一个匿名答题者向 slug SA 提交一份作答
-    Then 这份作答写进 A（slug SA 所属 owner）的飞书表
-    And 这份作答绝不写进 B 或任何其它 owner 的飞书表
+    Then 后台同步把这份作答写进 A（slug SA 所属 owner）的飞书表
+    And 这份作答绝不同步进 B 或任何其它 owner 的飞书表
 
   Scenario: 不同 owner 的 slug 各自路由到各自的飞书
     Given owner A 与 owner B 各自注册并登录
     And A 与 B 各配好了自己的飞书、各发布一份表单（slug SA / slug SB）
     When 匿名答题者分别向 SA 与 SB 各提交一份作答
-    Then 向 SA 的作答写进 A 的飞书
-    And 向 SB 的作答写进 B 的飞书
+    Then 后台同步把向 SA 的作答写进 A 的飞书
+    And 后台同步把向 SB 的作答写进 B 的飞书
