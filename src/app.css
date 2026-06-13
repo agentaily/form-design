@@ -354,15 +354,9 @@ body {
   gap: 18px;
 }
 
-/* ───────────────── integration settings page (/settings, §12 + §14) ─────────────────
-   The /settings route renders the DS SettingsPage frame + two DS connection cards
-   (DeepSeekCard + FeishuCard), which own their own internal layout. This wrapper just
-   stacks the page's own save Alerts above the cards inside SettingsPage's content column. */
-.d-settings {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
+/* integration settings page (/settings, §12 + §14): layout is now fully owned by the DS
+   0.8.0 floating chain — SettingsSheet › IntegrationSettings (hero + readiness rail + card
+   slot) › DeepSeekCard/FeishuCard, with a SettingsSaveBar footer. No local wrapper CSS. */
 
 /* ───────────────────────── responsive: phone (preview inner only) ───────────────────────── */
 /* The shell/thread/mobile-switch responsiveness is owned by DesignerShell + ConversationThread;

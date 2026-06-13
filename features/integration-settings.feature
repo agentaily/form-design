@@ -2,8 +2,9 @@
 # + §17（owner-only 鉴权，缺/坏 token → 401）。本 feature 描述前端「集成设置页」(/settings) 的可观察
 # 行为，不重述后端字段加密 / 掩码算法（那是 Worker 内部约定）。前端契约桩见 src/core/configClient.ts，
 # 页面见 src/settings.jsx（SettingsScreen），路由分流见 src/App.jsx（matchSettings → /settings）。
-# 自 DS 0.6.0 起集成设置从弹窗改为独立 /settings 路由页，由两张纯展示连接卡 + 本页自己的保存栏组成；
-# 步骤措辞相应从「弹窗」改为「设置页」，行为契约不变。
+# 自 DS 0.6.0 起集成设置从弹窗改为独立 /settings 路由页；DS 0.8.0 起页面用浮层组件链
+# SettingsSheet › IntegrationSettings(集成分区:hero + 就绪栏 + 连接卡槽)› DeepSeekCard/FeishuCard
+# + 底部 SettingsSaveBar(显式保存),仍是 /settings 路由 + 本项目的后端接线，可观察行为契约不变。
 Feature: 集成设置页 · owner 配置 DeepSeek 与飞书
   作为表单作者(owner)
   我想在集成设置页里连接自己的 DeepSeek key 与飞书多维表格
