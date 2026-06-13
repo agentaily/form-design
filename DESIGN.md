@@ -19,7 +19,7 @@
 
 ## 消费的设计系统
 
-- **`@agentaily/design-system` ^0.8.0**:**UI 一律消费,不手搓**;升级随上游流过来(DS 0.2 → 0.8 全面上移见 ROADMAP)。
+- **`@agentaily/design-system` ^0.9.0**:**UI 一律消费,不手搓**;升级随上游流过来(DS 0.2 → 0.9 全面上移见 ROADMAP;0.9.0 补 `monitor` 图标,桌面切换按钮换回 `<Icon name="monitor">`)。
 - 关键组件:`DesignerShell`(双栏外壳 + 移动端切换;`brand` 槽放 `BrandMark`)· `ConversationThread`(对话线程,纯渲染 + `controller`)· `AccountControl`(账户下拉,`onProfile` 开账户 tab)· `SignInPage`(登录)· `SettingsSheet`(0.8.0 起设置 = 浮起浮层,`nav` 双 tab 账户 + 集成)› 账户 tab:`PageSection` + `Avatar` + `Field`/`Input` + `SettingsSaveBar`(`form` 模式);集成 tab:`IntegrationSettings` › `DeepSeekCard` / `FeishuCard` + `SettingsSaveBar`(显式保存)· `MarkupLayer`(指向修改)· `Form.useForm`(表单校验)· `Icon` / `BrandMark`。
 - 缺组件 / 缺 seam → 往上游反馈(下游定契约、上游照做;**叫人**)。
 
@@ -27,7 +27,7 @@
 
 | 页面 / 界面             | 设计状态                                                                                                                                                                                                            | 对应代码                                                        |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| 设计器(左对话 / 右预览) | 已设计(DS 0.6 上移;0.8 chrome 对齐:顶栏 `BrandMark` + 面包屑左对齐、桌面切换=显示器图标)                                                                                                                            | `App.jsx`(DesignerShell)+ `chat.jsx` + `preview.jsx`            |
+| 设计器(左对话 / 右预览) | 已设计(DS 0.6 上移;0.8 chrome 对齐:顶栏 `BrandMark` + 面包屑左对齐、桌面切换=显示器图标,0.9.0 起走 DS `<Icon name="monitor">`)                                                                                      | `App.jsx`(DesignerShell)+ `chat.jsx` + `preview.jsx`            |
 | 登录 `/signin`          | 已设计(独立路由页)                                                                                                                                                                                                  | `signin.jsx`(SignInPage)                                        |
 | 设置浮层(账户 + 集成)   | 已设计(DS 0.8 浮层 `SettingsSheet` 双 tab;**route-reflected overlay**:开浮层反映 `/settings` URL 但不卸载设计器,✕/Esc/后退复原。账户 tab=头像/邮箱+可编辑显示名+退出;集成 tab=连接卡+SettingsSaveBar+后端 400 回显) | `settings.jsx`(`SettingsOverlay` → `AccountSection` / 集成 tab) |
 | 我的表单                | 已设计                                                                                                                                                                                                              | `forms-panel.jsx`                                               |
