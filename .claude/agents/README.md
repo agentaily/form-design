@@ -6,16 +6,16 @@ artifacts** — `features/*.feature` is the contract everyone works against.
 
 ## Roster
 
-| Agent            | Owns                                                                          | Doesn't touch                 |
-| ---------------- | ----------------------------------------------------------------------------- | ----------------------------- |
-| `pr-analyst`     | triage an incoming PR → classify / decompose / route (read-only)              | implementing, merging         |
-| `spec-architect` | `SPEC.md`, `features/`, `src/core` type contracts                             | implementation, tests         |
-| `designer`       | design pages in the project's Claude Design → land via `design-sync` (active) | product logic, tests          |
-| `design-syncer`  | land a handoff you already have → code (`design-sync` skill, passive)         | behavior design               |
-| `implementer`    | `src/core` bodies, app UI, `tests/unit` (inner-loop TDD)                      | features, integration/e2e, CI |
-| `outer-tester`   | `tests/integration/`, `e2e/` (realize features)                               | product code                  |
-| `reviewer`       | independent adversarial review (read-only)                                    | editing code                  |
-| `release-eng`    | `.github/`, Pages, Workers, Changesets, lefthook, Prettier                    | product code                  |
+| Agent            | Owns                                                                                | Doesn't touch                 |
+| ---------------- | ----------------------------------------------------------------------------------- | ----------------------------- |
+| `pr-analyst`     | triage an incoming PR → classify / decompose / route (read-only)                    | implementing, merging         |
+| `spec-architect` | `SPEC.md`, `features/`, `src/core` type contracts                                   | implementation, tests         |
+| `designer`       | `DESIGN.md` (visual truth) + design pages in Claude Design → land via `design-sync` | product logic, tests          |
+| `design-syncer`  | land a handoff you already have → code (`design-sync` skill, passive)               | behavior design               |
+| `implementer`    | `src/core` bodies, app UI, `tests/unit` (inner-loop TDD)                            | features, integration/e2e, CI |
+| `outer-tester`   | `tests/integration/`, `e2e/` (realize features)                                     | product code                  |
+| `reviewer`       | independent adversarial review (read-only)                                          | editing code                  |
+| `release-eng`    | `.github/`, Pages, Workers, Changesets, lefthook, Prettier                          | product code                  |
 
 ## Flow (double-loop TDD + PR-driven)
 
