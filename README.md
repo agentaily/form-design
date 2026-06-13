@@ -64,10 +64,11 @@ request as a Bearer header (`core/auth` + the standalone `/signin` page in
   the real owner auth (`core/auth` login / register / password-reset), using its
   `error` / `submitting` seams for backend errors + async busy, plus a small
   找回密码 dialog (the one bit SignInPage doesn't cover).
-- `src/settings.jsx` — the standalone `/settings` page (`SettingsScreen`): the DS
-  `DeepSeekCard` + `FeishuCard` connection cards (pure display) composed with a
-  form-design-owned save bar / backend-error display, wired to the real BYOK
-  backend via `core/configClient` (masked secrets kept, 401 → `/signin`).
+- `src/settings.jsx` — the standalone `/settings` page (`SettingsScreen`): the DS 0.8.0
+  floating settings chain `SettingsSheet › IntegrationSettings › DeepSeekCard + FeishuCard`
+  (pure-display connection cards) with a `SettingsSaveBar` footer (explicit save), wired to
+  the real BYOK backend via `core/configClient` (masked secrets kept, backend-400 field
+  errors surfaced, 401 → `/signin`).
 - `src/preview.jsx` — live form: `Field` / `Input` / `Textarea` / `Select` / `RadioGroup` / `Checkbox` / `Button`, with validation via the DS `Form.useForm` hook.
 - `src/app.css` — layout-only styles (page chrome, split, form-card shell); all values reference DS tokens.
 - `src/core/` — the **SPEC architecture's testable core** (TypeScript, strict),
@@ -119,8 +120,8 @@ the model self-heals. Tests inject a fake `chat` into `<App chat={…} />` for
 deterministic builds. `/api/chat` is owner-only — the owner-login/Bearer flow is
 wired (`core/auth` + the standalone `/signin` page `src/signin.jsx`; a 401 navigates to
 `/signin`). The owner connects DeepSeek + 飞书 on the standalone `/settings` page
-(`src/settings.jsx` = `SettingsScreen`, composing DS `DeepSeekCard` + `FeishuCard` with a
-form-design-owned save bar / backend-error display, over `core/configClient`, SPEC
+(`src/settings.jsx` = `SettingsScreen`, the DS 0.8.0 `SettingsSheet › IntegrationSettings ›
+DeepSeekCard + FeishuCard` chain with a `SettingsSaveBar` footer, over `core/configClient`, SPEC
 §12/§14): mount → `GET /api/config` echoes the masked config, save → `POST /api/config`
 (masked secrets kept, never re-sent), test → `POST /api/config/test`; a 401 routes to
 `/signin`. The publish/submit endpoints land in later phases (see `ROADMAP.md`).

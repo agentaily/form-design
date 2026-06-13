@@ -1,10 +1,20 @@
-// settings.jsx — owner 集成设置页 (SPEC §12 + §14, frontend). Since DS 0.6.0 dropped the
-// all-in-one IntegrationSettings modal in favor of two PURE-DISPLAY connection cards
-// (DeepSeekCard + FeishuCard — zero state, no save bar, no gating, no backend), this is a
-// standalone `/settings` ROUTE page (chrome-less, like /signin) that owns everything the
-// cards delegate to the caller: config state + persistence, the Save bar, the 401 → login
-// handoff, the per-block connection probe, and — newly ours, since the cards don't render
+// settings.jsx — owner 集成设置页 (SPEC §12 + §14, frontend). Since DS 0.8.0 restructured
+// the settings/integration area into a four-layer floating chain, this page composes:
+//
+//   SettingsSheet (floating "rises up" page shell, via PanelSheet) — replaces the deleted
+//     └ IntegrationSettings (the 集成 SECTION: hero + readiness rail + card slot)  SettingsPage
+//         └ DeepSeekCard / FeishuCard (PURE-DISPLAY connection cards — zero state, no save
+//             bar, no gating, no backend; props in, events out)
+//   + SettingsSaveBar (the sheet's sticky footer — explicit save, GitHub model)
+//
+// It stays a standalone `/settings` ROUTE page (chrome-less, like /signin); the SettingsSheet
+// gives it the floating-up visual without changing the route. This page still owns everything
+// the cards delegate to the caller: config state + persistence, the save bar's wiring, the
+// 401 → login handoff, the per-block connection probe, and — since the cards don't render
 // backend errors — surfacing the backend's 400 field errors.
+//
+// (Scope note: the handoff's two-tab sheet 账户 + 集成 is deferred — the 账户 tab + a
+//  displayName/profile backend are a separate follow-up; this PR migrates the 集成 area only.)
 //
 //   mount → getConfig() → echo the masked config into card props. A 401 (no/expired owner
 //           session, §17) does NOT render as a settings error: it navigates to /signin so
@@ -36,11 +46,11 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import {
-  SettingsPage,
+  SettingsSheet,
+  IntegrationSettings,
+  SettingsSaveBar,
   DeepSeekCard,
   FeishuCard,
-  Button,
-  Alert,
   parseFeishuLink,
 } from "@agentaily/design-system";
 import {
@@ -252,38 +262,49 @@ export function SettingsScreen({
     }
   };
 
-  const subtitle = loading
+  // Readiness rail (compositional IntegrationSettings): an integration counts as ready when
+  // it has stored creds OR its last probe came back ok. Cosmetic — drives the hero rail copy.
+  const readyCount =
+    (hasStoredApiKey || dsConn.status === "ok" ? 1 : 0) +
+    (hasStoredSecret || fsConn.status === "ok" ? 1 : 0);
+
+  // 放弃更改 (SettingsSaveBar onReset): revert edits back to the last-loaded/saved masked view.
+  const resetForm = () => {
+    echo(config);
+    setDirty(false);
+    setSaved(false);
+    setSaveError("");
+    setFieldErrors({});
+  };
+
+  const intro = loading
     ? "加载中…"
     : "连接你自己的 DeepSeek key 与飞书多维表格 —— 对话设计走你的额度，答题落库进你的租户。";
 
+  // The 集成设置 page: a floating SettingsSheet (the new DS shell, replacing the deleted
+  // SettingsPage) whose ✕ returns to the designer; an IntegrationSettings section that wraps
+  // the two real-wired cards with the hero + readiness rail; and an explicit SettingsSaveBar
+  // footer driven by this page's dirty/saving/saved/error state. A backend 400 message shows
+  // in the save bar (status="error") AND, when it names a block, on the matching card field —
+  // keeping the "the message appears at least once" contract.
   return (
-    <SettingsPage
-      word="settings"
-      title="集成设置"
-      subtitle={subtitle}
-      actions={
-        <React.Fragment>
-          <Button variant="secondary" disabled={saving} onClick={() => navigate("/")}>
-            返回设计器
-          </Button>
-          <Button variant="primary" disabled={saving || loading || !dirty} onClick={onSave}>
-            {saving ? "保存中…" : "保存"}
-          </Button>
-        </React.Fragment>
+    <SettingsSheet
+      open
+      crumb="集成设置"
+      label="集成设置"
+      onClose={() => navigate("/")}
+      footer={
+        <SettingsSaveBar
+          dirty={dirty}
+          saving={saving}
+          status={saving ? "saving" : saveError ? "error" : saved ? "saved" : "idle"}
+          error={saveError}
+          onSave={onSave}
+          onReset={resetForm}
+        />
       }
     >
-      <div className="d-settings">
-        {saved ? (
-          <Alert variant="ok" title="已保存">
-            配置已写入。密钥以掩码保存，留空表示保持不变。
-          </Alert>
-        ) : null}
-        {saveError ? (
-          <Alert variant="danger" title="保存失败">
-            {saveError}
-          </Alert>
-        ) : null}
-
+      <IntegrationSettings ready={readyCount} total={2} intro={intro}>
         <DeepSeekCard
           apiKey={apiKey}
           onApiKeyChange={(v) => {
@@ -342,8 +363,8 @@ export function SettingsScreen({
           // Test button stays available regardless of the local 飞书 field state.
           canTest={!loading}
         />
-      </div>
-    </SettingsPage>
+      </IntegrationSettings>
+    </SettingsSheet>
   );
 }
 
