@@ -1,7 +1,7 @@
 {
   "name": "agentaily-forms",
   "private": true,
-  "version": "0.10.0",
+  "version": "0.11.0",
   "type": "module",
   "description": "Agentaily Forms — conversational form designer (left: Agent chat, right: live form preview). Built on @agentaily/design-system.",
   "scripts": {
