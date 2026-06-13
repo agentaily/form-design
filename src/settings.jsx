@@ -8,10 +8,14 @@
 //   • 账户 (AccountSection): 头像 + 邮箱 + 可编辑「显示名称」 + 退出登录. The display name persists
 //     to the REAL profile backend (PUT /api/auth/profile via core/auth.updateProfile), NOT a
 //     localStorage stub. Driven by Form.useForm + an explicit SettingsSaveBar footer (§17 个人资料).
-//   • 集成 (IntegrationSettings): the DeepSeek + 飞书 pure-display connection cards + this module's
-//     OWN config state / persistence / per-block probe / backend-400 surfacing (§12 + §14),
-//     unchanged in behavior from the previous standalone /settings page — only the host moved
-//     from a route page into this tab.
+//   • 集成: a SELF-COMPOSED 集成 section — DS 0.10.0 removed the all-in-one IntegrationSettings
+//     organism AND the vendor-specific FeishuCard (+ its parseFeishuLink helper), so this module
+//     now builds the section itself: a <PageSection> (集成 · INTEGRATIONS) + a readiness rail
+//     (gating ONLY DeepSeek — 飞书 is optional) + two symmetric connection cards. DeepSeek uses
+//     the still-shipped <DeepSeekCard> (now WITHOUT a model <Select>); 飞书 is composed from the
+//     generic <ConnectionCard> + <Input>/<SecretField>/<HelpSteps> (see FeishuConnectionCard).
+//     This tab still owns its config state / persistence / per-block probe / backend-400 surfacing
+//     (§12 + §14), unchanged in behavior.
 //
 // Each tab owns its own SettingsSaveBar (GitHub model: one bar per tab, explicit 保存).
 //
@@ -19,12 +23,16 @@
 //           owner session, §17) does NOT render as a settings error: it calls onNeedLogin so App
 //           routes the owner to /signin. Never-configured → all-null skeleton → empty cards.
 //
-//   集成 cards → DeepSeek: apiKey (SecretField) + model (Select). 飞书: appId / secret / link (a
-//           Bitable share URL the card parses to App Token + table). The backend stores appToken +
-//           tableId separately, so this module BRIDGES: it reconstructs a share link from the
-//           stored appToken/tableId on load, and parses the edited link back on save. Secret
-//           fields show a MASKED affordance via `masked`; a secret left blank is OMITTED from the
-//           ConfigInput so saveConfig keeps the stored secret (§12.4 "don't re-submit the mask").
+//   集成 cards → DeepSeek: apiKey (SecretField). The 对话模型 selection was dropped from the card
+//           in DS 0.10.0; `model` still round-trips through config (echoed in, sent back) so a
+//           re-save never wipes the stored model, but it has no UI here (the conversation-level
+//           model chip, if any, is a separate concern). 飞书: appId / secret / link (a Bitable
+//           share URL parsed to App Token + table by this module's own parseFeishuLink). The
+//           backend stores appToken + tableId separately, so this module BRIDGES: it reconstructs
+//           a share link from the stored appToken/tableId on load, and parses the edited link back
+//           on save. Secret fields show a MASKED affordance via `masked`; a secret left blank is
+//           OMITTED from the ConfigInput so saveConfig keeps the stored secret (§12.4 "don't
+//           re-submit the mask").
 //
 //   集成 save → saveConfig(input). 200 → "已保存" + re-echo masked view. 400 → surface the backend's
 //           ApiError.message verbatim (top-level + matching card field). 401 → onNeedLogin.
@@ -43,11 +51,11 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   SettingsSheet,
-  IntegrationSettings,
   SettingsSaveBar,
   DeepSeekCard,
-  FeishuCard,
-  parseFeishuLink,
+  ConnectionCard,
+  SecretField,
+  HelpSteps,
   PageSection,
   Avatar,
   Field,
@@ -68,14 +76,20 @@ import { ApiError } from "./core/apiClient";
 // maxLength 规则在提交前拦下（后端 400 仅作纵深防御兜底）。
 const MAX_DISPLAY_NAME_LENGTH = 64;
 
-// The DeepSeek model options surfaced in the card's <Select>. Mirrors the DS default
-// list but pinned here so the saved `model` always maps to a known option.
-const MODEL_OPTIONS = [
-  { value: "deepseek-chat", label: "deepseek-chat · 通用 · 快" },
-  { value: "deepseek-reasoner", label: "deepseek-reasoner · 深度推理" },
-];
+// Parse a 飞书 Bitable share URL into { token, table } — the App Token (from `/base/<token>`
+// or `?app_token=`) and the optional data-table id (`?table=`). Inlined here because DS 0.10.0
+// removed the FeishuCard component AND its exported `parseFeishuLink` helper (vendor-specific);
+// the link → appToken/tableId bridging is product logic now, so this module owns it. Mirrors
+// the helper's prior behavior verbatim so the saved appToken/tableId round-trip is unchanged.
+function parseFeishuLink(url) {
+  if (!url) return null;
+  const tokenM = url.match(/\/base\/([A-Za-z0-9]+)/) || url.match(/[?&]app_token=([A-Za-z0-9]+)/);
+  const tableM = url.match(/[?&]table=([A-Za-z0-9]+)/);
+  if (!tokenM) return null;
+  return { token: tokenM[1], table: tableM ? tableM[1] : "" };
+}
 
-// Reconstruct a Bitable share link the FeishuCard can parse back into {token, table},
+// Reconstruct a Bitable share link `parseFeishuLink` can parse back into {token, table},
 // from the stored appToken + tableId (the backend keeps them as separate plaintext
 // fields, but the card's single editable is the share URL). Empty when no appToken.
 function linkFromStored(feishu) {
@@ -151,6 +165,120 @@ function AccountSection({ user, form, onLogout }) {
         </Field>
       </div>
     </PageSection>
+  );
+}
+
+/**
+ * FeishuConnectionCard — 应用层自组合的「飞书多维表格」连接卡 (SPEC §12 + §14). DS 0.10.0 删除了
+ * 厂商专用的 FeishuCard,这里改用通用 <ConnectionCard> + <Input>/<SecretField>/<HelpSteps> 组合出
+ * 一张与 DeepSeek 卡对称的卡:App ID + App Secret + 多维表格分享链接(就地解析出 App Token/数据表
+ * 并明文回显)。纯展示 —— 配置状态 / 连接探测 / 持久化由 SettingsOverlay 拥有,props 进、事件出。
+ *
+ * @param {object} props
+ * @param {string} [props.appId] / [props.secret] / [props.link]                      受控字段值
+ * @param {(v:string)=>void} props.onAppIdChange/onSecretChange/onLinkChange          编辑回调(值)
+ * @param {boolean} [props.masked]    已存 app_secret → 显示掩码占位 + 「留空保持不变」
+ * @param {string} [props.appIdError] / [secretError] / [linkError]                   字段级后端错误
+ * @param {"idle"|"testing"|"ok"|"error"} [props.status]   调用方控制的连接状态(驱动 StatusPill/TestRow)
+ * @param {string} [props.result]     TestRow 结果行
+ * @param {() => void} [props.onTest]  点「测试连接」
+ * @param {boolean} [props.canTest]   覆盖派生的可测态(默认:有 App ID 且有 secret 或已掩码)
+ */
+function FeishuConnectionCard({
+  appId = "",
+  onAppIdChange,
+  secret = "",
+  onSecretChange,
+  link = "",
+  onLinkChange,
+  masked = false,
+  appIdError,
+  secretError,
+  linkError,
+  status = "idle",
+  result,
+  onTest,
+  canTest,
+}) {
+  // 解析当前链接 → App Token + 数据表;就地明文回显,让 owner 确认识别正确(非密字段)。
+  const parsed = parseFeishuLink(link);
+  // 已存 secret 且未编辑 → 掩码占位(与 DeepSeekCard 的掩码文案一致,§12.4 留空保持不变)。
+  const secretMaskedNow = masked && !(secret || "").trim();
+  // Test 探测的是后端已存配置 (§14),配置加载后即可用;canTest 显式控制,否则按本地字段派生。
+  const testDisabled =
+    canTest !== undefined ? !canTest : !(appId || "").trim() || (!(secret || "").trim() && !masked);
+  return (
+    <ConnectionCard
+      icon="table"
+      title="飞书多维表格"
+      desc="连接你的飞书自建应用并指定一张多维表格 —— 发布的表单每次提交都会写入一行(可选)。"
+      status={status}
+      result={result}
+      onTest={onTest}
+      testDisabled={testDisabled}
+      idleHint="填写应用凭证后测试连接"
+    >
+      <Input
+        label="App ID"
+        hint="应用标识，可公开。"
+        error={appIdError}
+        mono
+        value={appId}
+        placeholder="cli_xxxxxxxxxxxx"
+        spellCheck={false}
+        onChange={(e) => onAppIdChange && onAppIdChange(e.target.value)}
+      />
+      <SecretField
+        label="App Secret"
+        value={secret}
+        onChange={onSecretChange}
+        placeholder={
+          secretMaskedNow ? "已保存 ········  ·  留空则保持不变" : "应用密钥（与 App ID 配对）"
+        }
+        hint={
+          secretMaskedNow ? "已存密钥 · 留空表示不修改，输入新值即覆盖" : "应用密钥，加密存储。"
+        }
+        error={secretError}
+      />
+      <Input
+        label="多维表格分享链接"
+        hint="粘贴目标多维表格的分享链接，自动识别 App Token 与数据表。"
+        error={linkError}
+        mono
+        value={link}
+        placeholder="https://your-team.feishu.cn/base/bascn…?table=tbl…"
+        spellCheck={false}
+        onChange={(e) => onLinkChange && onLinkChange(e.target.value)}
+      />
+      {parsed?.token ? (
+        <p className="fs-readout">
+          已识别：App Token <code>{parsed.token}</code>
+          {parsed.table ? (
+            <React.Fragment>
+              {" · "}数据表 <code>{parsed.table}</code>
+            </React.Fragment>
+          ) : null}
+        </p>
+      ) : null}
+      <HelpSteps
+        title="如何获取飞书应用凭证？"
+        steps={[
+          <React.Fragment>
+            打开飞书开放平台 <code>open.feishu.cn</code>，创建一个「企业自建应用」。
+          </React.Fragment>,
+          <React.Fragment>
+            在「凭证与基础信息」中复制 <code>App ID</code> 与 <code>App Secret</code>。
+          </React.Fragment>,
+          <React.Fragment>
+            到「权限管理」开通多维表格读写权限 <code>bitable:app</code>，并发布版本。
+          </React.Fragment>,
+          <React.Fragment>
+            新建或打开一张多维表格，复制它的<strong>分享链接</strong>粘贴到上方。
+          </React.Fragment>,
+        ]}
+        link={{ href: "https://open.feishu.cn", label: "打开飞书开放平台" }}
+      />
+    </ConnectionCard>
   );
 }
 
@@ -341,11 +469,11 @@ export function SettingsOverlay({
     }
   };
 
-  // Readiness rail (compositional IntegrationSettings): an integration counts as ready when it
-  // has stored creds OR its last probe came back ok. Cosmetic — drives the hero rail copy.
-  const readyCount =
-    (hasStoredApiKey || dsConn.status === "ok" ? 1 : 0) +
-    (hasStoredSecret || fsConn.status === "ok" ? 1 : 0);
+  // Readiness rail (self-composed, replacing the removed IntegrationSettings rail): an integration
+  // counts as ready when it has stored creds OR its last probe came back ok. Per chat13, the rail
+  // GATES ONLY DeepSeek (required) — 飞书 is optional, shown as a connected/optional count.
+  const dsReady = hasStoredApiKey || dsConn.status === "ok";
+  const fsReady = hasStoredSecret || fsConn.status === "ok";
 
   // 放弃更改 (集成 SettingsSaveBar onReset): revert edits back to the last-loaded/saved view.
   const resetForm = () => {
@@ -419,63 +547,82 @@ export function SettingsOverlay({
       {section === "account" ? (
         <AccountSection user={user} form={accountForm} onLogout={onLogout} />
       ) : (
-        <IntegrationSettings ready={readyCount} total={2} intro={intro}>
-          <DeepSeekCard
-            apiKey={apiKey}
-            onApiKeyChange={(v) => {
-              touch();
-              clearFieldError("keyError");
-              setApiKey(v);
-              setDsConn(IDLE);
-            }}
-            model={model}
-            onModelChange={(v) => {
-              touch();
-              setModel(v);
-            }}
-            models={MODEL_OPTIONS}
-            masked={hasStoredApiKey}
-            keyError={fieldErrors.keyError}
-            status={dsConn.status}
-            result={dsConn.result}
-            onTest={runTest}
-            // Test probes the STORED backend config (§14), not the local fields, so it is
-            // always available once loaded — "未配置" is a normal result, not a reason to disable.
-            canTest={!loading}
-          />
+        <PageSection eyebrow="集成 · INTEGRATIONS" title="连接你的服务" description={intro}>
+          {/* 自组合就绪栏(替代已移除的 IntegrationSettings 内置 rail):单个 dot 只 gate DeepSeek;
+              飞书显示「已连接 / 可选」,不参与 gating(chat13)。 */}
+          <div className="d-ready">
+            <div className="d-ready__dots">
+              <span className={"d-ready__dot" + (dsReady ? " is-on" : "")} />
+            </div>
+            <div className="d-ready__txt">
+              {dsReady ? (
+                <span>
+                  <strong>DeepSeek 已连接，可以开始运行。</strong>飞书多维表格为可选。
+                </span>
+              ) : (
+                <span>
+                  连接 <strong>DeepSeek</strong>{" "}
+                  后即可开始运行；飞书多维表格为可选，连上后提交会自动写入。
+                </span>
+              )}
+            </div>
+            <span className="d-ready__count">{fsReady ? "飞书 · 已连接" : "飞书 · 可选"}</span>
+          </div>
 
-          <FeishuCard
-            appId={appId}
-            onAppIdChange={(v) => {
-              touch();
-              clearFieldError("appIdError");
-              setAppId(v);
-              setFsConn(IDLE);
-            }}
-            secret={secret}
-            onSecretChange={(v) => {
-              touch();
-              clearFieldError("secretError");
-              setSecret(v);
-              setFsConn(IDLE);
-            }}
-            link={link}
-            onLinkChange={(v) => {
-              touch();
-              clearFieldError("linkError");
-              setLink(v);
-              setFsConn(IDLE);
-            }}
-            masked={hasStoredSecret}
-            appIdError={fieldErrors.appIdError}
-            secretError={fieldErrors.secretError}
-            linkError={fieldErrors.linkError}
-            status={fsConn.status}
-            result={fsConn.result}
-            onTest={runTest}
-            canTest={!loading}
-          />
-        </IntegrationSettings>
+          <div className="d-integ-cards">
+            <DeepSeekCard
+              apiKey={apiKey}
+              onApiKeyChange={(v) => {
+                touch();
+                clearFieldError("keyError");
+                setApiKey(v);
+                setDsConn(IDLE);
+              }}
+              // 对话模型选择已随 DS 0.10.0 从卡片移除;`model` 仍在 config 里 round-trip(echo 进、
+              // buildInput 发回),re-save 不会清掉已存 model,但此处不再有选择 UI。
+              masked={hasStoredApiKey}
+              keyError={fieldErrors.keyError}
+              status={dsConn.status}
+              result={dsConn.result}
+              onTest={runTest}
+              // Test probes the STORED backend config (§14), not the local fields, so it is
+              // always available once loaded — "未配置" is a normal result, not a reason to disable.
+              canTest={!loading}
+            />
+
+            <FeishuConnectionCard
+              appId={appId}
+              onAppIdChange={(v) => {
+                touch();
+                clearFieldError("appIdError");
+                setAppId(v);
+                setFsConn(IDLE);
+              }}
+              secret={secret}
+              onSecretChange={(v) => {
+                touch();
+                clearFieldError("secretError");
+                setSecret(v);
+                setFsConn(IDLE);
+              }}
+              link={link}
+              onLinkChange={(v) => {
+                touch();
+                clearFieldError("linkError");
+                setLink(v);
+                setFsConn(IDLE);
+              }}
+              masked={hasStoredSecret}
+              appIdError={fieldErrors.appIdError}
+              secretError={fieldErrors.secretError}
+              linkError={fieldErrors.linkError}
+              status={fsConn.status}
+              result={fsConn.result}
+              onTest={runTest}
+              canTest={!loading}
+            />
+          </div>
+        </PageSection>
       )}
     </SettingsSheet>
   );

@@ -2,7 +2,9 @@
 // 集成设置 (SPEC §12 owner config + §14 connection test, §17 auth).
 //
 // Since DS 0.8.0 集成设置 is the 集成 tab of a floating settings overlay (src/settings.jsx →
-// SettingsOverlay), built from two pure-display DS cards (DeepSeekCard + FeishuCard) + this
+// SettingsOverlay). DS 0.10.0 removed IntegrationSettings + FeishuCard, so the 集成 section is now
+// SELF-COMPOSED: a readiness rail (gating only DeepSeek) + the still-shipped <DeepSeekCard> (no
+// model select) + a self-built 飞书 card (ConnectionCard + Input/SecretField/HelpSteps). Plus this
 // tab's OWN save bar, backend error display, and a 401 → onNeedLogin handoff (App then routes
 // to /signin). We render the real <SettingsOverlay section="integrations"> and INJECT fake
 // getConfig/saveConfig/testConnections/onNeedLogin via its props — the same deterministic seam
@@ -25,8 +27,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/integration-settings.feature"));
 
 // A fully-configured masked view as GET /api/config would return it: secret fields
-// (deepseek.apiKey, feishu.appSecret) come back MASKED; the rest plaintext (§12.3). The
-// FeishuCard surfaces appToken/tableId via a Bitable share link the page reconstructs.
+// (deepseek.apiKey, feishu.appSecret) come back MASKED; the rest plaintext (§12.3). The 飞书
+// card surfaces appToken/tableId via a Bitable share link the page reconstructs.
 const MASKED_CONFIGURED = {
   deepseek: { apiKey: "sk-…wxyz", model: "deepseek-chat" },
   feishu: {
@@ -106,15 +108,15 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
         masked.forEach((el) => expect(el.value).toBe(""));
       });
     });
-    And("非密字段（model / app_id / app_token / table_id）以明文回显", () => {
-      // model echoes in the DeepSeek <Select>; app_id in its input; app_token + table_id
-      // are surfaced (plaintext) via the FeishuCard's parsed share-link read-out.
+    And("非密字段（app_id / app_token / table_id）以明文回显", () => {
+      // app_id echoes in its input; app_token + table_id are surfaced (plaintext) via the 飞书
+      // card's parsed share-link read-out. (DS 0.10.0 dropped the model <Select>, so model has
+      // no UI here — it still round-trips through config, just isn't displayed.)
       const inputs = Array.from(document.querySelectorAll("input"));
       const values = inputs.map((el) => el.value);
       expect(values).toContain("cli_a1b2c3"); // app_id input
-      // model lives in a <select>
-      const selectVals = Array.from(document.querySelectorAll("select")).map((s) => s.value);
-      expect(selectVals).toContain("deepseek-chat");
+      // No model <Select> is rendered anymore.
+      expect(document.querySelector("select")).toBeNull();
       // app_token + table_id are read out from the reconstructed link (plaintext).
       expect(screen.getByText("bascnTOKEN")).toBeInTheDocument();
       expect(screen.getByText("tblTABLE")).toBeInTheDocument();
@@ -192,9 +194,10 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await waitFor(() => expect(saveButton()).toBeInTheDocument());
     });
     When("owner 把 DeepSeek key 留空并保存", () => {
-      // Make the form dirty (so Save is enabled) without typing a key — edit the model.
-      fireEvent.change(document.querySelector("select"), {
-        target: { value: "deepseek-reasoner" },
+      // Make the form dirty (so Save is enabled) without typing a key — edit a non-key field
+      // (飞书 App ID). DS 0.10.0 dropped the model <Select>, so there is no model field to nudge.
+      fireEvent.change(screen.getByPlaceholderText("cli_xxxxxxxxxxxx"), {
+        target: { value: "cli_dirty" },
       });
       fireEvent.click(saveButton());
     });
@@ -276,10 +279,11 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
         masked.forEach((el) => expect(el.value).toBe(""));
       });
     });
-    When("owner 只改了 model 而不动两个密钥字段并保存", async () => {
-      // Edit only the DeepSeek model <Select>, leaving both secret fields untouched (empty).
-      fireEvent.change(document.querySelector("select"), {
-        target: { value: "deepseek-reasoner" },
+    When("owner 只改了非密字段（飞书 App ID）而不动两个密钥字段并保存", async () => {
+      // DS 0.10.0 dropped the model <Select>, so edit a non-secret field that still has UI —
+      // the 飞书 App ID — leaving both secret fields untouched (empty masked affordance).
+      fireEvent.change(screen.getByPlaceholderText("cli_xxxxxxxxxxxx"), {
+        target: { value: "cli_edited" },
       });
       fireEvent.click(saveButton());
       await waitFor(() => expect(client.saveConfig).toHaveBeenCalled());
@@ -293,7 +297,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       expect(JSON.stringify(input)).not.toContain("sk-…wxyz");
       expect(JSON.stringify(input)).not.toContain("yy…yy");
       // The edited non-secret IS submitted.
-      expect(input.deepseek.model).toBe("deepseek-reasoner");
+      expect(input.feishu.appId).toBe("cli_edited");
     });
     And("后端保留原有的两个密钥不变", () => {
       // Contract: omitting a secret subfield = "keep stored value" (configClient §12.4).

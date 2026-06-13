@@ -2,10 +2,12 @@
 # + §17（owner-only 鉴权，缺/坏 token → 401）。本 feature 描述前端「集成设置」的可观察行为，不重述
 # 后端字段加密 / 掩码算法（那是 Worker 内部约定）。前端契约桩见 src/core/configClient.ts，UI 见
 # src/settings.jsx（SettingsOverlay → 集成 tab），浮层入口与 /settings 路由反映见 src/App.jsx。
-# 自 DS 0.6.0 起集成设置从弹窗改为独立页；DS 0.8.0 起改为**设计器内浮起浮层**(账户 + 集成双 tab)：
-# SettingsSheet › IntegrationSettings(集成分区:hero + 就绪栏 + 连接卡槽)› DeepSeekCard/FeishuCard
-# + 底部 SettingsSaveBar(显式保存)。打开浮层会反映 /settings URL 但不卸载设计器；本项目的后端接线
-# 与可观察行为契约不变。「owner 打开集成设置」= 打开浮层并切到集成 tab。
+# 自 DS 0.6.0 起集成设置从弹窗改为独立页；DS 0.8.0 起改为**设计器内浮起浮层**(账户 + 集成双 tab)。
+# DS 0.10.0 移除了 IntegrationSettings 与厂商专用的 FeishuCard,集成分区改为**调用方自组合**:
+# SettingsSheet › PageSection(就绪栏只 gate DeepSeek + 连接卡容器)› DeepSeekCard(已无对话模型选择) +
+# 自组合的飞书卡(ConnectionCard + App ID/App Secret/分享链接 + HelpSteps) + 底部 SettingsSaveBar(显式保存)。
+# 打开浮层会反映 /settings URL 但不卸载设计器;本项目的后端接线与可观察行为契约不变(飞书仍按分享链接
+# 桥接 App Token/数据表)。「owner 打开集成设置」= 打开浮层并切到集成 tab。
 Feature: 集成设置页 · owner 配置 DeepSeek 与飞书
   作为表单作者(owner)
   我想在集成设置页里连接自己的 DeepSeek key 与飞书多维表格
@@ -16,7 +18,7 @@ Feature: 集成设置页 · owner 配置 DeepSeek 与飞书
     And 后端已保存过 DeepSeek key 与飞书凭据
     When owner 打开集成设置
     Then 设置页用掩码值回显 DeepSeek key 与飞书 app_secret
-    And 非密字段（model / app_id / app_token / table_id）以明文回显
+    And 非密字段（app_id / app_token / table_id）以明文回显
 
   Scenario: 从未配置时打开设置显示空表单
     Given owner 已登录
@@ -47,7 +49,7 @@ Feature: 集成设置页 · owner 配置 DeepSeek 与飞书
   Scenario: 不修改的密钥字段不会被覆盖
     Given owner 已登录并打开集成设置
     And 设置页回显着 DeepSeek key 与飞书 app_secret 的掩码值
-    When owner 只改了 model 而不动两个密钥字段并保存
+    When owner 只改了非密字段（飞书 App ID）而不动两个密钥字段并保存
     Then 提交里不包含 DeepSeek key 与飞书 app_secret 的密文
     And 后端保留原有的两个密钥不变
 
