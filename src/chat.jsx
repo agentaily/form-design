@@ -8,7 +8,14 @@
 //   • exports `renderChatTurn`, the per-turn renderer fed to <ConversationThread
 //     renderTurn>, mapping our message model onto the DS chat/ai atoms.
 import React from "react";
-import { Message, Reasoning, ToolCall, Suggestions, Alert } from "@agentaily/design-system";
+import {
+  Message,
+  Markdown,
+  Reasoning,
+  ToolCall,
+  Suggestions,
+  Alert,
+} from "@agentaily/design-system";
 
 // The local Lucide table is gone — every icon now resolves through the upstream
 // unified set (`Icon.names` lists them all). Re-exported so call-sites don't change.
@@ -21,7 +28,10 @@ export { Icon } from "@agentaily/design-system";
 //   • assistant · reasoning      → <Reasoning> (思考块)
 //   • assistant · tool           → <ToolCall>  (add_field 等工具卡)
 //   • assistant · error          → <Alert variant="danger"> (对话失败)
-//   • assistant · text (default) → <Message role="assistant"> + optional <Suggestions>
+//   • assistant · text (default) → <Message role="assistant"> with prose rendered
+//                                   through the DS <Markdown> primitive (lists / bold /
+//                                   links / code / headings typeset, never raw source) +
+//                                   optional <Suggestions>
 export function renderChatTurn(m, ctx, onSuggest) {
   if (m.role === "user") {
     return (
@@ -50,10 +60,15 @@ export function renderChatTurn(m, ctx, onSuggest) {
       </Alert>
     );
   }
-  // assistant prose (+ optional suggestion chips once the turn has settled)
+  // assistant prose (+ optional suggestion chips once the turn has settled). The text
+  // is model output that routinely carries markdown (lists / bold / links / code), so
+  // it goes through the DS <Markdown> primitive — typeset, theme-aware, and XSS-safe
+  // (parsed to a node tree, never dangerouslySetInnerHTML; link schemes sanitized).
+  // Passing React-node children keeps the <Suggestions> sibling intact (the Message
+  // `markdown` prop would override children, so we render <Markdown> explicitly).
   return (
     <Message role="assistant" streaming={ctx.streaming}>
-      <p>{m.text}</p>
+      <Markdown content={m.text} />
       {m.suggestions && !ctx.streaming ? (
         <div style={{ marginTop: 12 }}>
           <Suggestions items={m.suggestions} onSelect={onSuggest} />
