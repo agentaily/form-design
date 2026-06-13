@@ -42,5 +42,6 @@ intent / handoff ─► spec-architect ─► features/ + contracts ────
 - **Least privilege**: tools encode the boundary (reviewer has no Write).
 - **Parallelism needs isolation**: run concurrent implementers in git worktrees to avoid clobbering shared files.
 - **Skills vs agents**: skills (`agentaily-design`, `design-sync`) are shared know-how any agent loads; agents are the workers.
+- **Persistent memory**: each agent carries `memory: project` + a `# Persistent Agent Memory` block — it accrues institutional knowledge into `.claude/agent-memory/<agent>/` (per-agent, project-scoped, version-controlled & team-shared), so learnings survive across conversations.
 
 Invoke via the Agent tool (`subagent_type: <name>`). The main loop stays the orchestrator: it decomposes by feature, routes, and reconciles conflicts.
