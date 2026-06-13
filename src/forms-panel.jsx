@@ -10,7 +10,8 @@
 //   <FormsPanel> — the "我的表单" full-screen PanelSheet (PR-5: was a DS Dialog). On
 //     open → listForms() → render one CARD per form: title (meta.title), a status Badge
 //     (已发布 / 已关闭), createdAt, the public fill link (publicFormUrl(slug)), and a
-//     "查看提交" affordance that opens the existing SubmissionsView. Per-card actions
+//     "查看全部提交" affordance that swaps the panel's content to that form's 提交数据
+//     (SubmissionsContent, in-panel — not a new Dialog; PR-6/chat13). Per-card actions
 //     (bottom row):
 //       • 复制链接 — copy the public fill link.
 //       • 编辑 — PR-7 placeholder (载回设计器编辑 is a later root): disabled until then.
@@ -45,7 +46,7 @@ import {
   DropdownMenu,
 } from "@agentaily/design-system";
 import { Icon } from "./chat.jsx";
-import { SubmissionsView } from "./submissions-view.jsx";
+import { SubmissionsContent } from "./submissions-view.jsx";
 import {
   publishForm as defaultPublishForm,
   listForms as defaultListForms,
@@ -126,8 +127,12 @@ export function FormsPanel({
   const [busy, setBusy] = useState({});
   // The form pending a delete confirmation (its summary), or null when none.
   const [pendingDelete, setPendingDelete] = useState(null);
-  // The form whose submissions are being viewed (数据后台「看提交」), or null when closed.
+  // 数据后台「查看全部提交」(§18): 在同一 PanelSheet 内 swap 内容（不再开独立 Dialog）。
+  //   viewing — 正在看提交数据的表单（null = 列表视图）；
+  //   detail  — 正在看的单条提交记录（null = 提交列表；非 null = 记录详情子页）。
+  // 两态都住在面板层，因为面包屑（PanelSheet 顶栏）要跟随 列表 → 提交数据 → 记录号 加级回退。
   const [viewing, setViewing] = useState(null);
+  const [detail, setDetail] = useState(null);
 
   const handleError = useCallback(
     (e) => {
@@ -149,6 +154,7 @@ export function FormsPanel({
     setLoading(true);
     setPendingDelete(null);
     setViewing(null);
+    setDetail(null);
     Promise.resolve()
       .then(() => listForms())
       .then((list) => {
@@ -232,10 +238,9 @@ export function FormsPanel({
             <p className="d-formcard__sub">创建于 {formatCreatedAt(form.createdAt)}</p>
           </div>
 
-          {/* 「看全部提交」: a count-styled header whose action opens the existing
-              SubmissionsView (a DS Button — no hand-rolled clickable chrome). The in-panel
-              list↔提交↔详情 切换 + reading real D1 counts is PR-6 (depends on #56) — this
-              root only restyles the entry + keeps current behavior. */}
+          {/* 「查看全部提交」(§18): a DS Button (no hand-rolled clickable chrome) that swaps
+              this same PanelSheet's content to the form's 提交数据 (SubmissionsContent) —
+              NOT a new Dialog/panel (PR-6, chat13). 读真实 D1 数据 (#56). */}
           <div className="d-formcard__body">
             <div className="d-formcard__subs">
               <span className="ax-label">最近提交</span>
@@ -294,47 +299,114 @@ export function FormsPanel({
     );
   };
 
-  // The bar's right slot shows the form count once the list has loaded (no count while
-  // loading / on error / empty — the empty state speaks for itself).
+  // ── 同一面板内 列表 ↔ 提交数据 ↔ 记录详情 的内容切换（chat13）──────────────────────────
+  // PanelSheet 本身始终挂载（不 remount）：只有内层 `.mf-swap` 随视图换 key 重挂、做内容级 fade。
+  // 故面板首开有上浮动画；之后的内部切换没有面板级动效，只内容淡入。记录详情是面板内子页、非 Dialog。
+  const inSubs = !!viewing;
+  const inDetail = inSubs && !!detail;
+  // 返回「我的表单」列表：清掉提交视图 + 详情子页。
+  const backToList = () => {
+    setDetail(null);
+    setViewing(null);
+  };
+
+  // 面包屑随当前视图加级回退：我的表单 → 提交数据 → #记录号（各级可点回退）。
+  const crumb = inSubs ? (
+    <span className="sb-crumb">
+      <button type="button" className="sb-crumb__back" onClick={backToList}>
+        我的表单
+      </button>
+      <span className="sb-crumb__sep" aria-hidden="true">
+        /
+      </span>
+      {inDetail ? (
+        <React.Fragment>
+          <button type="button" className="sb-crumb__back" onClick={() => setDetail(null)}>
+            提交数据
+          </button>
+          <span className="sb-crumb__sep" aria-hidden="true">
+            /
+          </span>
+          <span className="sb-crumb__cur">{detail._label}</span>
+        </React.Fragment>
+      ) : (
+        <span className="sb-crumb__cur">提交数据</span>
+      )}
+    </span>
+  ) : (
+    "我的表单"
+  );
+  const barLabel = inSubs ? "提交数据" : "我的表单";
+
+  // The bar's right slot: in the submissions view, the form's collection status; in the
+  // list view, the form count once loaded (no count while loading / on error / empty —
+  // the empty state speaks for itself).
   const countBadge =
     !loading && !loadError && forms.length > 0 ? (
       <Badge variant="neutral">{forms.length} 个表单</Badge>
     ) : null;
+  const barActions = inSubs ? (
+    <Badge variant={viewing.status === "published" ? "ok" : "neutral"} dot>
+      {viewing.status === "published" ? "收集中" : "已关闭"}
+    </Badge>
+  ) : (
+    countBadge
+  );
 
   return (
     <PanelSheet
       open={open}
-      crumb="我的表单"
-      label="我的表单"
+      crumb={crumb}
+      label={barLabel}
       onClose={onClose}
       barFullWidth
-      actions={countBadge}
+      actions={barActions}
     >
-      <PageSection
-        eyebrow="我的表单 · MY FORMS"
-        title="你发布的表单"
-        description="这里汇总你创建并发布的所有表单。复制链接分享给填表人、查看收集到的提交，或随时关闭收集与删除。"
-      >
-        {loadError ? (
-          <Alert variant="danger" title="出错了">
-            {loadError}
-          </Alert>
-        ) : null}
-
-        {loading ? (
-          <div className="d-forms__loading">
-            <Spinner size="md" />
-          </div>
-        ) : forms.length === 0 ? (
-          <Empty
-            icon={<Icon name="folder" size={18} />}
-            title="还没有发布过表单"
-            description="在设计器里搭好一份表单后点「发布」，发布过的表单会出现在这里。"
+      {/* 内容交换层：换 key → 内层重挂 → `.mf-swap` 内容淡入；PanelSheet 不重新过场。 */}
+      <div className="mf-swap" key={inSubs ? "subs:" + viewing.slug : "list"}>
+        {inSubs ? (
+          // 数据后台「查看全部提交」(§18): 同一面板内内联渲染提交数据（content-only，非 Dialog）。
+          // 读 owner-only submissionsClient（Bearer）；401 → 同一 onNeedLogin（关面板 + 弹登录）。
+          <SubmissionsContent
+            form={viewing}
+            detail={detail}
+            setDetail={setDetail}
+            onBackToList={backToList}
+            onNeedLogin={() => {
+              setViewing(null);
+              setDetail(null);
+              onNeedLogin?.();
+            }}
+            listSubmissions={listSubmissions}
           />
         ) : (
-          <div className="d-forms__cards">{forms.map((f) => FormCardItem(f))}</div>
+          <PageSection
+            eyebrow="我的表单 · MY FORMS"
+            title="你发布的表单"
+            description="这里汇总你创建并发布的所有表单。复制链接分享给填表人、查看收集到的提交，或随时关闭收集与删除。"
+          >
+            {loadError ? (
+              <Alert variant="danger" title="出错了">
+                {loadError}
+              </Alert>
+            ) : null}
+
+            {loading ? (
+              <div className="d-forms__loading">
+                <Spinner size="md" />
+              </div>
+            ) : forms.length === 0 ? (
+              <Empty
+                icon={<Icon name="folder" size={18} />}
+                title="还没有发布过表单"
+                description="在设计器里搭好一份表单后点「发布」，发布过的表单会出现在这里。"
+              />
+            ) : (
+              <div className="d-forms__cards">{forms.map((f) => FormCardItem(f))}</div>
+            )}
+          </PageSection>
         )}
-      </PageSection>
+      </div>
 
       {/* Confirmation surface (§21.4 destructive action). Exactly one element matches
           the spec's confirm-prompt regex — the title — so the test's findByText resolves
@@ -348,21 +420,6 @@ export function FormsPanel({
         confirmLabel="确定"
         onCancel={() => setPendingDelete(null)}
         onConfirm={confirmDelete}
-      />
-
-      {/* 数据后台「看提交」(§18): opens for one form's slug, reading via the owner-only
-          submissionsClient (Bearer). A 401 routes through the SAME onNeedLogin as the
-          panel — close the view and hand off to login (App closes the panel + pops it). */}
-      <SubmissionsView
-        open={!!viewing}
-        slug={viewing?.slug}
-        title={viewing?.meta?.title}
-        onClose={() => setViewing(null)}
-        onNeedLogin={() => {
-          setViewing(null);
-          onNeedLogin?.();
-        }}
-        listSubmissions={listSubmissions}
       />
     </PanelSheet>
   );
