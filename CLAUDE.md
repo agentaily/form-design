@@ -1,7 +1,7 @@
 # Agentaily Forms — 项目约定
 
 对话式表单设计器(**设计 → 发布 → 收集 → 看结果**)。导航:
-README(怎么跑/接线)· [SPEC.md](./SPEC.md)(产品+架构)· [ROADMAP.md](./ROADMAP.md)(能力地图)·
+README(怎么跑/接线)· [SPEC.md](./SPEC.md)(产品+架构)· [DESIGN.md](./DESIGN.md)(视觉/交互设计)· [ROADMAP.md](./ROADMAP.md)(能力地图)·
 [DEVELOPMENT.md](./DEVELOPMENT.md)(开发文档)· [TESTING.md](./TESTING.md)(测试策略)· [OPERATIONS.md](./OPERATIONS.md)(运维)·
 [`.claude/agents/README.md`](./.claude/agents/README.md)(sub agent 分工)。
 
