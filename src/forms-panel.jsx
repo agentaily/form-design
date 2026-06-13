@@ -1,19 +1,24 @@
 // forms-panel.jsx — owner "我的表单" management panel (SPEC §21, frontend) + the
 // publish-feedback surface (SPEC §16). Composed entirely from
-// @agentaily/design-system (Dialog/Button/Badge/Alert/AlertDialog/Spinner/Empty) —
-// never hand-rolled chrome.
+// @agentaily/design-system (PanelSheet/PageSection/Card/DropdownMenu/Dialog/Button/
+// Badge/Alert/AlertDialog/Spinner/Empty) — never hand-rolled chrome.
 //
 // Two cooperating pieces, both driven by an injectable formsClient (same seam pattern
 // as settings.jsx's getConfig/saveConfig: defaults to the real ./core/formsClient
 // functions, injectable so tests pass a fake client and stay deterministic):
 //
-//   <FormsPanel> — the "我的表单" Dialog. On open → listForms() → render one row per
-//     form: title (meta.title), a status Badge (已发布 / 已关闭), createdAt, and the
-//     public fill link (publicFormUrl(slug)) with a copy affordance. Per-row actions:
-//       • toggle status → updateForm(slug, { status }) published↔closed → reflect the
-//         returned status on the row's Badge.
-//       • delete → a confirmation step (AlertDialog) → on confirm deleteForm(slug)
-//         → drop the row; on cancel → no request, row stays.
+//   <FormsPanel> — the "我的表单" full-screen PanelSheet (PR-5: was a DS Dialog). On
+//     open → listForms() → render one CARD per form: title (meta.title), a status Badge
+//     (已发布 / 已关闭), createdAt, the public fill link (publicFormUrl(slug)), and a
+//     "查看提交" affordance that opens the existing SubmissionsView. Per-card actions
+//     (bottom row):
+//       • 复制链接 — copy the public fill link.
+//       • 编辑 — PR-7 placeholder (载回设计器编辑 is a later root): disabled until then.
+//       • `⋯` overflow menu (DropdownMenu):
+//           – 关闭收集 / 重新发布 → updateForm(slug, { status }) published↔closed →
+//             reflect the returned status on the card's Badge.
+//           – 删除 → a confirmation step (AlertDialog) → on confirm deleteForm(slug)
+//             → drop the card; on cancel → no request, card stays.
 //     Empty list → an empty state ("还没有发布过表单"), no error. A 401 from any call →
 //     onNeedLogin() (App closes this + pops login, mirroring settings.jsx §17 flow),
 //     NOT an inline error.
@@ -27,6 +32,9 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
+  PanelSheet,
+  PageSection,
+  Card,
   Dialog,
   Button,
   Badge,
@@ -34,6 +42,7 @@ import {
   AlertDialog,
   Spinner,
   Empty,
+  DropdownMenu,
 } from "@agentaily/design-system";
 import { Icon } from "./chat.jsx";
 import { SubmissionsView } from "./submissions-view.jsx";
@@ -193,49 +202,119 @@ export function FormsPanel({
     }
   };
 
-  const Row = (form) => {
+  // One form = one Card. data-slug is kept on the card so existing row-scoped tests
+  // (and any DOM lookups) resolve a single card by slug. Lifecycle actions live in a
+  // `⋯` DropdownMenu (PR-5 收敛); 复制链接 + 编辑 stay as direct foot buttons.
+  const FormCardItem = (form) => {
     const link = publicFormUrl(form.slug);
     const published = form.status === "published";
     return (
-      <li className="d-formrow" data-slug={form.slug} key={form.slug}>
-        <div className="d-formrow__head">
-          <span className="d-formrow__title">{form.meta?.title || "未命名表单"}</span>
-          <Badge variant={statusVariant(form.status)} dot>
-            {statusLabel(form.status)}
-          </Badge>
-        </div>
-        <div className="d-formrow__meta">
-          <span className="d-formrow__date">{formatCreatedAt(form.createdAt)}</span>
-          <a className="d-formrow__link" href={link} target="_blank" rel="noreferrer">
-            {link}
-          </a>
-        </div>
-        <div className="d-formrow__actions">
-          <Button variant="ghost" size="sm" onClick={() => copyLink(link)}>
-            复制链接
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => setViewing(form)}>
-            看提交
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={!!busy[form.slug]}
-            onClick={() => onToggle(form)}
-          >
-            {published ? "关闭" : "重新开放"}
-          </Button>
-          <Button variant="danger" size="sm" onClick={() => setPendingDelete(form)}>
-            删除
-          </Button>
-        </div>
-      </li>
+      <Card key={form.slug} padding="md">
+        <section className="d-formcard" data-slug={form.slug}>
+          <div className="d-formcard__head">
+            <div className="d-formcard__toprow">
+              {/* The public fill link (via the publicFormUrl seam) — the card's eyebrow. */}
+              <a
+                className="d-formcard__link"
+                href={link}
+                target="_blank"
+                rel="noreferrer"
+                title={link}
+              >
+                {link}
+              </a>
+              <Badge variant={statusVariant(form.status)} dot>
+                {statusLabel(form.status)}
+              </Badge>
+            </div>
+            {/* h2: one level under PageSection's h1 ("你发布的表单") — no outline skip. */}
+            <h2 className="d-formcard__title">{form.meta?.title || "未命名表单"}</h2>
+            <p className="d-formcard__sub">创建于 {formatCreatedAt(form.createdAt)}</p>
+          </div>
+
+          {/* 「看全部提交」: a count-styled header whose action opens the existing
+              SubmissionsView (a DS Button — no hand-rolled clickable chrome). The in-panel
+              list↔提交↔详情 切换 + reading real D1 counts is PR-6 (depends on #56) — this
+              root only restyles the entry + keeps current behavior. */}
+          <div className="d-formcard__body">
+            <div className="d-formcard__subs">
+              <span className="ax-label">最近提交</span>
+              <Button variant="ghost" size="sm" onClick={() => setViewing(form)}>
+                查看全部提交 ›
+              </Button>
+            </div>
+          </div>
+
+          <div className="d-formcard__foot">
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Icon name="copy" size={14} />}
+              onClick={() => copyLink(link)}
+            >
+              复制链接
+            </Button>
+            <span className="d-formcard__foot-sp" />
+            {/* 编辑/继续编辑 — PR-7「载回设计器编辑」才实现真编辑流；本根仅占位、禁用。 */}
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Icon name="pen" size={14} />}
+              disabled
+              title="编辑功能即将上线"
+            >
+              {published ? "继续编辑" : "编辑"}
+            </Button>
+            <DropdownMenu
+              align="end"
+              trigger={
+                <Button variant="ghost" size="sm" aria-label="更多操作">
+                  ⋯
+                </Button>
+              }
+              items={[
+                {
+                  label: published ? "关闭收集" : "重新发布",
+                  icon: <Icon name={published ? "power" : "refresh"} size={15} />,
+                  disabled: !!busy[form.slug],
+                  onSelect: () => onToggle(form),
+                },
+                { type: "separator" },
+                {
+                  label: "删除",
+                  icon: <Icon name="trash" size={15} />,
+                  danger: true,
+                  onSelect: () => setPendingDelete(form),
+                },
+              ]}
+            />
+          </div>
+        </section>
+      </Card>
     );
   };
 
+  // The bar's right slot shows the form count once the list has loaded (no count while
+  // loading / on error / empty — the empty state speaks for itself).
+  const countBadge =
+    !loading && !loadError && forms.length > 0 ? (
+      <Badge variant="neutral">{forms.length} 个表单</Badge>
+    ) : null;
+
   return (
-    <Dialog open={open} title="我的表单" onClose={onClose}>
-      <div className="d-forms">
+    <PanelSheet
+      open={open}
+      crumb="我的表单"
+      label="我的表单"
+      onClose={onClose}
+      barFullWidth
+      actions={countBadge}
+    >
+      <PageSection
+        eyebrow="我的表单 · MY FORMS"
+        title="你发布的表单"
+        description="这里汇总你创建并发布的所有表单。复制链接分享给填表人、查看收集到的提交，或随时关闭收集与删除。"
+      >
         {loadError ? (
           <Alert variant="danger" title="出错了">
             {loadError}
@@ -248,14 +327,14 @@ export function FormsPanel({
           </div>
         ) : forms.length === 0 ? (
           <Empty
-            icon={<Icon name="layout" size={18} />}
+            icon={<Icon name="folder" size={18} />}
             title="还没有发布过表单"
             description="在设计器里搭好一份表单后点「发布」，发布过的表单会出现在这里。"
           />
         ) : (
-          <ul className="d-forms__list">{forms.map((f) => Row(f))}</ul>
+          <div className="d-forms__cards">{forms.map((f) => FormCardItem(f))}</div>
         )}
-      </div>
+      </PageSection>
 
       {/* Confirmation surface (§21.4 destructive action). Exactly one element matches
           the spec's confirm-prompt regex — the title — so the test's findByText resolves
@@ -285,7 +364,7 @@ export function FormsPanel({
         }}
         listSubmissions={listSubmissions}
       />
-    </Dialog>
+    </PanelSheet>
   );
 }
 
