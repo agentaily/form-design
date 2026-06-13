@@ -114,3 +114,13 @@ Feature: owner 鉴权 注册 / 登录 与 owner-only 端点保护
     When 带一个伪造或无法验签的 token 请求一个 owner-only 端点
     Then 响应状态码为 401
     And 整个响应里不包含 JWT 签名密钥
+
+  # --- owner 个人资料（显示名 PUT /api/auth/profile）---------------------------
+
+  Scenario: owner 设置显示名并跨刷新持久化
+    Given 一个已注册并登录拿到 token 的 owner
+    And 该 owner 尚未设置过显示名
+    When 该 owner 把自己的显示名设为一个非空名字
+    Then 响应状态码为 200
+    And 响应体里的显示名等于刚提交的名字
+    And 该 owner 随后拉取自己的身份摘要时也能看到这个显示名

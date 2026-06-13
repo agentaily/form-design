@@ -6,6 +6,7 @@ import {
   findUserById,
   authenticateUser,
   markEmailVerified,
+  updateDisplayName,
   EmailTakenError,
   UserValidationError,
   MIN_PASSWORD_LENGTH,
@@ -148,5 +149,52 @@ describe("authenticateUser (SPEC.md §17.3 登录)", () => {
   it("returns null for a missing / empty password without throwing", async () => {
     await createUser(testEnv.DB, EMAIL, PASSWORD);
     expect(await authenticateUser(testEnv.DB, EMAIL, "")).toBeNull();
+  });
+});
+
+describe("display_name (SPEC.md §17 owner 个人资料)", () => {
+  it("a freshly created user has display_name = null (未设置 → 回退用邮箱)", async () => {
+    await createUser(testEnv.DB, EMAIL, PASSWORD);
+    const user = await findUserByEmail(testEnv.DB, EMAIL);
+    expect(user!.displayName).toBeNull();
+  });
+
+  it("updateDisplayName sets a display name (readable via findUserById/Email)", async () => {
+    const { id } = await createUser(testEnv.DB, EMAIL, PASSWORD);
+    await updateDisplayName(testEnv.DB, id, "陈伟");
+    expect((await findUserById(testEnv.DB, id))!.displayName).toBe("陈伟");
+    expect((await findUserByEmail(testEnv.DB, EMAIL))!.displayName).toBe("陈伟");
+  });
+
+  it("updateDisplayName with null clears the display name (回退用邮箱)", async () => {
+    const { id } = await createUser(testEnv.DB, EMAIL, PASSWORD);
+    await updateDisplayName(testEnv.DB, id, "陈伟");
+    await updateDisplayName(testEnv.DB, id, null);
+    expect((await findUserById(testEnv.DB, id))!.displayName).toBeNull();
+  });
+
+  it("updateDisplayName touches only display_name — never email / password / verified", async () => {
+    const { id } = await createUser(testEnv.DB, EMAIL, PASSWORD);
+    await markEmailVerified(testEnv.DB, id);
+    const before = await findUserById(testEnv.DB, id);
+    await updateDisplayName(testEnv.DB, id, "陈伟");
+    const after = await findUserById(testEnv.DB, id);
+    // The display name changed...
+    expect(after!.displayName).toBe("陈伟");
+    // ...but nothing else did, and the password still authenticates.
+    expect(after!.email).toBe(before!.email);
+    expect(after!.passwordHash).toBe(before!.passwordHash);
+    expect(after!.passwordSalt).toBe(before!.passwordSalt);
+    expect(after!.iterations).toBe(before!.iterations);
+    expect(after!.emailVerified).toBe(before!.emailVerified);
+    expect(await authenticateUser(testEnv.DB, EMAIL, PASSWORD)).not.toBeNull();
+  });
+
+  it("updateDisplayName is isolated per user (A's change does not touch B)", async () => {
+    const a = await createUser(testEnv.DB, "a@example.com", PASSWORD);
+    const b = await createUser(testEnv.DB, "b@example.com", PASSWORD);
+    await updateDisplayName(testEnv.DB, a.id, "甲");
+    expect((await findUserById(testEnv.DB, a.id))!.displayName).toBe("甲");
+    expect((await findUserById(testEnv.DB, b.id))!.displayName).toBeNull();
   });
 });

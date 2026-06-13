@@ -20,11 +20,12 @@ import {
   ConversationThread,
   AccountControl,
   MarkupLayer,
+  BrandMark,
 } from "@agentaily/design-system";
 
 import { Icon, renderChatTurn } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
-import { SettingsScreen } from "./settings.jsx";
+import { SettingsOverlay } from "./settings.jsx";
 import { FormsPanel, PublishFeedback } from "./forms-panel.jsx";
 import { PublicFormPage } from "./public-form.jsx";
 import { ResetPasswordPage } from "./reset-password.jsx";
@@ -35,7 +36,6 @@ import {
   matchResetPassword,
   matchVerifyEmail,
   matchSignIn,
-  matchSettings,
   currentPathname,
   currentSearch,
   SIGNIN_PATH,
@@ -57,6 +57,7 @@ import {
   logout as authLogout,
   requestEmailVerification as authRequestEmailVerification,
   getCurrentUser as authGetCurrentUser,
+  updateProfile as authUpdateProfile,
 } from "./core/auth";
 
 // gated actions resumed after a round-trip to the standalone /signin page, keyed by a
@@ -119,15 +120,17 @@ function schemaFor(meta, fields) {
 // public/auth route matches, else the full designer:
 //   • /f/:slug             → <PublicFormPage>   — the bare answerer view (公开填写).
 //   • /signin              → <SignInScreen>     — the standalone owner login page (§17).
-//   • /settings            → <SettingsScreen>   — the owner 集成设置 page (§12 + §14).
 //   • /reset-password?token= → <ResetPasswordPage> — set a new password (§24.5).
 //   • /verify-email?status=  → <VerifyEmailPage>    — show the verify result (§23.6).
-//   • anything else        → the full designer (<DesignerApp>) below.
-// Each landing page is chrome-less: NO chat / preview / publish frame, and (except the
-// owner-only /settings page, which DOES carry the owner Bearer to read/write config) NO
-// token held on the page (reset/verify I/O is public). This wrapper decides with no hooks
-// before the branch, so routes never share hook order. Tests drive the split by passing
-// explicit `pathname` / `search` (and may inject per-route seams).
+//   • anything else (incl. /settings) → the full designer (<DesignerApp>) below.
+// Each landing page is chrome-less: NO chat / preview / publish frame, and NO token held on
+// the page (reset/verify I/O is public). 集成/账户设置 (§12 + §14 + §17) is NO LONGER a bare
+// route page since DS 0.8.0 — it is a FLOATING OVERLAY (<SettingsOverlay>) that DesignerApp
+// opens over itself, reflecting a /settings URL via history WITHOUT unmounting the designer.
+// So /settings falls through to <DesignerApp>, which opens the overlay on that path (deep-link)
+// and restores the prior page on close. This wrapper decides with no hooks before the branch,
+// so routes never share hook order. Tests drive the split by passing explicit `pathname` /
+// `search` (and may inject per-route seams).
 export default function App({
   pathname = currentPathname(),
   search = currentSearch(),
@@ -154,18 +157,6 @@ export default function App({
   if (matchSignIn(pathname)) {
     return <SignInScreen search={search} />;
   }
-  if (matchSettings(pathname)) {
-    // The 集成设置 page (§12 + §14) — owner-only. Thread the config seams + navigate so
-    // App-level tests drive getConfig/saveConfig/testConnections and the 401 → /signin.
-    return (
-      <SettingsScreen
-        getConfig={rest.getConfig}
-        saveConfig={rest.saveConfig}
-        testConnections={rest.testConnections}
-        navigate={rest.navigate}
-      />
-    );
-  }
   const resetRoute = matchResetPassword(pathname, search);
   if (resetRoute) {
     return (
@@ -180,7 +171,10 @@ export default function App({
   if (verifyRoute) {
     return <VerifyEmailPage status={verifyRoute.status} onBackToApp={onBackToApp} />;
   }
-  return <DesignerApp {...rest} />;
+  // /settings now falls through here: DesignerApp opens the settings overlay when the path is
+  // /settings (deep-link) and reflects it via history on open/close. `pathname` is threaded so
+  // the overlay's initial open state matches the URL.
+  return <DesignerApp pathname={pathname} {...rest} />;
 }
 
 function DesignerApp({
@@ -207,6 +201,15 @@ function DesignerApp({
   getCurrentUser = authGetCurrentUser,
   // logout seam — drops the owner session. Defaults to the real core/auth.logout.
   logout = authLogout,
+  // 设置浮层 (§12 + §14 + §17) seams — threaded into <SettingsOverlay>. Default to the real
+  // config/profile clients; injectable so tests drive the integration + account tabs.
+  getConfig,
+  saveConfig,
+  testConnections,
+  updateProfile = authUpdateProfile,
+  // Initial path (from App's route split). When it is /settings the overlay opens on mount
+  // (deep-link); otherwise the overlay starts closed.
+  pathname = currentPathname(),
   // navigation seam for the standalone /signin redirect (full nav by default; injectable
   // so tests assert the target without a real reload).
   navigate = (url) => {
@@ -228,10 +231,19 @@ function DesignerApp({
   // Publish feedback (§16) + 「我的表单」 management panel (§21).
   const [publishOpen, setPublishOpen] = useState(false);
   const [formsOpen, setFormsOpen] = useState(false);
+  // 设置浮层 (§12 + §14 + §17) — a floating SettingsSheet over the designer (NOT a route page).
+  // Opening reflects a /settings URL via history WITHOUT unmounting the designer; a deep-link to
+  // /settings starts it open. `settingsSection` is the active tab (账户 / 集成), kept in state
+  // (not the URL). The designer stays mounted underneath, so closing restores the prior state.
+  const [settingsOpen, setSettingsOpen] = useState(() => pathname === SETTINGS_PATH);
+  const [settingsSection, setSettingsSection] = useState("integrations");
   // owner session (SPEC §17): logged-in unlocks the owner-only /api/chat proxy. `loggedIn`
   // is the token-presence bit (read on mount); `userEmail` is filled from GET /api/auth/me.
   const [loggedIn, setLoggedIn] = useState(() => authIsLoggedIn());
   const [userEmail, setUserEmail] = useState(null);
+  // owner 显示名 (§17 个人资料). Filled from GET /api/auth/me; drives the AccountControl avatar/name
+  // + seeds the 账户 tab. null → the UI falls back to the email.
+  const [userDisplayName, setUserDisplayName] = useState(null);
   // 邮箱验证状态 (§23.6). AUTHORITATIVE bit from GET /api/auth/me — fetched on mount (when
   // logged in). Defaults to `true` (no banner) so a failed/null `me` never flashes a banner.
   const [emailVerified, setEmailVerified] = useState(true);
@@ -322,30 +334,81 @@ function DesignerApp({
     const qs = new URLSearchParams({ return: currentPathname() || "/", ...params });
     navigate(SIGNIN_PATH + "?" + qs.toString());
   };
+
+  // ── 设置浮层 open/close (路由反映, 不卸载设计器, §12/§14/§17) ─────────────────────
+  // Track whether WE pushed the /settings history entry, so closing can step back to the prior
+  // page (history.back) rather than stranding the owner. A deep-link (no push) closes to "/".
+  const settingsPushedRef = useRef(false);
+  const openSettings = useCallback((sectionId) => {
+    setSettingsSection(sectionId === "account" ? "account" : "integrations");
+    setSettingsOpen(true);
+    // Reflect /settings in the URL without navigating away (the designer stays mounted). Guard
+    // the push so re-opening / a deep-link doesn't stack duplicate history entries.
+    if (typeof window !== "undefined" && window.history && currentPathname() !== SETTINGS_PATH) {
+      window.history.pushState({ settings: true }, "", SETTINGS_PATH);
+      settingsPushedRef.current = true;
+    }
+  }, []);
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    if (typeof window === "undefined" || !window.history) return;
+    if (settingsPushedRef.current) {
+      settingsPushedRef.current = false;
+      window.history.back(); // restore the pre-overlay URL (the designer never unmounted)
+    } else if (currentPathname() === SETTINGS_PATH) {
+      // Deep-linked straight to /settings (no prior entry to pop) → normalize to the designer.
+      window.history.pushState({}, "", "/");
+    }
+  }, []);
+  // Keep the overlay in sync with the URL so the browser Back/Forward buttons toggle it (Back
+  // while open → closes + restores the designer). popstate just re-reads the path.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onPop = () => {
+      const open = currentPathname() === SETTINGS_PATH;
+      setSettingsOpen(open);
+      if (!open) settingsPushedRef.current = false;
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
   // A 401 mid-action means the owner session lapsed — drop it and route into login.
   const needLogin = (reason) => {
     setLoggedIn(false);
     goSignIn(reason ? { reason } : {});
   };
-  // Run a resolved intent now (signed-in). Mirrors the gated actions below. 集成设置 is a
-  // full navigation to its own /settings page (since DS 0.6.0 dropped the in-app modal);
-  // publish/share/forms stay in-app overlays.
+  // 401 inside the settings overlay: stash which tab so re-login reopens it, close the overlay,
+  // then route into login carrying return=/settings (so the owner lands back on settings after
+  // logging in — deterministic regardless of the current location).
+  const needLoginFromSettings = (reason) => {
+    try {
+      sessionStorage.setItem(
+        AUTH_INTENT_KEY,
+        settingsSection === "account" ? "account" : "settings",
+      );
+    } catch {
+      /* ignore */
+    }
+    setSettingsOpen(false);
+    settingsPushedRef.current = false;
+    setLoggedIn(false);
+    goSignIn({ return: SETTINGS_PATH, ...(reason ? { reason } : {}) });
+  };
+  // Run a resolved intent now (signed-in). publish/share/forms stay in-app overlays; 集成设置 /
+  // 账户 open the floating settings overlay on the matching tab (§12/§14/§17).
   const dispatchIntent = (id) => {
     if (id === "publish" || id === "share") setPublishOpen(true);
     else if (id === "forms") setFormsOpen(true);
-    else if (id === "settings") navigate(SETTINGS_PATH);
+    else if (id === "settings") openSettings("integrations");
+    else if (id === "account") openSettings("account");
   };
-  // Gate an action behind auth: signed-in → run now; signed-out → bounce through /signin.
-  // 集成设置 is its own page, so a signed-out owner is sent to /signin?return=/settings and
-  // lands straight on the settings page after login (no stashed intent needed). The in-app
-  // overlays (publish/share/forms) instead stash the intent and resume on the same page.
+  // Gate an action behind auth: signed-in → run now; signed-out → stash the intent and bounce
+  // through /signin, which returns here and resumes the stashed intent (incl. opening settings /
+  // the account tab).
   const guard = (intentId, reason) => {
     if (loggedIn) {
       dispatchIntent(intentId);
-      return;
-    }
-    if (intentId === "settings") {
-      goSignIn({ return: SETTINGS_PATH, ...(reason ? { reason } : {}) });
       return;
     }
     try {
@@ -359,9 +422,11 @@ function DesignerApp({
     logout();
     setLoggedIn(false);
     setUserEmail(null);
-    // logging out drops the session — hide the banner (no owner to verify).
+    setUserDisplayName(null);
+    // logging out drops the session — hide the banner (no owner to verify) + close settings.
     setEmailVerified(true);
     setResendState("");
+    closeSettings();
   };
 
   // Pull the AUTHORITATIVE 验证状态 + 账户邮箱 from GET /api/auth/me (§23.6). getCurrentUser
@@ -371,8 +436,17 @@ function DesignerApp({
     if (me) {
       setEmailVerified(me.emailVerified);
       setUserEmail(me.email);
+      setUserDisplayName(me.displayName ?? null);
     }
   }, [getCurrentUser]);
+
+  // 账户 tab 保存显示名后回流到 App：刷新 AccountControl 的头像/名 + 下次开浮层的初值 (§17 个人资料)。
+  const onProfileSaved = useCallback((me) => {
+    if (!me) return;
+    setUserDisplayName(me.displayName ?? null);
+    if (me.email) setUserEmail(me.email);
+    if (typeof me.emailVerified === "boolean") setEmailVerified(me.emailVerified);
+  }, []);
 
   // On mount (when logged in) read me once so the banner + account control reflect the
   // real session. Logged-out sessions have nothing to read, so we skip.
@@ -607,6 +681,7 @@ function DesignerApp({
   return (
     <React.Fragment>
       <DesignerShell
+        brand={<BrandMark size={18} wordmark cursor={false} />}
         crumb="forms"
         split={t.split / 100}
         onSplitChange={(f) => setTweak("split", Math.round(f * 100))}
@@ -614,7 +689,7 @@ function DesignerApp({
         maxSplit={0.64}
         title={
           <React.Fragment>
-            <span style={{ fontSize: "var(--text-sm)", color: "var(--text-muted)" }}>
+            <span style={{ fontSize: "var(--text-md)", color: "var(--text-muted)" }}>
               活动报名 · 未命名表单
             </span>
             <Badge variant={published ? "ok" : "neutral"} dot>
@@ -649,19 +724,23 @@ function DesignerApp({
         }
         account={
           <AccountControl
-            user={loggedIn ? { email: userEmail || "" } : null}
+            user={loggedIn ? { email: userEmail || "", name: userDisplayName || undefined } : null}
             onLogin={() => goSignIn({})}
             onLogout={doLogout}
+            // The email row opens the 账户 tab (§17 个人资料); menu items below it match the
+            // design handoff order: 集成设置 (plug) above 我的表单 (folder), with a separator.
+            onProfile={() => guard("account", "登录后管理你的账户")}
             items={[
+              {
+                label: "集成设置",
+                icon: <Icon name="plug" size={15} />,
+                onSelect: () => guard("settings", "登录后配置集成"),
+              },
+              { type: "separator" },
               {
                 label: "我的表单",
                 icon: <Icon name="folder" size={15} />,
                 onSelect: () => guard("forms", "登录后查看你发布的表单"),
-              },
-              {
-                label: "集成设置",
-                icon: <Icon name="settings" size={15} />,
-                onSelect: () => guard("settings", "登录后配置集成"),
               },
             ]}
           />
@@ -728,7 +807,22 @@ function DesignerApp({
                       variant={device === "full" ? "solid" : "outline"}
                       onClick={() => setDevice("full")}
                     >
-                      <Icon name="layout" size={13} />
+                      {/* monitor glyph — the DS Icon set has no "monitor", so the design's inline
+                          SVG (a display + stand) is reproduced here to match the handoff exactly. */}
+                      <svg
+                        width="13"
+                        height="13"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <rect x="2" y="3" width="20" height="14" rx="2"></rect>
+                        <path d="M8 21h8M12 17v4"></path>
+                      </svg>
                     </IconButton>
                     <IconButton
                       label="手机宽度"
@@ -805,9 +899,27 @@ function DesignerApp({
         </div>
       ) : null}
 
-      {/* 集成设置 (§12/§14) is no longer an in-app modal — since DS 0.6.0 it's a standalone
-          /settings page (matchSettings in the App route split → <SettingsScreen>). The
-          account-menu「集成设置」item navigates there via guard("settings"). */}
+      {/* 设置浮层 (§12/§14/§17) — since DS 0.8.0 it's a floating SettingsSheet over the designer
+          (账户 + 集成 tabs), NOT a route page. Opened from the AccountControl (avatar → 账户;
+          「集成设置」→ 集成) via guard → openSettings, which reflects a /settings URL via history.
+          Mounted only while open so the 集成 fetch fires on open + the designer state is untouched
+          underneath; ✕ / Esc → closeSettings restores the prior URL. */}
+      {settingsOpen ? (
+        <SettingsOverlay
+          open
+          section={settingsSection}
+          onNavigate={setSettingsSection}
+          onClose={closeSettings}
+          user={{ email: userEmail || "", displayName: userDisplayName }}
+          onLogout={doLogout}
+          onNeedLogin={needLoginFromSettings}
+          onProfileSaved={onProfileSaved}
+          getConfig={getConfig}
+          saveConfig={saveConfig}
+          testConnections={testConnections}
+          updateProfile={updateProfile}
+        />
+      ) : null}
 
       {/* 「我的表单」 management panel (§21). Mounted unconditionally (inert when closed). */}
       <FormsPanel

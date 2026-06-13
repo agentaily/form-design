@@ -30,6 +30,9 @@ import { revokeUserTokens } from "./tokens";
 /** 密码强度下限（§17.2）：长度 < 此值即「弱密码」→ register 返回 400。 */
 export const MIN_PASSWORD_LENGTH = 8;
 
+/** 显示名长度上限（§17 个人资料）：trim 后 > 此值 → PUT /api/auth/profile 返回 400。 */
+export const MAX_DISPLAY_NAME_LENGTH = 64;
+
 /**
  * email 形状校验的最简正则（§17.2）。本期只验**形状**（`x@y.z` 这类），**不**验邮箱
  * 真实可达（`email_verified` 预留恒 0、不发信，§17.11）。具体正则由实现在合约内定，
@@ -59,6 +62,9 @@ export interface UserRow {
   /** 邮箱验证状态位（§23）：注册 / 覆盖时 0，verify-email/confirm 成功后置 1。它**不门禁**任何
    *  功能（§23.1），唯一后端作用是 §17.2 去重三态（未验证可覆盖、已验证锁死）+ 前端 banner。 */
   emailVerified: number;
+  /** owner 显示名（§17 个人资料）：可空，空（NULL）= 未设置 → 前端回退用邮箱。明文存，
+   *  绝不参与密码 / 鉴权（改它不动 email / password_* / email_verified）。 */
+  displayName: string | null;
   /** ISO-8601 注册时刻。 */
   createdAt: string;
 }
@@ -227,7 +233,7 @@ function mapUniqueViolation(err: unknown): Error {
 export async function findUserByEmail(db: D1Database, email: string): Promise<UserRow | null> {
   const row = await db
     .prepare(
-      `SELECT id, email, password_hash, password_salt, iterations, email_verified, created_at
+      `SELECT id, email, password_hash, password_salt, iterations, email_verified, display_name, created_at
        FROM users WHERE email = ?`,
     )
     .bind(email)
@@ -238,6 +244,7 @@ export async function findUserByEmail(db: D1Database, email: string): Promise<Us
       password_salt: string;
       iterations: number;
       email_verified: number;
+      display_name: string | null;
       created_at: string;
     }>();
   if (row === null) {
@@ -250,6 +257,7 @@ export async function findUserByEmail(db: D1Database, email: string): Promise<Us
     passwordSalt: row.password_salt,
     iterations: row.iterations,
     emailVerified: row.email_verified,
+    displayName: row.display_name ?? null,
     createdAt: row.created_at,
   };
 }
@@ -268,7 +276,7 @@ export async function findUserByEmail(db: D1Database, email: string): Promise<Us
 export async function findUserById(db: D1Database, id: string): Promise<UserRow | null> {
   const row = await db
     .prepare(
-      `SELECT id, email, password_hash, password_salt, iterations, email_verified, created_at
+      `SELECT id, email, password_hash, password_salt, iterations, email_verified, display_name, created_at
        FROM users WHERE id = ?`,
     )
     .bind(id)
@@ -279,6 +287,7 @@ export async function findUserById(db: D1Database, id: string): Promise<UserRow 
       password_salt: string;
       iterations: number;
       email_verified: number;
+      display_name: string | null;
       created_at: string;
     }>();
   if (row === null) {
@@ -291,6 +300,7 @@ export async function findUserById(db: D1Database, id: string): Promise<UserRow 
     passwordSalt: row.password_salt,
     iterations: row.iterations,
     emailVerified: row.email_verified,
+    displayName: row.display_name ?? null,
     createdAt: row.created_at,
   };
 }
@@ -367,6 +377,29 @@ export async function markEmailVerified(db: D1Database, userId: string): Promise
   // 只翻 email_verified 这一列；已是 1 → 幂等 no-op（仍算成功，§23.4）。一旦置 1，该邮箱在
   // createUser 里就锁死（再注册同邮箱 → 409，不再可覆盖，§17.2）。不读 / 不回任何密码字段。
   await db.prepare(`UPDATE users SET email_verified = 1 WHERE id = ?`).bind(userId).run();
+}
+
+/**
+ * 写某 owner 的显示名（§17 个人资料）——PUT /api/auth/profile 校验完后调用。
+ *
+ * 契约（实现在合约内）：
+ * - **只翻 display_name 这一列**：`UPDATE users SET display_name = ? WHERE id = ?`，
+ *   不触碰 email / password_* / email_verified / created_at。
+ * - 传 `null` 即清空显示名（绑成 SQL NULL）→ 前端回退用邮箱展示。
+ * - 调用方负责 trim + 长度校验（§17，> {@link MAX_DISPLAY_NAME_LENGTH} → route 400）；
+ *   本函数只落库，不再校验形状。
+ *
+ * @param db D1 binding。
+ * @param id 目标 owner 的真实 user id（= session JWT 的 sub，§17.5）。
+ * @param displayName 新显示名，或 `null`（清空）。
+ */
+export async function updateDisplayName(
+  db: D1Database,
+  id: string,
+  displayName: string | null,
+): Promise<void> {
+  // null 绑成 SQL NULL（清空 → 回退用邮箱）。只翻 display_name 一列，绝不动密码 / email / 验证位。
+  await db.prepare(`UPDATE users SET display_name = ? WHERE id = ?`).bind(displayName, id).run();
 }
 
 /**

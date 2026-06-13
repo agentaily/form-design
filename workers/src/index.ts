@@ -68,9 +68,11 @@ import {
   findUserById,
   markEmailVerified,
   resetUserPassword,
+  updateDisplayName,
   EmailTakenError,
   UserValidationError,
   MIN_PASSWORD_LENGTH,
+  MAX_DISPLAY_NAME_LENGTH,
 } from "./users";
 import { issueToken, consumeToken } from "./tokens";
 import { sendEmail, buildVerifyEmail, buildResetEmail, EmailSendError } from "./email";
@@ -244,9 +246,11 @@ app.put("/api/chat/session/:sessionId", guard);
 // POST /api/auth/verify-email/request → owner-only 重发验证邮件（§23.3）。其它三个邮件端点
 // （verify-email/confirm、password-reset/request、password-reset/confirm）是**公开**，不挂 guard。
 app.post("/api/auth/verify-email/request", guard);
-// GET /api/auth/me → owner-only：回当前登录 owner 的 { email, emailVerified }（§17.12），供前端
-// 「邮箱未验证」banner 跨刷新 / 登录拿到真实验证位（不再仅凭注册时本地状态）。
+// GET /api/auth/me → owner-only：回当前登录 owner 的 { email, emailVerified, displayName }（§17.12），
+// 供前端「邮箱未验证」banner 跨刷新 / 登录拿到真实验证位（不再仅凭注册时本地状态）。
 app.get("/api/auth/me", guard);
+// PUT /api/auth/profile → owner-only：写当前登录 owner 的显示名 displayName（§17 个人资料）。
+app.put("/api/auth/profile", guard);
 // /api/forms 前缀下鉴权与公开交错（§21.1 路由共存陷阱）——逐条点名 owner-only 的
 // method+path，绝不用宽匹配 `app.use("/api/forms/*", guard)`（会误伤公开拉取）：
 //   - GET  /api/forms              → owner-only 列表（§21.2）。注意它与 GET /api/forms/:slug
@@ -367,8 +371,50 @@ app.get("/api/auth/me", async (c) => {
   if (user === null) {
     return c.json({ error: "未授权" }, 401);
   }
-  // 只投影 email + 验证位；password_* / iterations 等绝不出网（§17.12）。
-  return c.json({ email: user.email, emailVerified: user.emailVerified }, 200);
+  // 只投影 email + 验证位 + 显示名；password_* / iterations 等绝不出网（§17.12）。
+  return c.json(
+    { email: user.email, emailVerified: user.emailVerified, displayName: user.displayName },
+    200,
+  );
+});
+
+// PUT /api/auth/profile (OWNER-ONLY, guard 已挂上面, §17 个人资料) — 写当前登录 owner 的显示名。
+// 据 c.get('session').sub 定位本人那行（绝不接受 body 里的任意 user id）。body { displayName: string }：
+//   - 缺 displayName / 非 string / body 非 JSON → 400 { error }（不落库）。
+//   - trim 后 > MAX_DISPLAY_NAME_LENGTH → 400 { error }（不落库）。
+//   - trim 后为空（空串 / 纯空白）→ 存 NULL（清空显示名，前端回退用邮箱）。
+//   - 否则存 trim 后的值。
+// 返回更新后的 owner 摘要（与 GET /api/auth/me 同形）：{ email, emailVerified, displayName }。
+// token 指向已删账号（被覆盖重注册换了 id）→ 401（与 /me 同语义）。绝不投影 password_* / iterations。
+app.put("/api/auth/profile", async (c) => {
+  const ownerId = c.get("session").sub;
+
+  // 解析 body；非 JSON → null → 400（不落库）。
+  const body = (await c.req.json().catch(() => null)) as { displayName?: unknown } | null;
+  if (body === null || typeof body.displayName !== "string") {
+    return c.json({ error: "缺少 displayName" }, 400);
+  }
+
+  const trimmed = body.displayName.trim();
+  if (trimmed.length > MAX_DISPLAY_NAME_LENGTH) {
+    return c.json({ error: "显示名称过长" }, 400);
+  }
+  // 空 / 纯空白 → 存 NULL（清空，回退用邮箱）。
+  const toStore = trimmed.length === 0 ? null : trimmed;
+
+  // 先确认 user 仍存在（token 指向已删账号 → 401，与 /me 一致），再落库。
+  const user = await findUserById(c.env.DB, ownerId);
+  if (user === null) {
+    return c.json({ error: "未授权" }, 401);
+  }
+
+  await updateDisplayName(c.env.DB, ownerId, toStore);
+
+  // 投影最新值（与 /me 同形）；绝不回 password_* / iterations。
+  return c.json(
+    { email: user.email, emailVerified: user.emailVerified, displayName: toStore },
+    200,
+  );
 });
 
 // GET /api/auth/verify-email/confirm?token=... (PUBLIC, §23.4) — owner 点邮件里的链接落到这里

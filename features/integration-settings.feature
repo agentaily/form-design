@@ -1,10 +1,11 @@
 # 契约来源：后端 SPEC §12（owner 配置存取 GET/POST /api/config）+ §14（连接测试 POST /api/config/test）
-# + §17（owner-only 鉴权，缺/坏 token → 401）。本 feature 描述前端「集成设置页」(/settings) 的可观察
-# 行为，不重述后端字段加密 / 掩码算法（那是 Worker 内部约定）。前端契约桩见 src/core/configClient.ts，
-# 页面见 src/settings.jsx（SettingsScreen），路由分流见 src/App.jsx（matchSettings → /settings）。
-# 自 DS 0.6.0 起集成设置从弹窗改为独立 /settings 路由页；DS 0.8.0 起页面用浮层组件链
+# + §17（owner-only 鉴权，缺/坏 token → 401）。本 feature 描述前端「集成设置」的可观察行为，不重述
+# 后端字段加密 / 掩码算法（那是 Worker 内部约定）。前端契约桩见 src/core/configClient.ts，UI 见
+# src/settings.jsx（SettingsOverlay → 集成 tab），浮层入口与 /settings 路由反映见 src/App.jsx。
+# 自 DS 0.6.0 起集成设置从弹窗改为独立页；DS 0.8.0 起改为**设计器内浮起浮层**(账户 + 集成双 tab)：
 # SettingsSheet › IntegrationSettings(集成分区:hero + 就绪栏 + 连接卡槽)› DeepSeekCard/FeishuCard
-# + 底部 SettingsSaveBar(显式保存),仍是 /settings 路由 + 本项目的后端接线，可观察行为契约不变。
+# + 底部 SettingsSaveBar(显式保存)。打开浮层会反映 /settings URL 但不卸载设计器；本项目的后端接线
+# 与可观察行为契约不变。「owner 打开集成设置」= 打开浮层并切到集成 tab。
 Feature: 集成设置页 · owner 配置 DeepSeek 与飞书
   作为表单作者(owner)
   我想在集成设置页里连接自己的 DeepSeek key 与飞书多维表格

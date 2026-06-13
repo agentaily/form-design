@@ -117,7 +117,7 @@ export function getConfig(): Promise<MaskedConfig> {
  * `{ error }` message; nothing is stored. Omit secret subfields the owner didn't edit.
  */
 export function saveConfig(input: ConfigInput): Promise<MaskedConfig> {
-  // The caller (SettingsScreen) is responsible for OMITTING secret subfields the
+  // The caller (the 集成 tab in SettingsOverlay) is responsible for OMITTING secret subfields the
   // owner didn't edit (the mask is never resubmitted, §12.4). JSON.stringify drops
   // the `undefined` values, so the wire body carries only the keys actually present.
   return apiFetch<MaskedConfig>("/api/config", { method: "POST", auth: true, body: input });

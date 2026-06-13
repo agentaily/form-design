@@ -131,16 +131,17 @@ export function matchSignIn(pathname: string): SignInRoute | null {
   return isExactPath(pathname, SIGNIN_PATH) ? {} : null;
 }
 
-/** A recognised /settings route. Like /signin it carries no params — the page reads
- *  its config off the backend (getConfig), not off the URL. */
+/** A recognised /settings path. Carries no params — the settings surface reads its config
+ *  off the backend (getConfig) / the owner's profile, not off the URL. */
 export type SettingsRoute = Record<string, never>;
 
 /**
- * Match the 集成设置页 route (SPEC §12 + §14). Pure: return `{}` when the path is
- * `/settings` (one trailing slash tolerated), else `null` (the designer/public). The
- * settings page mounts <SettingsScreen>, an owner-only chrome-less page that fetches +
- * saves the masked config via configClient. App's guard sends a signed-out owner to
- * /signin?return=/settings first, so the page only mounts for a logged-in owner.
+ * Match the 设置 path (SPEC §12 + §14 + §17). Pure: return `{}` when the path is `/settings`
+ * (one trailing slash tolerated), else `null`. Since DS 0.8.0 设置 is NOT a bare route page —
+ * it is a floating overlay (<SettingsOverlay>) DesignerApp opens over itself, reflecting a
+ * /settings URL via history WITHOUT unmounting the designer. So App does NOT branch on this in
+ * its route split; DesignerApp uses the /settings path only to decide the overlay's initial
+ * open state (deep-link). Kept as a pure, tested helper for that path comparison.
  */
 export function matchSettings(pathname: string): SettingsRoute | null {
   return isExactPath(pathname, SETTINGS_PATH) ? {} : null;

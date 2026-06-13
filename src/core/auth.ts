@@ -25,6 +25,12 @@ export interface CurrentUser {
   email: string;
   /** Whether the owner has confirmed their email — the SOLE source of the 未验证 banner. */
   emailVerified: boolean;
+  /**
+   * The owner's display name (§17 个人资料). Shown on the account control + in 创建的表单/
+   * 提交记录. `null` when never set — the UI falls back to the email. Editable via the
+   * 账户 tab → {@link updateProfile}.
+   */
+  displayName: string | null;
 }
 
 /**
@@ -129,7 +135,7 @@ export async function requestEmailVerification(): Promise<void> {
  * 0/1 from the backend's SQLite-backed schema can't leak a truthy-number into the UI.
  */
 export async function getCurrentUser(): Promise<CurrentUser | null> {
-  let res: { email?: unknown; emailVerified?: unknown } | undefined;
+  let res: { email?: unknown; emailVerified?: unknown; displayName?: unknown } | undefined;
   try {
     res = await apiFetch("/api/auth/me", { auth: true });
   } catch {
@@ -138,7 +144,42 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
     return null;
   }
   if (!res || typeof res.email !== "string") return null;
-  return { email: res.email, emailVerified: !!res.emailVerified };
+  return {
+    email: res.email,
+    emailVerified: !!res.emailVerified,
+    // displayName is null when the backend omits it (account never named); a string passes through.
+    displayName: typeof res.displayName === "string" ? res.displayName : null,
+  };
+}
+
+/**
+ * Update the current owner's profile (§17 个人资料, owner-only): PUT `{ displayName }`
+ * to `/api/auth/profile` with the owner's Bearer. The backend trims the name, stores
+ * NULL for an empty/whitespace value (clearing it → fall back to email), and echoes the
+ * updated `{ email, emailVerified, displayName }` (same shape as {@link getCurrentUser}).
+ *
+ * Unlike {@link getCurrentUser} this is a **user action** (the 账户 tab 保存): it does
+ * NOT fail soft. A 401 (会话失效) / 400 (显示名称过长) surfaces as the {@link ApiError}
+ * thrown by apiFetch, for the account tab to route into login (401) or show the message
+ * (400). On success it returns the authoritative post-save snapshot so the caller can
+ * re-baseline the form + refresh the account control.
+ *
+ * `displayName` may be "" to clear the name. The plaintext only leaves the browser to
+ * this call; nothing sensitive is stored client-side.
+ */
+export async function updateProfile(displayName: string): Promise<CurrentUser> {
+  const res = await apiFetch<{ email?: unknown; emailVerified?: unknown; displayName?: unknown }>(
+    "/api/auth/profile",
+    { method: "PUT", body: { displayName }, auth: true },
+  );
+  if (!res || typeof res.email !== "string") {
+    throw new Error("个人资料响应格式错误");
+  }
+  return {
+    email: res.email,
+    emailVerified: !!res.emailVerified,
+    displayName: typeof res.displayName === "string" ? res.displayName : null,
+  };
 }
 
 /** Drop the session token (stateless logout — §17.5 keeps no server-side blacklist). */

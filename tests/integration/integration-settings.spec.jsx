@@ -1,15 +1,15 @@
 // Outer-loop acceptance for features/integration-settings.feature — the owner
-// 集成设置 page (SPEC §12 owner config + §14 connection test, §17 auth).
+// 集成设置 (SPEC §12 owner config + §14 connection test, §17 auth).
 //
-// Since DS 0.6.0 dropped the all-in-one IntegrationSettings modal, 集成设置 is now a
-// standalone /settings ROUTE page (src/settings.jsx → SettingsScreen) built from two
-// pure-display DS cards (DeepSeekCard + FeishuCard) + this page's OWN save bar, backend
-// error display, and 401 → /signin handoff. We render the real <SettingsScreen> and
-// INJECT fake getConfig/saveConfig/testConnections/navigate via its props — the same
-// deterministic seam auth.jsx uses. That keeps these tests about the page's observable
-// behavior (echo, save, backend errors, per-block test rows, 401 → navigate) without a
-// backend or token store. The lower wire contract (path/method/payload, the
-// don't-resubmit-the-mask rule) is pinned separately in tests/unit/configClient.test.js.
+// Since DS 0.8.0 集成设置 is the 集成 tab of a floating settings overlay (src/settings.jsx →
+// SettingsOverlay), built from two pure-display DS cards (DeepSeekCard + FeishuCard) + this
+// tab's OWN save bar, backend error display, and a 401 → onNeedLogin handoff (App then routes
+// to /signin). We render the real <SettingsOverlay section="integrations"> and INJECT fake
+// getConfig/saveConfig/testConnections/onNeedLogin via its props — the same deterministic seam
+// auth.jsx uses. That keeps these tests about the tab's observable behavior (echo, save, backend
+// errors, per-block test rows, 401 → onNeedLogin) without a backend or token store. The lower
+// wire contract (path/method/payload, the don't-resubmit-the-mask rule) is pinned separately in
+// tests/unit/configClient.test.js.
 import React from "react";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,7 +18,7 @@ import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 // /pure → no auto afterEach(cleanup); @amiceli runs each Gherkin step as its own
 // test, so cleanup is per-scenario (AfterEachScenario), never per-step.
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
-import { SettingsScreen } from "../../src/settings.jsx";
+import { SettingsOverlay } from "../../src/settings.jsx";
 import { ApiError } from "../../src/core/apiClient";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -56,12 +56,15 @@ function fakeClient(overrides = {}) {
   };
 }
 
-// Render the settings page with injected fakes; getConfig fires on mount, so wait for
-// the form to settle (the Save action is present once the fetch resolves).
+// Render the 集成 tab of the settings overlay with injected fakes; getConfig fires when the
+// 集成 tab shows (here, on mount with section="integrations"), so wait for the form to settle
+// (the Save action is present once the fetch resolves).
 function openSettings(client, extra = {}) {
   render(
-    <SettingsScreen
-      navigate={extra.navigate ?? vi.fn()}
+    <SettingsOverlay
+      open
+      section="integrations"
+      onNeedLogin={extra.onNeedLogin ?? vi.fn()}
       getConfig={client.getConfig}
       saveConfig={client.saveConfig}
       testConnections={client.testConnections}
@@ -364,7 +367,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   });
 
   Scenario("未登录访问集成设置引导先登录", ({ Given, When, And, Then }) => {
-    const navigate = vi.fn();
+    const onNeedLogin = vi.fn();
     const client = fakeClient({
       getConfig: vi.fn(async () => {
         throw new ApiError(401, "未授权");
@@ -372,20 +375,19 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
     Given("owner 未登录", () => {});
     When("owner 打开集成设置", () => {
-      openSettings(client, { navigate });
+      openSettings(client, { onNeedLogin });
     });
     And("拉取配置返回 401", async () => {
       await waitFor(() => expect(client.getConfig).toHaveBeenCalled());
     });
     Then("设置页提示需要先登录", async () => {
-      // A 401 routes into the standalone /signin page rather than an inline settings error.
-      await waitFor(() => expect(navigate).toHaveBeenCalled());
-      expect(navigate.mock.calls[0][0]).toMatch(/^\/signin\?/);
+      // A 401 hands off to App (onNeedLogin) which routes into /signin — never an inline error.
+      await waitFor(() => expect(onNeedLogin).toHaveBeenCalled());
     });
     And("引导去 owner 登录页", () => {
-      // The return target lands the owner back on /settings after login, and the raw 401
-      // message is never surfaced as an inline error.
-      expect(navigate.mock.calls[0][0]).toContain("return=%2Fsettings");
+      // The handoff carries a reason for the login page, and the raw 401 message is never
+      // surfaced as an inline settings error. (App turns this into /signin?return=/settings.)
+      expect(onNeedLogin).toHaveBeenCalledWith(expect.stringContaining("登录"));
       expect(screen.queryByText(/未授权/)).not.toBeInTheDocument();
     });
   });
