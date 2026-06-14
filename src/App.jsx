@@ -5,7 +5,7 @@
 // thread / composer / markup are gone. The real engineering stays: the live agent loop
 // (streamed prose + tool-call cards over POST /api/chat), the §4.1 continuous-send
 // MessageQueue (wrapped as the ConversationThread controller), the publish surface
-// (发布/分享 → PublishFeedback → POST /api/forms), integration settings, forms mgmt,
+// (发布 = 直接动作 → POST /api/forms → ShareDialog；分享 = 只读取链接), integration settings, forms mgmt,
 // the owner session + 邮箱未验证 banner, and the route split. Login is now a standalone
 // /signin page (DS SignInPage) instead of an in-app modal.
 import React, { useState, useEffect, useRef, useCallback } from "react";
@@ -29,7 +29,8 @@ import { L, getLocale, setLocale } from "./core/i18n";
 import { Icon, renderChatTurn } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
 import { SettingsOverlay } from "./settings.jsx";
-import { FormsPanel, PublishFeedback } from "./forms-panel.jsx";
+import { FormsPanel } from "./forms-panel.jsx";
+import { ShareDialog } from "./share-dialog.jsx";
 import { PublicFormPage } from "./public-form.jsx";
 import { ResetPasswordPage } from "./reset-password.jsx";
 import { VerifyEmailPage } from "./verify-email.jsx";
@@ -53,6 +54,8 @@ import {
   DESIGNER_SYSTEM,
 } from "./core/designerTools";
 import {
+  publishForm as defaultPublishForm,
+  publicFormUrl as defaultPublicFormUrl,
   updateFormDefinition as defaultUpdateFormDefinition,
   getFormForEdit as defaultGetFormForEdit,
 } from "./core/formsClient";
@@ -226,9 +229,10 @@ export default function App({
 
 function DesignerApp({
   chat = streamDesignerChat,
-  // Forms publish + management client (SPEC §16/§21). Defaults to the real formsClient
-  // inside FormsPanel/PublishFeedback; injectable here for the publish/401 flow.
-  publishForm,
+  // Forms publish + management client (SPEC §16/§21). 发布是 App 顶栏「发布」的直接动作
+  // (POST /api/forms)，故默认拿真 formsClient；listForms/updateForm/deleteForm 仍透传给
+  // FormsPanel（其内部各自默认）。injectable here for the publish/401 flow.
+  publishForm = defaultPublishForm,
   listForms,
   updateForm,
   deleteForm,
@@ -237,7 +241,7 @@ function DesignerApp({
   // formsClient; injectable so the edit/load/写回-401 flow is driven deterministically.
   getFormForEdit = defaultGetFormForEdit,
   updateFormDefinition = defaultUpdateFormDefinition,
-  publicFormUrl,
+  publicFormUrl = defaultPublicFormUrl,
   // 数据后台「看提交」(§18). Defaults to the real submissionsClient; injectable for tests.
   listSubmissions,
   // 设计对话持久化 (§26, owner-only). Defaults to the real chatSessionClient; injectable so
@@ -295,8 +299,16 @@ function DesignerApp({
   const [discardOpen, setDiscardOpen] = useState(false);
   // Transient "已更新" feedback on the 更新 button right after a successful write-back.
   const [updateDone, setUpdateDone] = useState(false);
-  // Publish feedback (§16) + 「我的表单」 management panel (§21).
-  const [publishOpen, setPublishOpen] = useState(false);
+  // 发布 / 分享浮层 (§16, N-_ayo8x): 仅链接、无二维码。发布是顶栏「发布」的直接动作 (doPublish)
+  // —— POST /api/forms 直接上线，成功后以 "publish" 模式弹「表单已发布」；分享是只读 (openShare)，
+  // 以 "share" 模式取当前已发布表单的公开链接，不改状态、不发任何对话消息。
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareMode, setShareMode] = useState("publish");
+  const [shareUrl, setShareUrl] = useState("");
+  // 发布进行中(防连点) + 后端拒绝发布时的「对话外」提示(如缺标题 400)。不往对话发消息(N-_ayo8x)。
+  const [publishing, setPublishing] = useState(false);
+  const [publishError, setPublishError] = useState("");
+  // 「我的表单」 management panel (§21).
   const [formsOpen, setFormsOpen] = useState(false);
   // 设置浮层 (§12 + §14 + §17) — a floating SettingsSheet over the designer (NOT a route page).
   // Opening reflects a /settings URL via history WITHOUT unmounting the designer; a deep-link to
@@ -515,7 +527,10 @@ function DesignerApp({
   // Run a resolved intent now (signed-in). publish/share/forms stay in-app overlays; 集成设置 /
   // 账户 open the floating settings overlay on the matching tab (§12/§14/§17).
   const dispatchIntent = (id) => {
-    if (id === "publish" || id === "share") setPublishOpen(true);
+    // 发布 = 直接动作(直接上线 + 弹「已发布」分享浮层)；分享 = 只读(取已发布链接)。二者都不再开
+    // 旧的「发布反馈」两步浮层、不往对话发消息。doPublish/openShare 定义在下方,运行时(用户点击)闭包可达。
+    if (id === "publish") doPublish();
+    else if (id === "share") openShare();
     else if (id === "forms") setFormsOpen(true);
     else if (id === "settings") openSettings("integrations");
     else if (id === "account") openSettings("account");
@@ -951,6 +966,7 @@ function DesignerApp({
     setPublished(form.status === "published");
     setUpdateDone(false);
     setDiscardOpen(false);
+    setPublishError("");
     setEditBaseline(editSig(loadedMeta, loadedFields));
     setTab("preview");
     const title = loadedMeta?.title || L("这份表单", "this form");
@@ -989,6 +1005,66 @@ function DesignerApp({
     }
   };
 
+  // ── 发布 = 直接动作 (N-_ayo8x) ────────────────────────────────────────────────────
+  // 点顶栏「发布」不再开「发布反馈」浮层让人在里面再点一次发布,而是直接把当前设计器表单上线
+  // (POST /api/forms → 高熵 slug),它即刻出现在「我的表单」并开始收集；随后把这份刚发布的表单
+  // 置为「正在编辑的已发布表单」—— 复用既有的 编辑态横幅 + 「更新」机制 (editingForm/editBaseline),
+  // 让作者可以继续改并点「更新」写回；最后弹「表单已发布」分享浮层 (仅链接)。全程不往对话发任何消息。
+  //
+  // 读 modelRef (canonical model) 而非 React 的 meta/fields:对话驱动发布时 §4.1 队列消费闭包捕获
+  // 的是首渲染的 state,会过期；canonical model 始终最新。
+  const doPublish = async () => {
+    const m = modelRef.current.meta;
+    const fs = modelRef.current.fields;
+    if (building || publishing || !fs || fs.length === 0) return;
+    setPublishing(true);
+    setPublishError("");
+    try {
+      const res = await publishForm(m, fs);
+      setPublished(true);
+      const url = (res && res.url) || publicFormUrl(res.slug);
+      // §26.2: 把 slug 关联进当前设计会话行并持久化一次 —— 必须在进入「编辑态」之前做,因为
+      // persistTurn 在 editingFormRef 非空时会跳过持久化(编辑态会话是临时的,见 persistTurn)。
+      publishedSlugRef.current = res.slug;
+      persistTurn();
+      // 接上既有 编辑/更新 机制:把刚发布的表单设为当前编辑目标(已发布态),记下内容基线 →
+      // 顶栏主按钮从「发布」变「更新」,编辑态横幅出现,「更新」按钮在有改动时可点。带上已解析的
+      // 公开 url(优先后端 ready-to-open url),这样事后「分享」取的链接与发布弹窗显示一致。
+      const ef = { slug: res.slug, status: "published", meta: m ? { ...m } : null, url };
+      editingFormRef.current = ef;
+      setEditingForm(ef);
+      setEditBaseline(editSig(m, fs));
+      setUpdateDone(false);
+      // 弹「表单已发布」分享浮层(庆祝式,仅链接)。
+      setShareUrl(url);
+      setShareMode("publish");
+      setShareOpen(true);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        needLogin(L("登录后即可发布表单", "Sign in to publish your form"));
+      } else {
+        // 后端拒绝(如缺标题 400)→ 顶栏下方「对话外」提示后端原话,顶栏状态仍为草稿(不发对话消息)。
+        setPublishError(
+          e instanceof ApiError
+            ? e.message
+            : L("发布失败，请稍后重试。", "Publish failed — please try again."),
+        );
+      }
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  // 分享 = 只读 (N-_ayo8x): 取当前已发布表单的公开填写链接弹「分享这份表单」浮层,不改任何状态、
+  // 不发任何对话消息。仅在有「正在编辑的已发布表单」时可用(顶栏分享按钮也只在编辑态出现)。
+  const openShare = () => {
+    if (!editingForm) return;
+    // 优先用发布时解析好的 url(可能是后端自定义域),否则按 slug 拼 —— 与发布弹窗显示一致。
+    setShareUrl(editingForm.url || publicFormUrl(editingForm.slug));
+    setShareMode("share");
+    setShareOpen(true);
+  };
+
   // Leave edit mode and reset to a clean draft designer (the stored form is safe in 我的表单).
   // Mirror loadFormForEdit's ref hygiene: clear the editing ref (re-enables §26 persistence) and
   // reset the LLM history + published-slug association so the next new-form session starts clean
@@ -1001,6 +1077,7 @@ function DesignerApp({
     setUpdateDone(false);
     setDiscardOpen(false);
     setEditBaseline("");
+    setPublishError("");
     modelRef.current = createFormModel();
     setMeta(null);
     setFields([]);
@@ -1057,6 +1134,24 @@ function DesignerApp({
             </span>
           </div>
         ) : null}
+        {/* 发布失败提示 (N-_ayo8x): 发布是直接动作,失败(如缺标题 400)时不发对话消息,而是在这里贴一条
+            可关闭的「对话外」提示,显示后端原话;顶栏状态保持草稿。消费 DS Alert + Button。 */}
+        {publishError ? (
+          <div className="d-publish-error" data-testid="publish-error">
+            <Alert
+              variant="danger"
+              title={L("发布失败", "Publish failed")}
+              icon={<Icon name="warn" size={16} />}
+            >
+              <div className="d-publish-error__row">
+                <span>{publishError}</span>
+                <Button size="sm" variant="secondary" onClick={() => setPublishError("")}>
+                  {L("知道了", "Dismiss")}
+                </Button>
+              </div>
+            </Alert>
+          </div>
+        ) : null}
         <div className="app-stack__main">
           <DesignerShell
             brand={<BrandMark size={18} wordmark cursor={false} />}
@@ -1110,21 +1205,17 @@ function DesignerApp({
                 >
                   <Icon name={t.theme === "dark" ? "sun" : "moon"} size={15} />
                 </IconButton>
-                <Button
-                  variant="secondary"
-                  icon={<Icon name="share" size={14} />}
-                  onClick={() =>
-                    guard(
-                      "share",
-                      L(
-                        "登录后即可分享表单并收集回复",
-                        "Sign in to share your form and collect responses",
-                      ),
-                    )
-                  }
-                >
-                  {L("分享", "Share")}
-                </Button>
+                {editingForm ? (
+                  // 分享 = 只读 (N-_ayo8x): 仅在已发布/编辑态出现,取当前表单的公开链接弹分享浮层,
+                  // 不改任何状态、不发任何对话消息(故无需 guard —— 进编辑态本就已登录)。
+                  <Button
+                    variant="secondary"
+                    icon={<Icon name="share" size={14} />}
+                    onClick={openShare}
+                  >
+                    {L("分享", "Share")}
+                  </Button>
+                ) : null}
                 {editingForm ? (
                   // 编辑态: 主按钮由「发布」变「更新」→ PATCH 写回 meta+fields。无改动时灰着。
                   <Button
@@ -1136,10 +1227,12 @@ function DesignerApp({
                     {updateDone ? L("已更新", "Updated") : L("更新", "Update")}
                   </Button>
                 ) : (
+                  // 发布 = 直接动作: guard 先把未登录的弹去 /signin(回来后 resume → doPublish),已登录直接
+                  // doPublish(上线 + 进编辑态 + 弹「已发布」分享浮层)。disabled 仍守空表单/构建中/发布中。
                   <Button
                     variant="primary"
                     icon={<Icon name="spark" size={14} />}
-                    disabled={building || fieldCount === 0}
+                    disabled={building || fieldCount === 0 || publishing}
                     onClick={() =>
                       guard("publish", L("登录后即可发布表单", "Sign in to publish your form"))
                     }
@@ -1485,28 +1578,14 @@ function DesignerApp({
         onConfirm={doExit}
       />
 
-      {/* Publish feedback (§16): opened by 发布/分享, publishes the live model and shows the
-          public fill link. onPublished flips the header badge to LIVE; a 401 routes into login. */}
-      <PublishFeedback
-        open={publishOpen}
-        onClose={() => setPublishOpen(false)}
-        onNeedLogin={() => {
-          setPublishOpen(false);
-          needLogin(L("登录后即可发布表单", "Sign in to publish your form"));
-        }}
-        meta={meta}
-        fields={fields}
-        publishForm={publishForm}
-        publicFormUrl={publicFormUrl}
-        onPublished={(res) => {
-          setPublished(true);
-          // 发布把 slug 关联进会话行 (§26.2)，session id 不变：记下 slug 并立刻持久化一次，
-          // 这样即便不再发新回合，刷新后会话也已带上该 slug。
-          if (res && res.slug) {
-            publishedSlugRef.current = res.slug;
-            persistTurn();
-          }
-        }}
+      {/* 发布 / 分享浮层 (§16, N-_ayo8x): 仅链接、无二维码。"publish" = 刚「发布」直接上线(庆祝式
+          标题「表单已发布」),"share" = 已发布事后只读取链接(标题「分享这份表单」)。开合 + 模式 + 链接
+          由上面的 doPublish / openShare 设置;复制按钮行内反馈,不关闭浮层。 */}
+      <ShareDialog
+        open={shareOpen}
+        mode={shareMode}
+        url={shareUrl}
+        onClose={() => setShareOpen(false)}
       />
     </React.Fragment>
   );

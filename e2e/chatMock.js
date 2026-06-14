@@ -65,8 +65,9 @@ export async function mockChat(page, { meta = META, fields = FIELDS } = {}) {
 
 /**
  * Install the canned POST /api/forms route (SPEC §16.2 publish) on a Playwright page.
- * Returns 200 with a PublishResult `{ slug }` so PublishFeedback succeeds without a
- * backend: it renders the public fill link /f/:slug and fires onPublished → header LIVE.
+ * Returns 200 with a PublishResult `{ slug }` so the direct 发布 action succeeds without a
+ * backend: it pops the ShareDialog with the public fill link /f/:slug and flips the header
+ * badge to LIVE (the just-published form becomes the active edit target).
  * Only intercepts the POST; other methods (the §21 list/patch/delete) fall through.
  * Call before navigation (or at least before clicking 发布).
  */

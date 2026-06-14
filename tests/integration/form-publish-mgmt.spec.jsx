@@ -1,17 +1,15 @@
 // Outer-loop acceptance for features/form-publish-mgmt.feature — the owner
 // "发布 + 表单管理" surface (SPEC §16 发布/公开链接 + §21 owner-only 管理 CRUD, §17 auth).
 //
-// We render the real <PublishFeedback> and <FormsPanel> (src/forms-panel.jsx) and
-// INJECT fake publishForm/listForms/updateForm/deleteForm/publicFormUrl via their
-// props — the same deterministic seam settings.jsx uses for getConfig/saveConfig.
-// That keeps these tests about the components' observable behavior (public link
-// shown + copied, list rows with title/status/createdAt/link, empty state, status
-// toggle, delete-with-confirm, 401 → onNeedLogin without an inline error) without a
-// backend or token store. The lower wire contract (path/method/auth, the designer→
-// §16.2 mapping, the { forms,count } unwrap) is pinned in tests/unit/formsClient.test.js.
+// 发布交互改造 (N-_ayo8x): 发布是顶栏「发布」的【直接动作】—— 点一下直接 POST /api/forms 上线,
+// 成功后弹一个【仅链接、无二维码】的分享浮层 (ShareDialog, src/share-dialog.jsx) 并接上既有的
+// 编辑/更新 机制;旧的「打开发布反馈浮层 → 浮层里再点一次发布」(PublishFeedback) 已删。所以发布相关
+// 场景现在驱动【真实 <App>】(DesignerApp) + 注入 chat / publishForm / publicFormUrl / navigate
+// 等 seam(与 build-form / form-editing 一致),不再 render 一个独立的发布组件。表单管理 (列表 /
+// 改状态 / 删除) 仍是 <FormsPanel> 组件级的可观察行为,injected fake formsClient。
 //
-// publicFormUrl is injected as the identity-ish /f/:slug builder so the public link
-// text is deterministic and we assert on what the component chose to render.
+// 下层 wire 契约 (path/method/auth, 设计器→§16.2 mapping, { forms,count } 解包) 钉在
+// tests/unit/formsClient.test.js;这里只断言可观察的 UI 行为。
 import React from "react";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,19 +18,16 @@ import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 // /pure → no auto afterEach(cleanup); @amiceli runs each Gherkin step as its own
 // test, so cleanup is per-scenario (AfterEachScenario), never per-step.
 import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-library/react/pure";
-import { FormsPanel, PublishFeedback } from "../../src/forms-panel.jsx";
-import { ApiError } from "../../src/core/apiClient";
+import App from "../../src/App.jsx";
+import { FormsPanel } from "../../src/forms-panel.jsx";
+import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/form-publish-mgmt.feature"));
 
 // A deterministic public-link builder injected in place of the real publicFormUrl:
-// same /f/:slug shape (§16.4.1) so the link the component renders is predictable.
+// same /f/:slug shape (§16.4.1) so the link the UI renders is predictable.
 const fakePublicUrl = (slug) => `/f/${slug}`;
-
-// A designer-shape form (FormMeta + UiField[]) ready to publish.
-const META = { title: "活动报名表", desc: "请填写你的报名信息" };
-const FIELDS = [{ id: "f_name", type: "text", label: "姓名", required: true }];
 
 // Owner summaries as listForms() would resolve them (§21.2 — NO fields).
 const PUBLISHED_FORM = {
@@ -48,6 +43,7 @@ const CLOSED_FORM = {
   createdAt: "2026-05-01T08:00:00.000Z",
 };
 
+// ── FormsPanel (表单管理) 组件级 seam ────────────────────────────────────────────
 function fakeFormsClient(overrides = {}) {
   return {
     listForms: overrides.listForms ?? vi.fn(async () => []),
@@ -73,27 +69,9 @@ function renderPanel(client, extra = {}) {
   );
 }
 
-function renderPublish(client, extra = {}) {
-  render(
-    <PublishFeedback
-      open
-      onClose={extra.onClose ?? vi.fn()}
-      onNeedLogin={extra.onNeedLogin}
-      onPublished={extra.onPublished}
-      meta={extra.meta ?? META}
-      fields={extra.fields ?? FIELDS}
-      publishForm={client.publishForm}
-      publicFormUrl={client.publicFormUrl}
-    />,
-  );
-}
-
 // The card for a given form, located by its title; card-scoped queries hang off this.
-// Since PR-5 the panel is a PanelSheet of form CARDS (was a Dialog of <li> rows); the
-// per-card lifecycle actions (关闭收集 / 重新发布 / 删除) moved into a `⋯` DropdownMenu.
 function rowFor(title) {
   const titleEl = screen.getByText(title);
-  // Walk up to the nearest card/row container (data-slug is kept on the card).
   const row =
     titleEl.closest("li, tr, [role='listitem'], [data-slug]") ||
     titleEl.closest(".d-formcard, .d-formrow, [class*='card'], [class*='row']") ||
@@ -101,118 +79,232 @@ function rowFor(title) {
   return within(row || titleEl.parentElement);
 }
 
-// Open the card's `⋯` overflow menu so its menu items (关闭收集 / 重新发布 / 删除) mount,
-// then return a `screen`-scoped query for them (only one menu is ever open at a time).
+// Open the card's `⋯` overflow menu so its menu items (关闭收集 / 重新发布 / 删除) mount.
 function openCardMenu(title) {
   fireEvent.click(rowFor(title).getByRole("button", { name: /更多操作/ }));
 }
 
-describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
-  AfterEachScenario(() => cleanup());
+// ── 发布 / 分享 (App 级) seam ──────────────────────────────────────────────────
+const verifiedMe = async () => ({ email: "owner@example.com", emailVerified: true });
 
-  // ── 发布 ────────────────────────────────────────────────────────────────────
+// A deterministic build turn: set the cover (with a title) + add one field via tool calls,
+// then close with prose (no tools → the §4 loop stops). After this the form has a title and
+// a field, so the 发布 button enables.
+function makeBuildChat() {
+  let n = 0;
+  return vi.fn(async ({ onText }) => {
+    n += 1;
+    if (n === 1) {
+      return {
+        text: "",
+        toolCalls: [
+          {
+            id: "meta",
+            name: "set_form_meta",
+            argsRaw: JSON.stringify({ title: "活动报名表", desc: "请填写你的报名信息" }),
+          },
+          {
+            id: "f0",
+            name: "add_field",
+            argsRaw: JSON.stringify({ type: "text", label: "姓名", required: true }),
+          },
+        ],
+      };
+    }
+    const text = "搭好了，可以发布了。";
+    onText?.(text);
+    return { text, toolCalls: [] };
+  });
+}
+
+// Mount the real App in a logged-in owner session with the publish seams injected. §26
+// persistence + auth/me are stubbed deterministic so a turn never reaches the network.
+function renderApp(seams = {}) {
+  setToken("owner-jwt");
+  render(
+    <App
+      chat={seams.chat ?? makeBuildChat()}
+      getCurrentUser={verifiedMe}
+      loadChatSession={async () => ({ session: null })}
+      saveChatTurns={async () => ({})}
+      listChatSessions={async () => ({ sessions: [] })}
+      publishForm={seams.publishForm ?? vi.fn(async () => ({ slug: "f8Kq2pXa" }))}
+      publicFormUrl={seams.publicFormUrl ?? vi.fn(fakePublicUrl)}
+      updateFormDefinition={seams.updateFormDefinition}
+      navigate={seams.navigate}
+    />,
+  );
+}
+
+// Drive the build to completion: clicking the starter hint runs the build turn; it settles
+// when the 发布 button enables (disabled while building / on an empty form).
+async function buildForm() {
+  fireEvent.click(screen.getByText("做一个线下活动报名表"));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "发布", exact: true })).toBeEnabled(),
+  );
+}
+
+const clickPublish = () =>
+  fireEvent.click(screen.getByRole("button", { name: "发布", exact: true }));
+
+describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
+  AfterEachScenario(() => {
+    cleanup();
+    clearToken();
+  });
+
+  // ── 发布 (直接动作 → ShareDialog) ─────────────────────────────────────────────
   Scenario("发布当前表单拿到公开填写链接", ({ Given, And, When, Then }) => {
-    const onPublished = vi.fn();
-    const client = fakeFormsClient({
-      publishForm: vi.fn(async () => ({ slug: "f8Kq2pXa" })),
-      publicFormUrl: vi.fn(fakePublicUrl),
+    const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
+    Given("owner 已登录", () => {
+      renderApp({ publishForm });
     });
-    Given("owner 已登录", () => {});
-    And("设计器里已有一份带标题和至少一个字段的表单", () => {
-      // META has a title; FIELDS has one field — the publishable precondition.
-      expect(META.title).toBeTruthy();
-      expect(FIELDS.length).toBeGreaterThan(0);
+    And("设计器里已有一份带标题和至少一个字段的表单", async () => {
+      await buildForm();
     });
     When("owner 点击发布", () => {
-      renderPublish(client, { onPublished });
+      clickPublish();
     });
     And("后端返回新建表单的 slug", async () => {
-      await waitFor(() => expect(client.publishForm).toHaveBeenCalled());
-      // publishForm was handed exactly the designer model App already holds.
-      expect(client.publishForm).toHaveBeenCalledWith(META, FIELDS);
+      // 发布是直接动作:点一下 header「发布」就直接调发布接口(没有第二步浮层里的再点)。
+      await waitFor(() => expect(publishForm).toHaveBeenCalled());
+      // publishForm was handed the designer model App holds: a meta with the built title +
+      // a non-empty field list.
+      const [meta, fields] = publishForm.mock.calls[0];
+      expect(meta?.title).toBe("活动报名表");
+      expect(Array.isArray(fields) && fields.length).toBeGreaterThan(0);
     });
     Then("反馈里展示该 slug 对应的公开填写链接", async () => {
-      // The component renders the public fill link for the returned slug (/f/:slug).
+      // The ShareDialog (post-publish surface) renders the public fill link for the slug.
       await screen.findByText("/f/f8Kq2pXa", { exact: false });
     });
     And("顶栏状态标记为已发布", async () => {
-      // PublishFeedback signals success up to App via onPublished so App flips the
-      // header status badge to LIVE/已发布 (that header flip is App's job; here we
-      // assert the success signal that drives it actually fired with the result).
-      await waitFor(() => expect(onPublished).toHaveBeenCalled());
-      expect(onPublished.mock.calls[0][0]).toMatchObject({ slug: "f8Kq2pXa" });
+      // 发布成功把刚发布的表单置为「正在编辑的已发布表单」→ 顶栏徽章变 LIVE。
+      await screen.findByText("LIVE");
     });
   });
 
   Scenario("复制公开填写链接", ({ Given, When, Then }) => {
     const writeText = vi.fn(async () => {});
-    // Stub the clipboard before render so the copy affordance can reach it.
     Object.assign(navigator, { clipboard: { writeText } });
-    const client = fakeFormsClient({
-      publishForm: vi.fn(async () => ({ slug: "f8Kq2pXa" })),
-      publicFormUrl: vi.fn(fakePublicUrl),
-    });
     Given("owner 刚发布了一份表单并看到公开填写链接", async () => {
-      renderPublish(client);
+      renderApp({ publishForm: vi.fn(async () => ({ slug: "f8Kq2pXa" })) });
+      await buildForm();
+      clickPublish();
       await screen.findByText("/f/f8Kq2pXa", { exact: false });
     });
     When("owner 点击复制链接", async () => {
-      // The copy affordance — a button named for copying the link.
-      fireEvent.click(screen.getByRole("button", { name: /复制/ }));
+      // The copy affordance lives in the ShareDialog footer.
+      fireEvent.click(screen.getByRole("button", { name: /复制链接/ }));
       await waitFor(() => expect(writeText).toHaveBeenCalled());
     });
     Then("该公开填写链接被复制到剪贴板", () => {
-      // The exact public link (/f/:slug) is what got written to the clipboard.
+      // 展示用链接可能是相对的 /f/:slug;复制时补成绝对地址 —— 但仍包含该 slug 路径。
       expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/f/f8Kq2pXa"));
     });
   });
 
   Scenario("空表单无法发布", ({ Given, And, Then }) => {
-    const client = fakeFormsClient();
-    Given("owner 已登录", () => {});
+    const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
+    Given("owner 已登录", () => {
+      renderApp({ publishForm });
+    });
     And("设计器里还没有任何字段", () => {
-      renderPublish(client, { fields: [] });
+      // No build → the designer is empty.
+      expect(screen.getByText("描述你想要的表单")).toBeInTheDocument();
     });
     Then("发布按钮不可点击", async () => {
-      // The 发布 action exists but is disabled while there are no fields, so a click
-      // never reaches publishForm.
-      const publishBtn = await screen.findByRole("button", { name: /发布/ });
+      const publishBtn = await screen.findByRole("button", { name: "发布", exact: true });
       expect(publishBtn).toBeDisabled();
       fireEvent.click(publishBtn);
-      expect(client.publishForm).not.toHaveBeenCalled();
+      expect(publishForm).not.toHaveBeenCalled();
     });
   });
 
   Scenario("后端拒绝缺标题的发布并提示", ({ Given, And, When, Then }) => {
-    const onPublished = vi.fn();
-    const client = fakeFormsClient({
-      publishForm: vi.fn(async () => {
-        throw new ApiError(400, "meta.title 必填");
-      }),
+    const publishForm = vi.fn(async () => {
+      throw new ApiError(400, "meta.title 必填");
     });
-    Given("owner 已登录", () => {});
-    And("设计器里有字段但表单缺少标题", () => {
-      renderPublish(client, { meta: { title: "" }, fields: FIELDS, onPublished });
+    Given("owner 已登录", () => {
+      renderApp({ publishForm });
+    });
+    And("设计器里有字段但表单缺少标题", async () => {
+      // 建出一份可点发布的表单;缺标题是后端拒绝的【原因】,前端只负责把后端的拒绝原话透出来。
+      await buildForm();
     });
     When("owner 点击发布", () => {
-      fireEvent.click(screen.getByRole("button", { name: /发布/ }));
+      clickPublish();
     });
     And("后端返回 400 与错误说明", async () => {
-      await waitFor(() => expect(client.publishForm).toHaveBeenCalled());
+      await waitFor(() => expect(publishForm).toHaveBeenCalled());
     });
     Then("反馈里显示后端给出的错误说明", async () => {
-      // The backend's ApiError.message is surfaced verbatim, not a generic string.
+      // 发布是直接动作:失败时在对话外贴一条提示,显示后端的 ApiError.message 原话(不是泛化文案)。
       await screen.findByText("meta.title 必填");
     });
-    And("顶栏状态仍为草稿", () => {
-      // No success → the header-status signal never fired, so App keeps DRAFT.
-      expect(onPublished).not.toHaveBeenCalled();
-      // No public link rendered on a failed publish.
+    And("顶栏状态仍为草稿", async () => {
+      // 失败没进编辑态 → 顶栏徽章仍是 DRAFT,且没有弹出任何公开链接。
+      await screen.findByText("DRAFT");
       expect(screen.queryByText(/\/f\//)).not.toBeInTheDocument();
     });
   });
 
-  // ── 列表 ────────────────────────────────────────────────────────────────────
+  // ── 发布是直接动作 + 分享只读 (N-_ayo8x) ──────────────────────────────────────
+  Scenario("发布是直接动作并弹出分享浮层", ({ Given, And, When, Then }) => {
+    const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
+    Given("owner 已登录", () => {
+      renderApp({ publishForm });
+    });
+    And("设计器里已有一份带标题和至少一个字段的表单", async () => {
+      await buildForm();
+    });
+    When("owner 点击发布", () => {
+      clickPublish();
+    });
+    And("后端返回新建表单的 slug", async () => {
+      await waitFor(() => expect(publishForm).toHaveBeenCalled());
+    });
+    Then("直接弹出展示公开填写链接的分享浮层", async () => {
+      // 庆祝式「表单已发布」浮层(仅链接),直接弹出 —— 不是在对话里、也不是两步浮层。
+      await screen.findByText("表单已发布");
+      await screen.findByText("/f/f8Kq2pXa", { exact: false });
+    });
+    And("发布过程不往对话里发任何消息", () => {
+      // 链接只出现在分享浮层里,没有被回灌进对话(若发布发了对话消息,链接会出现两处)。
+      expect(screen.getAllByText("/f/f8Kq2pXa", { exact: false })).toHaveLength(1);
+      // 旧的「发布并生成链接」对话驱动发布方式不复存在。
+      expect(screen.queryByText(/发布并生成链接|生成链接/)).not.toBeInTheDocument();
+    });
+  });
+
+  Scenario("分享已发布的表单只读取链接", ({ Given, When, Then, And }) => {
+    const updateFormDefinition = vi.fn(async () => ({ slug: "f8Kq2pXa", status: "published" }));
+    Given("owner 刚发布了一份表单", async () => {
+      renderApp({
+        publishForm: vi.fn(async () => ({ slug: "f8Kq2pXa" })),
+        updateFormDefinition,
+      });
+      await buildForm();
+      clickPublish();
+      await screen.findByText("表单已发布");
+    });
+    When("owner 点击分享", () => {
+      // 发布后进入编辑态,顶栏出现「分享」按钮(只读)。jsdom 不做命中测试,即便浮层开着也能点到。
+      fireEvent.click(screen.getByRole("button", { name: "分享", exact: true }));
+    });
+    Then("弹出展示该表单公开填写链接的分享浮层", async () => {
+      // 同一个浮层翻成「分享这份表单」只读模式,仍展示该表单的公开链接。
+      await screen.findByText("分享这份表单");
+      expect(screen.getByText("/f/f8Kq2pXa", { exact: false })).toBeInTheDocument();
+    });
+    And("分享不发起改状态的请求也不往对话发消息", () => {
+      // 只读:分享既不写回表单定义,也不触发任何 PATCH。
+      expect(updateFormDefinition).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── 列表 (FormsPanel 组件级) ──────────────────────────────────────────────────
   Scenario("打开「我的表单」列出已发布的表单", ({ Given, And, When, Then }) => {
     const client = fakeFormsClient({
       listForms: vi.fn(async () => [PUBLISHED_FORM]),
@@ -227,15 +319,10 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await waitFor(() => expect(client.listForms).toHaveBeenCalled());
     });
     Then("列出每份表单的标题、状态徽标、创建时间与公开填写链接", async () => {
-      // Title.
       await screen.findByText("活动报名表");
       const row = rowFor("活动报名表");
-      // Status badge — 已发布 (contract-fixed label for published).
       expect(row.getByText(/已发布/)).toBeInTheDocument();
-      // Created time — the date is surfaced in some human form; assert the year-month
-      // -day is present (the exact format is the UI's choice, the data is the contract).
       expect(row.getByText(/2026/)).toBeInTheDocument();
-      // Public fill link (/f/:slug).
       expect(row.getByText("/f/f8Kq2pXa", { exact: false })).toBeInTheDocument();
     });
   });
@@ -250,7 +337,6 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
     Then("显示「还没有发布过表单」的空态且无报错", async () => {
       await screen.findByText(/还没有发布过表单/);
-      // An empty list is a normal state, NOT an error.
       expect(screen.queryByText(/出错|失败|无法/)).not.toBeInTheDocument();
     });
   });
@@ -268,19 +354,15 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       expect(row.getByText(/已发布/)).toBeInTheDocument();
     });
     When("owner 点击关闭该表单", () => {
-      // The toggle-to-closed action lives in the card's `⋯` menu (关闭收集).
       openCardMenu("活动报名表");
       fireEvent.click(screen.getByRole("menuitem", { name: /关闭收集/ }));
     });
     And("后端返回该表单状态已变为关闭", async () => {
       await waitFor(() => expect(client.updateForm).toHaveBeenCalled());
-      // The PATCH carried the right slug + the closed status (§21.3).
       expect(client.updateForm).toHaveBeenCalledWith("f8Kq2pXa", { status: "closed" });
     });
     Then("该表单的状态徽标变为已关闭", async () => {
       const row = rowFor("活动报名表");
-      // 精确匹配状态徽标「已关闭」—— 关闭态卡片 body 还有「表单已关闭…」提示文案(design
-      // N-_ayo8x),正则 /已关闭/ 会同时命中两者,这里只断言徽标本身。
       await waitFor(() => expect(row.getByText("已关闭")).toBeInTheDocument());
       expect(row.queryByText(/已发布/)).not.toBeInTheDocument();
     });
@@ -295,11 +377,9 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     Given("owner 打开「我的表单」且其中一份表单状态为已关闭", async () => {
       renderPanel(client);
       await screen.findByText("已结束的问卷");
-      // 精确匹配状态徽标(关闭态 body 的「表单已关闭…」提示也含「已关闭」,正则会撞两个)。
       expect(rowFor("已结束的问卷").getByText("已关闭")).toBeInTheDocument();
     });
     When("owner 点击重新开放该表单", () => {
-      // The reopen action lives in the card's `⋯` menu (重新发布).
       openCardMenu("已结束的问卷");
       fireEvent.click(screen.getByRole("menuitem", { name: /重新发布|重新开放|开放/ }));
     });
@@ -328,8 +408,6 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       fireEvent.click(screen.getByRole("menuitem", { name: /删除/ }));
     });
     Then("弹出删除确认提示", async () => {
-      // A confirmation step appears (DS Dialog/Alert) before anything is deleted, and
-      // deleteForm has NOT been called yet (confirm is still pending).
       await screen.findByText(/确认删除|确定删除|删除.*\?|无法撤销|不可恢复/);
       expect(client.deleteForm).not.toHaveBeenCalled();
     });
@@ -349,7 +427,6 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await screen.findByText(/确认删除|确定删除|删除.*\?|无法撤销|不可恢复/);
     });
     When("owner 确认删除", () => {
-      // The confirm action in the confirmation surface (a distinct 确认/确定 button).
       const confirm = screen
         .getAllByRole("button", { name: /确认|确定/ })
         .find((b) => !/取消/.test(b.textContent));
@@ -360,7 +437,6 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
     Then("该表单从列表中消失", async () => {
       await waitFor(() => expect(screen.queryByText("活动报名表")).not.toBeInTheDocument());
-      // The other form is untouched.
       expect(screen.getByText("已结束的问卷")).toBeInTheDocument();
     });
   });
@@ -380,7 +456,6 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       fireEvent.click(screen.getByRole("button", { name: /取消/ }));
     });
     Then("该表单仍在列表中且未发出删除请求", async () => {
-      // Confirmation dismissed, the row stays, and NO delete request went out.
       await waitFor(() =>
         expect(screen.queryByText(/确认删除|确定删除|无法撤销|不可恢复/)).not.toBeInTheDocument(),
       );
@@ -405,39 +480,35 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await waitFor(() => expect(client.listForms).toHaveBeenCalled());
     });
     Then("提示需要先登录", async () => {
-      // A 401 routes into the login flow rather than an inline panel error.
       await waitFor(() => expect(onNeedLogin).toHaveBeenCalled());
     });
     And("自动弹出 owner 登录框", () => {
-      // Panel-level we assert it asks for login via onNeedLogin and does NOT render the
-      // 401 as its own inline error (App wires the callback → close panel + pop login).
       expect(onNeedLogin).toHaveBeenCalledTimes(1);
       expect(screen.queryByText(/未授权/)).not.toBeInTheDocument();
     });
   });
 
   Scenario("发布时会话失效引导先登录", ({ Given, When, And, Then }) => {
-    const onNeedLogin = vi.fn();
-    const client = fakeFormsClient({
-      publishForm: vi.fn(async () => {
-        throw new ApiError(401, "未授权");
-      }),
+    const navigate = vi.fn();
+    const publishForm = vi.fn(async () => {
+      throw new ApiError(401, "未授权");
     });
-    Given("设计器里已有一份可发布的表单", () => {
-      renderPublish(client, { onNeedLogin });
+    Given("设计器里已有一份可发布的表单", async () => {
+      renderApp({ publishForm, navigate });
+      await buildForm();
     });
     When("owner 点击发布", () => {
-      fireEvent.click(screen.getByRole("button", { name: /发布/ }));
+      clickPublish();
     });
     And("发布请求返回 401", async () => {
-      await waitFor(() => expect(client.publishForm).toHaveBeenCalled());
+      await waitFor(() => expect(publishForm).toHaveBeenCalled());
     });
     Then("提示需要先登录", async () => {
-      await waitFor(() => expect(onNeedLogin).toHaveBeenCalled());
+      // 发布 401 → 会话失效 → 路由到独立 /signin 登录页(§17),不把原始 401 当行内错误显示。
+      await waitFor(() => expect(navigate).toHaveBeenCalled());
+      expect(navigate.mock.calls[0][0]).toMatch(/^\/signin\?/);
     });
     And("自动弹出 owner 登录框", () => {
-      expect(onNeedLogin).toHaveBeenCalledTimes(1);
-      // The raw 401 is NOT shown as an inline publish error.
       expect(screen.queryByText(/未授权/)).not.toBeInTheDocument();
     });
   });

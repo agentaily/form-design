@@ -108,14 +108,15 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   });
 
   Scenario("搭好后发布表单", ({ Given, When, Then, And }) => {
-    // Real publish (§16): clicking 发布 opens <PublishFeedback>, which calls the
-    // injected publishForm(meta, fields) → { slug } and renders the public fill link
-    // /f/:slug for that slug. We inject publishForm + publicFormUrl as the App-level
-    // seam (same pattern as chat/login) so the flow is deterministic without a backend.
+    // Real publish (§16, N-_ayo8x): 发布是直接动作 —— clicking 发布 directly calls the
+    // injected publishForm(meta, fields) → { slug } and pops the ShareDialog (仅链接) which
+    // renders the public fill link /f/:slug for that slug. We inject publishForm +
+    // publicFormUrl as the App-level seam (same pattern as chat/login) so the flow is
+    // deterministic without a backend.
     //
     // Since the UI refactor 发布 is a gated action: signed-out it routes to /signin
     // (guard), so the publish itself only runs for a logged-in owner. We seed a token to
-    // put the App in a logged-in session so 发布 opens PublishFeedback directly.
+    // put the App in a logged-in session so 发布 publishes directly.
     const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
     const publicFormUrl = vi.fn((slug) => `/f/${slug}`);
     Given("设计器处于空状态", () => {
