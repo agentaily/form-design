@@ -579,6 +579,65 @@ body {
   max-width: 460px;
 }
 
+/* 语言切换分段控件 (handoff P9-DW3zm .acct-lang) — DS 0.13.0 无 Segmented 组件,按 handoff 样式落,
+   值全部引 DS token。两个 .acct-lang__opt,当前语言加 .is-on。 */
+.acct-lang {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2);
+  background: var(--surface-page);
+}
+.acct-lang__opt {
+  appearance: none;
+  border: 1px solid transparent;
+  background: none;
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  padding: 6px 16px;
+  border-radius: var(--radius-1);
+  transition:
+    background var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
+}
+.acct-lang__opt:hover {
+  color: var(--text-body);
+}
+.acct-lang__opt.is-on {
+  background: var(--surface-card);
+  border-color: var(--border-strong);
+  color: var(--text-body);
+}
+
+/* 登录邮箱字段 (handoff .acct-emailfield) — label 行右侧带验证 Badge。label/hint 复刻 DS Field 的
+   mono/uppercase/faint 视觉(引 DS token),Badge/Input 仍是 DS 组件。 */
+.acct-emailfield {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.acct-emailfield__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.acct-emailfield__label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.acct-emailfield__hint {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
 /* 账户 tab 的邮箱未验证内联卡 (§23.6 新设计 .acct-verify) — 与顶部 .vb 条同源,仅未验证时显示。 */
 .acct-verify {
   display: flex;
@@ -1039,87 +1098,162 @@ body {
   }
 }
 
-/* ───────────────────── 我的表单（PanelSheet 内的卡片网格 · PR-5）─────────────────────
-   外壳 PanelSheet / 区块 PageSection / 卡片 Card / Badge / Button / DropdownMenu 都是 DS
-   组件；下面只编排卡片内部的布局,所有值引用 DS token(带兜底)。 */
+/* ───────────────────── 我的表单（PanelSheet 内的表单卡片 · design N-_ayo8x .mf-*）─────────
+   外壳 PanelSheet / 区块 PageSection / Badge / Button / DropdownMenu / Empty 都是 DS 组件;
+   卡片本身是应用层布局(.mf-card 自带 border/bg/radius,对齐 handoff 的 .mf-card section,
+   内部消费 DS Badge/Button/Icon),所有值引用 DS token。recent 提交行省略(后端 list 不带)。 */
 .d-forms__loading {
   display: flex;
   justify-content: center;
   padding: 40px 0;
 }
-.d-forms__cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
-}
-.d-formcard {
+.mf-cards {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  min-width: 0;
+  gap: 18px;
 }
-.d-formcard__head {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-.d-formcard__toprow {
+
+/* 就绪栏 (.mf-ready) */
+.mf-ready {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 14px;
+  padding: 13px 16px;
+  margin-bottom: 18px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-3);
+  background: var(--surface-panel);
 }
-.d-formcard__title {
-  margin: 0;
-  font-family: var(--font-display, inherit);
-  font-size: var(--text-lg, 1.0625rem);
-  font-weight: 500;
-  line-height: var(--leading-snug, 1.3);
-  color: var(--text-body);
-  word-break: break-word;
+.mf-sum__icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-muted);
 }
-.d-formcard__sub {
-  margin: 0;
+.mf-ready__txt {
+  flex: 1;
+  min-width: 0;
   font-size: var(--text-sm);
   color: var(--text-muted);
 }
-.d-formcard__body {
+.mf-ready__txt strong {
+  color: var(--text-body);
+  font-weight: 500;
+}
+.mf-ready__count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+}
+
+/* 表单卡片 (.mf-card) */
+.mf-card {
+  position: relative;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-3);
+  overflow: hidden;
+  transition: border-color var(--dur-2) var(--ease-out);
+}
+.mf-card.is-ok {
+  border-color: rgba(62, 207, 142, 0.4);
+}
+.mf-card__head {
+  padding: 20px 24px 18px;
+}
+.mf-card__toprow {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 15px;
+}
+.mf-card__icon {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-2);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-raised);
+  color: var(--text-body);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.mf-card__eyebrow {
+  color: var(--text-faint);
+}
+.mf-card__status {
+  margin-left: auto;
+  flex: none;
+}
+.mf-card__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 500;
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--leading-tight);
+  color: var(--text-body);
+  word-break: break-word;
+}
+.mf-card__desc {
+  margin: 9px 0 0;
+  max-width: 58ch;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  line-height: var(--leading-snug);
+}
+.mf-card__body {
+  padding: 4px 24px 22px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-width: 0;
+  gap: 18px;
 }
-.d-formcard__subs {
+
+/* 「最近提交」标题行(recent 行省略,仅留入口) */
+.mf-subs__h {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
-.d-formcard__link {
-  flex: 0 1 auto;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  text-decoration: none;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.d-formcard__link:hover {
-  color: var(--text-muted);
-  text-decoration: underline;
-}
-.d-formcard__foot {
+
+/* 已关闭表单 body 提示 */
+.mf-closed {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
+  padding: 13px 14px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2);
+  background: var(--surface-page);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  line-height: var(--leading-snug);
+}
+.mf-closed svg {
+  flex: none;
+  color: var(--text-faint);
+}
+.mf-closed strong {
+  color: var(--text-body);
+  font-weight: 500;
+}
+
+/* 卡片底部操作行 */
+.mf-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border-default);
+  background: var(--surface-panel);
   flex-wrap: wrap;
 }
-.d-formcard__foot-sp {
+.mf-foot__sp {
   flex: 1 1 auto;
-  min-width: 4px;
+  min-width: 8px;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -1228,6 +1362,16 @@ body {
 .cs-item__del:hover {
   color: var(--danger);
   background: var(--surface-card);
+}
+
+/* ── DEVIATION (老板拍板;P9-DW3zm 设计里其实有) — 隐藏「对话」标题旁的模型 pill ──────────
+   DS ConversationThread 用同一个 `model` prop 同时渲染 ① 头部标题旁的 Badge(variant="outline")
+   和 ② 组合器里的模型选择器 pill(.ax-composer__model)。老板要去掉标题旁那枚、但组合器选择器
+   照常保留能选,而单个 prop 无法只渲染一处 —— 故保留 model+onModelClick(组合器工作),用此规则
+   只隐藏标题旁那枚 Badge(它是 .ax-cthread__head 的直接子 .ax-badge--outline;SessionMenu 的任何
+   badge 嵌在其内部、非直接子,不受影响)。将来设计同步时若决定恢复,删此规则即可。 */
+.ax-cthread__head > .ax-badge--outline {
+  display: none;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────

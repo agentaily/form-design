@@ -25,7 +25,7 @@ import {
   BrandMark,
 } from "@agentaily/design-system";
 
-import { L } from "./core/i18n";
+import { L, getLocale, setLocale } from "./core/i18n";
 import { Icon, renderChatTurn } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
 import { SettingsOverlay } from "./settings.jsx";
@@ -1087,6 +1087,23 @@ function DesignerApp({
             }
             actions={
               <React.Fragment>
+                {/* 语言快切 (handoff P9-DW3zm header) — 主题/分享旁的一键切换:zh 显示「EN」、en 显示
+                    「中」(点了去到的那个语言)。setLocale → i18n.js 写 localStorage + reload。 */}
+                <IconButton
+                  label={L("切换语言", "Switch language")}
+                  onClick={() => setLocale(getLocale() === "en" ? "zh" : "en")}
+                >
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      letterSpacing: "0.04em",
+                    }}
+                  >
+                    {L("EN", "中")}
+                  </span>
+                </IconButton>
                 <IconButton
                   label={L("切换主题", "Toggle theme")}
                   onClick={() => setTweak("theme", t.theme === "dark" ? "light" : "dark")}

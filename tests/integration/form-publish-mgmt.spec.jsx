@@ -279,7 +279,9 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
     Then("该表单的状态徽标变为已关闭", async () => {
       const row = rowFor("活动报名表");
-      await waitFor(() => expect(row.getByText(/已关闭/)).toBeInTheDocument());
+      // 精确匹配状态徽标「已关闭」—— 关闭态卡片 body 还有「表单已关闭…」提示文案(design
+      // N-_ayo8x),正则 /已关闭/ 会同时命中两者,这里只断言徽标本身。
+      await waitFor(() => expect(row.getByText("已关闭")).toBeInTheDocument());
       expect(row.queryByText(/已发布/)).not.toBeInTheDocument();
     });
   });
@@ -293,7 +295,8 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     Given("owner 打开「我的表单」且其中一份表单状态为已关闭", async () => {
       renderPanel(client);
       await screen.findByText("已结束的问卷");
-      expect(rowFor("已结束的问卷").getByText(/已关闭/)).toBeInTheDocument();
+      // 精确匹配状态徽标(关闭态 body 的「表单已关闭…」提示也含「已关闭」,正则会撞两个)。
+      expect(rowFor("已结束的问卷").getByText("已关闭")).toBeInTheDocument();
     });
     When("owner 点击重新开放该表单", () => {
       // The reopen action lives in the card's `⋯` menu (重新发布).
