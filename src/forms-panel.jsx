@@ -1,7 +1,12 @@
 // forms-panel.jsx — owner "我的表单" management panel (SPEC §21, frontend) + the
-// publish-feedback surface (SPEC §16). Composed entirely from
-// @agentaily/design-system (PanelSheet/PageSection/Card/DropdownMenu/Dialog/Button/
-// Badge/Alert/AlertDialog/Spinner/Empty) — never hand-rolled chrome.
+// publish-feedback surface (SPEC §16). The panel shell + primitives are
+// @agentaily/design-system (PanelSheet/PageSection/DropdownMenu/Dialog/Button/Badge/
+// Alert/AlertDialog/Spinner/Empty) — never hand-rolled chrome. The per-form CARD is
+// app-level layout (.mf-card, design N-_ayo8x) — its border/bg/radius live in app.css and
+// it consumes DS Badge/Button/Icon inside (mirrors the handoff's plain .mf-card section,
+// not a DS Card wrapper). Recent-submission rows are omitted (the list endpoint carries
+// none); the 累计 count rides the description when present + 「查看全部提交」 is the entry
+// into the full submissions view.
 //
 // Two cooperating pieces, both driven by an injectable formsClient (same seam pattern
 // as settings.jsx's getConfig/saveConfig: defaults to the real ./core/formsClient
@@ -35,7 +40,6 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   PanelSheet,
   PageSection,
-  Card,
   Dialog,
   Button,
   Badge,
@@ -247,104 +251,137 @@ export function FormsPanel({
     }
   };
 
-  // One form = one Card. data-slug is kept on the card so existing row-scoped tests
-  // (and any DOM lookups) resolve a single card by slug. Lifecycle actions live in a
-  // `⋯` DropdownMenu (PR-5 收敛); 复制链接 + 编辑 stay as direct foot buttons.
+  // One form = one .mf-card (design N-_ayo8x layout). The card chrome is app-level layout
+  // (border/bg/radius via .mf-card, matching the handoff's plain section) consuming DS
+  // Badge/Button/Icon inside — not a DS Card wrapper. data-slug stays on the card so
+  // row-scoped tests resolve a single card by slug ([class*='card'] / [data-slug]).
+  // Lifecycle actions (关闭收集 / 重新发布 / 删除) stay in a `⋯` DropdownMenu (PR-5 收敛 +
+  // the form-publish-mgmt test contract); 复制链接 + 编辑 are direct foot buttons.
+  // Recent-submission ROWS are omitted: the list endpoint's FormSummary carries no recent
+  // rows and only an OPTIONAL submissionCount, so fabricating them would mean an N+1 fetch
+  // per card (see PR notes). The 累计 count rides the description when present; 「查看全部提交」
+  // stays the affordance into the full submissions view.
   const FormCardItem = (form) => {
     const link = publicFormUrl(form.slug);
     const published = form.status === "published";
+    const count = typeof form.submissionCount === "number" ? form.submissionCount : null;
     return (
-      <Card key={form.slug} padding="md">
-        <section className="d-formcard" data-slug={form.slug}>
-          <div className="d-formcard__head">
-            <div className="d-formcard__toprow">
-              {/* The public fill link (via the publicFormUrl seam) — the card's eyebrow. */}
-              <a
-                className="d-formcard__link"
-                href={link}
-                target="_blank"
-                rel="noreferrer"
-                title={link}
-              >
-                {link}
-              </a>
-              <Badge variant={statusVariant(form.status)} dot>
-                {statusLabel(form.status)}
-              </Badge>
-            </div>
-            {/* h2: one level under PageSection's h1 ("你发布的表单") — no outline skip. */}
-            <h2 className="d-formcard__title">
-              {form.meta?.title || L("未命名表单", "Untitled form")}
-            </h2>
-            <p className="d-formcard__sub">
-              {L("创建于 ", "Created ")}
-              {formatCreatedAt(form.createdAt)}
-            </p>
+      <section
+        key={form.slug}
+        className={"mf-card" + (published ? " is-ok" : "")}
+        data-slug={form.slug}
+      >
+        <div className="mf-card__head">
+          <div className="mf-card__toprow">
+            <span className="mf-card__icon">
+              <Icon name="folder" size={16} />
+            </span>
+            {/* Public fill route (/f/:slug) as the card's eyebrow — the short canonical path,
+                matching the design; the full URL is what 复制链接 copies. */}
+            <span className="ax-label mf-card__eyebrow">/f/{form.slug}</span>
+            <span className="mf-card__status">
+              {published ? (
+                <Badge variant="ok" dot>
+                  {L("已发布", "Live")}
+                </Badge>
+              ) : (
+                <Badge variant={statusVariant(form.status)}>{statusLabel(form.status)}</Badge>
+              )}
+            </span>
           </div>
+          {/* h2: one level under PageSection's h1 ("你发布的表单") — no outline skip. */}
+          <h2 className="mf-card__title">{form.meta?.title || L("未命名表单", "Untitled form")}</h2>
+          <p className="mf-card__desc">
+            {L("创建于 ", "Created ")}
+            {formatCreatedAt(form.createdAt)}
+            {count != null ? (
+              <React.Fragment>
+                {" · "}
+                {L("累计 ", "")}
+                {count}
+                {L(" 份提交", " submissions")}
+              </React.Fragment>
+            ) : null}
+          </p>
+        </div>
 
-          {/* 「查看全部提交」(§18): a DS Button (no hand-rolled clickable chrome) that swaps
-              this same PanelSheet's content to the form's 提交数据 (SubmissionsContent) —
-              NOT a new Dialog/panel (PR-6, chat13). 读真实 D1 数据 (#56). */}
-          <div className="d-formcard__body">
-            <div className="d-formcard__subs">
+        {/* 「查看全部提交」(§18): a DS Button that swaps this same PanelSheet's content to the
+            form's 提交数据 (SubmissionsContent) — NOT a new Dialog (PR-6). 读真实 D1 数据 (#56). */}
+        <div className="mf-card__body">
+          {published ? (
+            <div className="mf-subs__h">
               <span className="ax-label">{L("最近提交", "Recent")}</span>
               <Button variant="ghost" size="sm" onClick={() => setViewing(form)}>
                 {L("查看全部提交 ›", "View all submissions ›")}
               </Button>
             </div>
-          </div>
+          ) : (
+            <div className="mf-closed">
+              <Icon name="power" size={15} />
+              <span>
+                {L(
+                  "表单已关闭，停止接收新提交。",
+                  "Form closed — no longer accepting submissions.",
+                )}
+              </span>
+              <span className="mf-foot__sp" />
+              <Button variant="ghost" size="sm" onClick={() => setViewing(form)}>
+                {L("查看全部 ›", "View all ›")}
+              </Button>
+            </div>
+          )}
+        </div>
 
-          <div className="d-formcard__foot">
-            <Button
-              variant="ghost"
-              size="sm"
-              icon={<Icon name="copy" size={14} />}
-              onClick={() => copyLink(link)}
-            >
-              {L("复制链接", "Copy link")}
-            </Button>
-            <span className="d-formcard__foot-sp" />
-            {/* 编辑/继续编辑 (PR-7「载回设计器编辑」): 拉取这份表单的 meta+fields → 交给 App
-                载回设计器进入编辑态。载入中禁用以防双击触发两次载入。 */}
-            <Button
-              variant="secondary"
-              size="sm"
-              icon={<Icon name="pen" size={14} />}
-              disabled={!!editingSlug}
-              onClick={() => onEditCard(form)}
-            >
-              {editingSlug === form.slug
-                ? L("载入中…", "Loading…")
-                : published
-                  ? L("继续编辑", "Edit")
-                  : L("编辑", "Edit")}
-            </Button>
-            <DropdownMenu
-              align="end"
-              trigger={
-                <Button variant="ghost" size="sm" aria-label={L("更多操作", "More actions")}>
-                  ⋯
-                </Button>
-              }
-              items={[
-                {
-                  label: published ? L("关闭收集", "Close") : L("重新发布", "Republish"),
-                  icon: <Icon name={published ? "power" : "refresh"} size={15} />,
-                  disabled: !!busy[form.slug],
-                  onSelect: () => onToggle(form),
-                },
-                { type: "separator" },
-                {
-                  label: L("删除", "Delete"),
-                  icon: <Icon name="trash" size={15} />,
-                  danger: true,
-                  onSelect: () => setPendingDelete(form),
-                },
-              ]}
-            />
-          </div>
-        </section>
-      </Card>
+        <div className="mf-foot">
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<Icon name="copy" size={14} />}
+            onClick={() => copyLink(link)}
+          >
+            {L("复制链接", "Copy link")}
+          </Button>
+          <span className="mf-foot__sp" />
+          {/* 编辑/继续编辑 (PR-7「载回设计器编辑」): 拉取这份表单的 meta+fields → 交给 App
+              载回设计器进入编辑态。载入中禁用以防双击触发两次载入。 */}
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<Icon name="pen" size={14} />}
+            disabled={!!editingSlug}
+            onClick={() => onEditCard(form)}
+          >
+            {editingSlug === form.slug
+              ? L("载入中…", "Loading…")
+              : published
+                ? L("继续编辑", "Edit")
+                : L("编辑", "Edit")}
+          </Button>
+          <DropdownMenu
+            align="end"
+            trigger={
+              <Button variant="ghost" size="sm" aria-label={L("更多操作", "More actions")}>
+                ⋯
+              </Button>
+            }
+            items={[
+              {
+                label: published ? L("关闭收集", "Close") : L("重新发布", "Republish"),
+                icon: <Icon name={published ? "power" : "refresh"} size={15} />,
+                disabled: !!busy[form.slug],
+                onSelect: () => onToggle(form),
+              },
+              { type: "separator" },
+              {
+                label: L("删除", "Delete"),
+                icon: <Icon name="trash" size={15} />,
+                danger: true,
+                onSelect: () => setPendingDelete(form),
+              },
+            ]}
+          />
+        </div>
+      </section>
     );
   };
 
@@ -386,6 +423,14 @@ export function FormsPanel({
     L("我的表单", "My forms")
   );
   const barLabel = inSubs ? L("提交数据", "Submissions") : L("我的表单", "My forms");
+
+  // 就绪栏派生量 (.mf-ready): 收集中 / 已关闭 计数从 status 派生;总提交数仅在每份表单都带
+  // submissionCount 时才算(后端可省略该计数 → 否则部分和会误导)。
+  const liveCount = forms.filter((f) => f.status === "published").length;
+  const closedCount = forms.length - liveCount;
+  const allHaveCount =
+    forms.length > 0 && forms.every((f) => typeof f.submissionCount === "number");
+  const totalSubs = allHaveCount ? forms.reduce((a, f) => a + f.submissionCount, 0) : null;
 
   // The bar's right slot: in the submissions view, the form's collection status; in the
   // list view, the form count once loaded (no count while loading / on error / empty —
@@ -467,7 +512,38 @@ export function FormsPanel({
                 )}
               />
             ) : (
-              <div className="d-forms__cards">{forms.map((f) => FormCardItem(f))}</div>
+              <React.Fragment>
+                {/* 就绪栏 (design N-_ayo8x .mf-ready): 正在收集 / 已关闭 计数,右侧累计提交总数。
+                    live/closed 从 status 派生;总数仅当每份表单都带 submissionCount 时才显示
+                    (后端可省略该计数 → 避免显示误导性的部分和)。 */}
+                <div className="mf-ready">
+                  <span className="mf-sum__icon">
+                    <Icon name="inbox" size={15} />
+                  </span>
+                  <div className="mf-ready__txt">
+                    <strong>
+                      {liveCount}
+                      {L(" 个表单正在收集", " forms collecting")}
+                    </strong>
+                    {closedCount > 0 ? (
+                      <React.Fragment>
+                        {L(" · 已关闭 ", " · ")}
+                        {closedCount}
+                        {L(" 个", " closed")}
+                      </React.Fragment>
+                    ) : null}
+                  </div>
+                  {totalSubs != null ? (
+                    <span className="mf-ready__count">
+                      {L("共 ", "")}
+                      {totalSubs}
+                      {L(" 份提交", " submissions")}
+                    </span>
+                  ) : null}
+                </div>
+
+                <div className="mf-cards">{forms.map((f) => FormCardItem(f))}</div>
+              </React.Fragment>
             )}
           </PageSection>
         )}

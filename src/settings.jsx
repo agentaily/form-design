@@ -60,9 +60,9 @@ import {
   HelpSteps,
   PageSection,
   Avatar,
+  Badge,
   Field,
   Input,
-  Select,
   Button,
   Form,
 } from "@agentaily/design-system";
@@ -162,28 +162,54 @@ function AccountSection({
             placeholder={L("如：陈伟", "e.g. Alex Chen")}
           />
         </Field>
-        <Field
-          label={L("登录邮箱", "Sign-in email")}
-          hint={L(
-            "邮箱用于登录，暂不可修改。",
-            "Email is used to sign in and can't be changed for now.",
-          )}
-        >
-          <Input value={u.email || ""} disabled />
-        </Field>
+        {/* 语言切换 — handoff P9-DW3zm 的 .acct-lang 分段控件(中文 | English),不是下拉。DS 0.13.0
+            无 Segmented 组件,按 handoff 样式落(app.css .acct-lang,值引 DS token);点击 setLocale →
+            i18n.js 写 localStorage + reload。 */}
         <Field
           label={L("语言 / Language", "Language / 语言")}
           hint={L("切换后页面会重新加载。", "The page reloads after switching.")}
         >
-          <Select
-            value={getLocale()}
-            onChange={(e) => setLocale(e.target.value)}
-            options={[
-              { value: "zh", label: "中文" },
-              { value: "en", label: "English" },
-            ]}
-          />
+          <div className="acct-lang">
+            <button
+              type="button"
+              className={"acct-lang__opt" + (getLocale() === "zh" ? " is-on" : "")}
+              onClick={() => setLocale("zh")}
+            >
+              中文
+            </button>
+            <button
+              type="button"
+              className={"acct-lang__opt" + (getLocale() === "en" ? " is-on" : "")}
+              onClick={() => setLocale("en")}
+            >
+              English
+            </button>
+          </div>
         </Field>
+        {/* 登录邮箱 — handoff 的 .acct-emailfield:label 行右侧带验证 Badge(已验证 / 待验证),DS Field
+            的 label 不做「label + 右对齐 Badge」的 space-between 布局,故按 handoff 自组合(消费 DS
+            Badge/Input,布局走 app.css + DS token)。 */}
+        <div className="acct-emailfield">
+          <span className="acct-emailfield__top">
+            <span className="acct-emailfield__label">{L("登录邮箱", "Sign-in email")}</span>
+            {verified ? (
+              <Badge variant="ok" dot>
+                {L("已验证", "Verified")}
+              </Badge>
+            ) : (
+              <Badge variant="warn" dot>
+                {L("待验证", "Unverified")}
+              </Badge>
+            )}
+          </span>
+          <Input value={u.email || ""} disabled />
+          <span className="acct-emailfield__hint">
+            {L(
+              "邮箱用于登录，暂不可修改。",
+              "Email is used to sign in and can't be changed for now.",
+            )}
+          </span>
+        </div>
       </div>
 
       {/* 邮箱未验证内联卡 (§23.6 新设计 .acct-verify) — 仅未验证时显示;与顶部 .vb 条共用 App 的
