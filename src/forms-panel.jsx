@@ -52,6 +52,7 @@ import {
   listForms as defaultListForms,
   updateForm as defaultUpdateForm,
   deleteForm as defaultDeleteForm,
+  getFormForEdit as defaultGetFormForEdit,
   publicFormUrl as defaultPublicFormUrl,
 } from "./core/formsClient";
 import { listSubmissions as defaultListSubmissions } from "./core/submissionsClient";
@@ -116,6 +117,12 @@ export function FormsPanel({
   listForms = defaultListForms,
   updateForm = defaultUpdateForm,
   deleteForm = defaultDeleteForm,
+  // 载回设计器编辑 (PR-7): pull the form's full meta+fields then hand it to App so the
+  // designer loads it. Defaults to the real formsClient.getFormForEdit; injectable for tests.
+  getFormForEdit = defaultGetFormForEdit,
+  // App callback: receives the loaded {@link EditableForm} ({ slug, meta, fields, status });
+  // App loads it into the designer + enters edit mode + closes this panel.
+  onEditForm,
   publicFormUrl = defaultPublicFormUrl,
   listSubmissions = defaultListSubmissions,
 } = {}) {
@@ -127,6 +134,9 @@ export function FormsPanel({
   const [busy, setBusy] = useState({});
   // The form pending a delete confirmation (its summary), or null when none.
   const [pendingDelete, setPendingDelete] = useState(null);
+  // The slug currently being loaded for editing (PR-7) — disables its 编辑 button while
+  // the fetch is in flight so a double-click can't fire two loads.
+  const [editingSlug, setEditingSlug] = useState(null);
   // 数据后台「查看全部提交」(§18): 在同一 PanelSheet 内 swap 内容（不再开独立 Dialog）。
   //   viewing — 正在看提交数据的表单（null = 列表视图）；
   //   detail  — 正在看的单条提交记录（null = 提交列表；非 null = 记录详情子页）。
@@ -191,6 +201,24 @@ export function FormsPanel({
       setLoadError("更新表单状态失败，请稍后重试。");
     } finally {
       setBusy((b) => ({ ...b, [form.slug]: false }));
+    }
+  };
+
+  // 载回设计器编辑 (PR-7): pull the form's full meta+fields (listForms summaries omit
+  // fields), then hand the loaded definition up to App, which loads it into the designer,
+  // enters edit mode, and closes this panel. A 401 routes into login (same as other calls);
+  // any other failure surfaces inline without tearing down the panel.
+  const onEditCard = async (form) => {
+    if (editingSlug) return;
+    setEditingSlug(form.slug);
+    try {
+      const loaded = await getFormForEdit(form.slug);
+      onEditForm?.(loaded);
+    } catch (e) {
+      if (handleError(e)) return; // 401 → login flow
+      setLoadError("载入这份表单进行编辑失败，请稍后重试。");
+    } finally {
+      setEditingSlug(null);
     }
   };
 
@@ -260,15 +288,16 @@ export function FormsPanel({
               复制链接
             </Button>
             <span className="d-formcard__foot-sp" />
-            {/* 编辑/继续编辑 — PR-7「载回设计器编辑」才实现真编辑流；本根仅占位、禁用。 */}
+            {/* 编辑/继续编辑 (PR-7「载回设计器编辑」): 拉取这份表单的 meta+fields → 交给 App
+                载回设计器进入编辑态。载入中禁用以防双击触发两次载入。 */}
             <Button
               variant="secondary"
               size="sm"
               icon={<Icon name="pen" size={14} />}
-              disabled
-              title="编辑功能即将上线"
+              disabled={!!editingSlug}
+              onClick={() => onEditCard(form)}
             >
-              {published ? "继续编辑" : "编辑"}
+              {editingSlug === form.slug ? "载入中…" : published ? "继续编辑" : "编辑"}
             </Button>
             <DropdownMenu
               align="end"

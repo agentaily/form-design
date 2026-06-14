@@ -68,6 +68,24 @@ export function __resetUid(): void {
   _idCounter = 0;
 }
 
+/**
+ * Advance the session id counter past any `<prefix>_<base36>` ids already present —
+ * used when loading a stored form back into the designer for editing (PR-7), where the
+ * loaded fields keep their ORIGINAL ids (e.g. `fld_5`) so the backend can match labels
+ * for rename detection. Without this, the fresh session counter (starting at 0) would
+ * hand the next added field a colliding id like `fld_1`. We read the base36 suffix and
+ * bump `_idCounter` so every subsequent {@link uid} is strictly greater than all loaded
+ * ids. Non-numeric or prefix-less ids are ignored (no suffix → skipped).
+ */
+export function reserveUidsFrom(ids: Iterable<string>): void {
+  for (const id of ids) {
+    const m = /_([0-9a-z]+)$/.exec(id);
+    if (!m) continue;
+    const n = parseInt(m[1], 36);
+    if (Number.isFinite(n) && n > _idCounter) _idCounter = n;
+  }
+}
+
 // ── validation helpers ──────────────────────────────────────────────────────
 function assertType(type: unknown): asserts type is UiFieldType {
   if (!UI_FIELD_TYPES.includes(type as UiFieldType)) {

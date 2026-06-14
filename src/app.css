@@ -61,6 +61,97 @@ body {
   flex-direction: column;
 }
 
+/* 表单编辑态状态横幅 (PR-7) — sits above the preview panebar, equal height via the DS
+   --bar-h token so it lines up visually with the 「预览 / Schema」 toolbar below. A quiet
+   single-color hairline strip (surface-raised + a bottom divider), NOT a colored fill:
+   ■ EDITING mono 标签 + 状态点 + 一行文案 + 「详情」HoverCard + 「退出」. Layout-only; every
+   value references a DS token. */
+.d-editbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: var(--bar-h);
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--surface-raised);
+}
+.d-editbar__tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+}
+.d-editbar__tag::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--text-faint);
+}
+.d-editbar__txt {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: var(--leading-snug);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.d-editbar__more {
+  flex: none;
+}
+.d-editbar__moretxt {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  cursor: default;
+}
+/* anchor the 详情 hover-card panel to the bar's right edge so it never clips the viewport */
+.d-editbar .ax-hovercard__panel {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+.d-editbar__pop {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: var(--leading-body);
+}
+.d-editbar__pop p {
+  margin: 0 0 8px;
+  color: var(--text-body);
+}
+.d-editbar__pop ul {
+  margin: 0;
+  padding-left: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.d-editbar__exit {
+  flex: none;
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  border-radius: var(--radius-1);
+  padding: 3px 7px;
+  margin: -3px 0;
+  transition:
+    color var(--dur-1) var(--ease-out),
+    background var(--dur-1) var(--ease-out);
+}
+.d-editbar__exit:hover {
+  color: var(--text-body);
+  background: var(--surface-page);
+}
+
 /* preview body */
 .d-pvbody {
   flex: 1;

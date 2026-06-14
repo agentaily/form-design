@@ -21,6 +21,8 @@ import {
   publishForm,
   listForms,
   updateForm,
+  updateFormDefinition,
+  getFormForEdit,
   deleteForm,
   publicFormUrl,
   PUBLIC_FORM_PATH,
@@ -248,6 +250,148 @@ describe("formsClient · updateForm", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(updateForm("s1", { status: "closed" })).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+describe("formsClient · getFormForEdit (载回设计器编辑)", () => {
+  // The backend's owner read-back (the empty-body no-op PATCH) returns the wire view:
+  // §16.2 fields ({label,value}[] options, §3.2 types) + wire meta ({title,description}).
+  const WIRE_VIEW = {
+    slug: "f8Kq2pXa",
+    status: "published",
+    createdAt: "2026-06-11T08:00:00.000Z",
+    meta: { title: "活动报名表", description: "请填写你的报名信息" },
+    fields: [
+      { id: "fld_3", type: "text", label: "姓名", required: true },
+      {
+        id: "fld_7",
+        type: "checkbox",
+        label: "兴趣",
+        options: [
+          { label: "阅读", value: "阅读" },
+          { label: "运动", value: "运动" },
+        ],
+      },
+    ],
+  };
+
+  it("reads the form back via an EMPTY-BODY PATCH (owner read-back, Bearer)", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse(WIRE_VIEW));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getFormForEdit("f8Kq2pXa");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/forms/f8Kq2pXa");
+    // No owner GET exists; the read-back is the no-op PATCH with an empty body (§21.3).
+    expect(init.method).toBe("PATCH");
+    expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
+    expect(JSON.parse(init.body)).toEqual({});
+  });
+
+  it("maps the wire view back to the designer shape (meta.desc + status + UiField[])", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(WIRE_VIEW));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const form = await getFormForEdit("f8Kq2pXa");
+
+    expect(form.slug).toBe("f8Kq2pXa");
+    expect(form.status).toBe("published");
+    // wire meta.description → designer meta.desc (UI key the designer renders).
+    expect(form.meta).toMatchObject({ title: "活动报名表", desc: "请填写你的报名信息" });
+    expect(form.fields).toHaveLength(2);
+    // §3.2 checkbox → designer multi-choice `checks`; text → text.
+    expect(form.fields[0]).toMatchObject({ type: "text", label: "姓名", required: true });
+    expect(form.fields[1].type).toBe("checks");
+    // wire {label,value}[] options collapse back to a string[] of labels.
+    expect(form.fields[1].options).toEqual(["阅读", "运动"]);
+  });
+
+  it("PRESERVES stored field ids (so a later update round-trips them for rename detection)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(WIRE_VIEW));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const form = await getFormForEdit("f8Kq2pXa");
+    // ids are carried verbatim, never re-minted — the backend matches changed labels by id.
+    expect(form.fields.map((f) => f.id)).toEqual(["fld_3", "fld_7"]);
+  });
+
+  it("rejects with a 404 ApiError for an unknown / cross-owner slug (§17.9)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "no such form" }, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getFormForEdit("gone")).rejects.toMatchObject({ name: "ApiError", status: 404 });
+  });
+
+  it("rejects with a 401 ApiError (session expired → route into login, §17)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getFormForEdit("s1")).rejects.toMatchObject({ name: "ApiError", status: 401 });
+  });
+});
+
+describe("formsClient · updateFormDefinition (写回 meta+fields)", () => {
+  const DESIGNER_META = { title: "活动报名表", desc: "改后的介绍", kicker: "活动" };
+  const DESIGNER_FIELDS = [
+    { id: "fld_3", type: "tel", label: "联系电话", required: true }, // 改了标签的 tel 字段
+    { id: "fld_7", type: "checks", label: "兴趣", options: ["阅读", "运动"] },
+  ];
+
+  it("PATCHes /api/forms/:slug as the owner with { meta, fields } (no status)", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse({ slug: "f8Kq2pXa", status: "published" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateFormDefinition("f8Kq2pXa", DESIGNER_META, DESIGNER_FIELDS);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/forms/f8Kq2pXa");
+    expect(init.method).toBe("PATCH");
+    expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
+    const body = JSON.parse(init.body);
+    expect(Object.keys(body).sort()).toEqual(["fields", "meta"]); // never touches status
+  });
+
+  it("maps the designer model → §16.2 wire shape (meta.description, §3.2 types, {label,value} options)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ slug: "s1", status: "published" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateFormDefinition("s1", DESIGNER_META, DESIGNER_FIELDS);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.meta).toMatchObject({ title: "活动报名表", description: "改后的介绍" });
+    // tel → §3.2 text; checks → §3.2 checkbox.
+    const tel = body.fields.find((f) => f.id === "fld_3");
+    expect(tel.type).toBe("text");
+    const hobby = body.fields.find((f) => f.id === "fld_7");
+    expect(hobby.type).toBe("checkbox");
+    expect(hobby.options).toEqual([
+      { label: "阅读", value: "阅读" },
+      { label: "运动", value: "运动" },
+    ]);
+  });
+
+  it("PRESERVES field ids on the wire so the backend matches a changed label as a rename", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ slug: "s1", status: "published" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateFormDefinition("s1", DESIGNER_META, DESIGNER_FIELDS);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    // The same ids that were loaded go back out — that id match is how 飞书列改名 works.
+    expect(body.fields.map((f) => f.id)).toEqual(["fld_3", "fld_7"]);
+  });
+
+  it("rejects with a 401 ApiError (session expired → route into login, §17)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(updateFormDefinition("s1", DESIGNER_META, DESIGNER_FIELDS)).rejects.toMatchObject({
+      name: "ApiError",
+      status: 401,
+    });
   });
 });
 
