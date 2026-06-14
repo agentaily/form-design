@@ -11,6 +11,14 @@ import type { ChatMessage } from "./designerLoop";
 export interface StreamDesignerChatArgs {
   messages: ChatMessage[];
   tools?: unknown[];
+  /**
+   * Optional conversation-level model (§13.6): the per-request `model` the owner picked
+   * via the composer chip (∈ chatModels.CHAT_MODELS `value`s). When present it rides into
+   * `POST /api/chat`'s body, taking precedence per-request; when absent, the proxy
+   * backstops with the owner's saved model / global default. The caller is responsible for
+   * only passing a whitelisted value (chatModels.isValidChatModel).
+   */
+  model?: string;
   /** Live text fragments, for streaming the assistant bubble. */
   onText?: (delta: string) => void;
   signal?: AbortSignal;
@@ -24,11 +32,14 @@ export interface StreamDesignerChatArgs {
 export async function streamDesignerChat({
   messages,
   tools = DESIGNER_TOOLS,
+  model,
   onText,
   signal,
 }: StreamDesignerChatArgs): Promise<{ text: string; toolCalls: RawToolCall[] }> {
+  // `model` is additive + optional: only spread it when present so an unselected
+  // conversation sends NO `model` key (the proxy then backstops with owner/default, §13.6).
   const res = await apiStream("/api/chat", {
-    body: { messages, tools },
+    body: { messages, tools, ...(model ? { model } : {}) },
     auth: true,
     signal,
   });

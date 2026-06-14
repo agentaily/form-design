@@ -13,8 +13,23 @@
 /** Upstream DeepSeek base URL — OpenAI-compatible `/chat/completions`. SPEC.md §13.1. */
 export const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 
+// MODEL NAMES (manager from-parent-1/2, 2026-06): DeepSeek now ships exactly two 型号 —
+// `DeepSeek-V4-Flash`(通用·快,默认)and `DeepSeek-V4-Pro`(更强·深度推理). The old
+// `deepseek-chat`/`deepseek-reasoner` ids are retired; these strings go upstream as-is.
+
 /** Default model when the owner left `deepseek.model` unspecified. SPEC.md §13.1. */
-export const DEFAULT_DEEPSEEK_MODEL = "deepseek-chat";
+export const DEFAULT_DEEPSEEK_MODEL = "DeepSeek-V4-Flash";
+
+/**
+ * Allowed per-request DeepSeek models (SPEC.md §13.6, PR #65). The conversation-level
+ * 模型(型号)选择器 sends one of these as `ChatRequest.model`; the proxy accepts it ONLY
+ * if it is in this whitelist (else 400 — never forwards an arbitrary model string upstream).
+ * Owner credential / default still backstop when no per-request model is sent (§13.6).
+ */
+export const DEEPSEEK_MODELS = ["DeepSeek-V4-Flash", "DeepSeek-V4-Pro"] as const;
+
+/** A whitelisted per-request DeepSeek model (a member of {@link DEEPSEEK_MODELS}). */
+export type DeepSeekModel = (typeof DEEPSEEK_MODELS)[number];
 
 /**
  * A single OpenAI-style chat message. Opaque to the proxy: it is forwarded to
@@ -34,8 +49,9 @@ export interface ChatMessage {
 export type ChatTool = Record<string, unknown>;
 
 /**
- * Request body for `POST /api/chat`. The proxy accepts only `messages` (required)
- * and `tools` (optional); `model` / temperature etc. are filled by the backend.
+ * Request body for `POST /api/chat`. The proxy accepts `messages` (required),
+ * `tools` (optional), and an optional whitelisted `model` (the conversation-level
+ * model chip, §13.6 / PR #65); temperature etc. are still filled by the backend.
  * `stream` is always forced to `true` by the Worker regardless of the body.
  * See SPEC.md §13.2.
  */
@@ -44,6 +60,14 @@ export interface ChatRequest {
   messages: ChatMessage[];
   /** Optional function-calling tools. Forwarded to upstream when present. */
   tools?: ChatTool[];
+  /**
+   * Optional per-request model from the conversation-level chip (§13.6). When present it
+   * MUST be a whitelisted {@link DeepSeekModel} (∈ {@link DEEPSEEK_MODELS}); an unknown
+   * model is rejected (the route maps the rejection to `400 { error: "unsupported model" }`).
+   * When absent it is OMITTED here, and the proxy falls back to the owner's saved model /
+   * {@link DEFAULT_DEEPSEEK_MODEL} (§13.6 priority order). Never a free-form string upstream.
+   */
+  model?: DeepSeekModel;
 }
 
 /**
@@ -69,23 +93,36 @@ export class DeepSeekNotConfiguredError extends Error {
   }
 }
 
+/** Type guard: is `v` a whitelisted per-request DeepSeek model (§13.6)? */
+export function isDeepSeekModel(v: unknown): v is DeepSeekModel {
+  return typeof v === "string" && (DEEPSEEK_MODELS as readonly string[]).includes(v);
+}
+
 /**
  * Validate + normalize a parsed JSON body into a {@link ChatRequest}.
  *
  * - `messages` must be a non-empty array; otherwise reject (the route maps the
  *   rejection to `400 { error: "messages is required" }`, nothing forwarded).
  * - `tools`, when present, must be an array (else omitted / rejected per impl).
+ * - `model`, when present, must be a whitelisted {@link DeepSeekModel} (∈
+ *   {@link DEEPSEEK_MODELS}); an unknown / non-string model is rejected (the route maps
+ *   the rejection to `400 { error: "unsupported model" }`). When absent it is OMITTED
+ *   from the result, so the proxy falls back to the owner's saved model / default (§13.6).
  * - Does NOT inspect the inner shape of messages/tools — those stay opaque and
  *   are forwarded to upstream untouched. See SPEC.md §13.2.
  *
- * @throws if `messages` is missing / not an array / empty.
+ * @throws if `messages` is missing / not an array / empty, or `model` is an unknown value.
  */
 export function parseChatRequest(body: unknown): ChatRequest {
   if (typeof body !== "object" || body === null) {
     throw new Error("messages is required");
   }
 
-  const { messages, tools } = body as { messages?: unknown; tools?: unknown };
+  const { messages, tools, model } = body as {
+    messages?: unknown;
+    tools?: unknown;
+    model?: unknown;
+  };
 
   // `messages` must be a non-empty array. We do NOT inspect inner shape — it is
   // opaque and forwarded to upstream untouched (SPEC.md §13.2).
@@ -101,6 +138,16 @@ export function parseChatRequest(body: unknown): ChatRequest {
       throw new Error("tools must be an array");
     }
     request.tools = tools as ChatTool[];
+  }
+
+  // `model` is optional; when present it must be a whitelisted DeepSeekModel (§13.6).
+  // Unknown / non-string → reject (route → 400 "unsupported model"); absent → omit so the
+  // proxy backstops with owner.deepseek.model / DEFAULT_DEEPSEEK_MODEL.
+  if (model !== undefined) {
+    if (!isDeepSeekModel(model)) {
+      throw new Error("unsupported model");
+    }
+    request.model = model;
   }
 
   return request;

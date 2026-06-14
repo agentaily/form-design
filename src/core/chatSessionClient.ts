@@ -34,8 +34,15 @@ import type { ChatMessage } from "./designerLoop";
 /** localStorage key holding the client-minted stable design-session id (SPEC §26.2). */
 export const DESIGN_SESSION_ID_KEY = "agentaily_forms_design_session";
 
-/** Owner-only chat-session endpoint base (SPEC §26.3). */
+/** Owner-only chat-session endpoint base (`/api/chat/session/:sessionId`, SPEC §26.3). */
 export const CHAT_SESSION_PATH = "/api/chat/session";
+
+/**
+ * Owner-only chat-session LIST endpoint (`GET /api/chat/sessions`, SPEC §26.9, PR #65).
+ * NOTE the `s` and the missing `:id` segment — distinct from {@link CHAT_SESSION_PATH}
+ * (`/api/chat/session/:sessionId`, the per-session GET/PUT/DELETE).
+ */
+export const CHAT_SESSIONS_PATH = "/api/chat/sessions";
 
 // In-memory mirror of the design-session id, so it coheres within the page even when
 // localStorage is unavailable (private mode / sandboxed runner) — mirrors apiClient's
@@ -209,6 +216,41 @@ export function getOrCreateDesignSessionId(): string {
 }
 
 /**
+ * Make `id` the active design-session id (SPEC §26.2/§26.9, PR #65) — used when the owner
+ * SWITCHES to or creates another conversation. Writes it to localStorage
+ * ({@link DESIGN_SESSION_ID_KEY}) so a reload resumes THIS conversation, and updates the
+ * in-memory mirror so {@link getOrCreateDesignSessionId} immediately returns it (kept
+ * coherent within the page even when storage is unavailable — mirrors apiClient's
+ * `memToken`). Storage failures are swallowed: the in-memory mirror still coheres the page.
+ *
+ * @param id the design-session id to make active.
+ */
+export function setActiveDesignSessionId(id: string): void {
+  // Update the in-memory mirror first so the id coheres even if persistence throws.
+  memSessionId = id;
+  try {
+    localStorage.setItem(DESIGN_SESSION_ID_KEY, id);
+  } catch {
+    /* storage unavailable — the in-memory mirror still coheres the page (§26.2) */
+  }
+}
+
+/**
+ * Mint a fresh design-session id, make it active, and return it (SPEC §26.2/§26.9, PR #65)
+ * — used when the owner starts a NEW conversation. The new id is high-entropy (so it never
+ * collides with an existing (owner_id, sessionId) row), persisted + mirrored via
+ * {@link setActiveDesignSessionId}, and becomes the key every subsequent turn-end save
+ * writes under (so the new conversation never overwrites the prior one).
+ *
+ * @returns the freshly-minted active design-session id.
+ */
+export function newDesignSessionId(): string {
+  const fresh = mintSessionId();
+  setActiveDesignSessionId(fresh);
+  return fresh;
+}
+
+/**
  * The live in-memory chat message shape the designer thread keeps (a superset of
  * {@link PersistedTurn}, carrying the transient `streaming` flag + live handles).
  * Sourced from `src/App.jsx` `messages` state / `renderChatTurn` (`src/chat.jsx`).
@@ -287,5 +329,72 @@ export function saveChatTurns(
     method: "PUT",
     auth: true,
     body: input,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Multi-session list + delete (SPEC §26.9, PR #65) — owner-only, mirrors backend
+// ---------------------------------------------------------------------------
+
+/**
+ * A chat session's summary for the session-list / switcher (SPEC §26.9). Mirrors the
+ * backend `ChatSessionSummary` (workers/src/chatSessions.ts): just enough to render a
+ * list row and switch/delete — NOT the full transcript (that comes from
+ * {@link loadChatSession} by sessionId). `title` / `turnCount` are derived server-side
+ * from the stored turns (no extra columns). Carries no owner credentials.
+ */
+export interface ChatSessionSummary {
+  /** Client-minted stable design-session id (the (owner_id, sessionId) key, §26.2). */
+  sessionId: string;
+  /** Derived list title: first user turn's text, trimmed + truncated; "新会话" if none (§26.9). */
+  title: string;
+  /** Conversation rounds = count of `role === "user"` turns in the stored transcript (§26.9). */
+  turnCount: number;
+  /** Public slug once this session's form is published; null before publish (§26.2). */
+  formSlug: string | null;
+  /** ISO-8601 last-write time (the list is ordered most-recent-first, §26.9). */
+  updatedAt: string;
+}
+
+/**
+ * Response of `GET /api/chat/sessions` (SPEC §26.9): the current owner's sessions,
+ * most-recent-first. An owner with no sessions gets `{ sessions: [] }` (normal empty
+ * state, not an error). Cross-owner isolation is enforced server-side (only this owner's
+ * rows, §26.8).
+ */
+export interface ListChatSessionsResult {
+  sessions: ChatSessionSummary[];
+}
+
+/** Response of `DELETE /api/chat/session/:sessionId` (SPEC §26.9) on a hit. */
+export interface DeleteChatSessionResult {
+  deleted: boolean;
+}
+
+/**
+ * List the current owner's chat sessions (SPEC §26.9, owner-only §17). Resolves to
+ * {@link ListChatSessionsResult} — `{ sessions }` most-recent-first, `{ sessions: [] }`
+ * when the owner has none. A 401 surfaces as a 401 ApiError for the caller to route into
+ * /signin. Carries `auth:true`. GETs {@link CHAT_SESSIONS_PATH} (note: `/sessions`, no id —
+ * distinct from the per-session {@link CHAT_SESSION_PATH}).
+ */
+export function listChatSessions(): Promise<ListChatSessionsResult> {
+  return apiFetch<ListChatSessionsResult>(CHAT_SESSIONS_PATH, { auth: true });
+}
+
+/**
+ * Delete one of the current owner's chat sessions by id (SPEC §26.9, owner-only §17).
+ * Resolves to `{ deleted: true }` on a hit. A session that never existed under this owner —
+ * or belongs to another owner — surfaces as a **404 ApiError** (`{ error: "会话不存在" }`,
+ * owner isolation §26.8) for the CALLER to handle; this function does not swallow it.
+ * A 401 likewise surfaces for routing into /signin. Carries `auth:true`. DELETEs
+ * {@link CHAT_SESSION_PATH}/:sessionId (the per-session path, with id).
+ *
+ * @param sessionId the design-session id to delete.
+ */
+export function deleteChatSession(sessionId: string): Promise<DeleteChatSessionResult> {
+  return apiFetch<DeleteChatSessionResult>(sessionPath(sessionId), {
+    method: "DELETE",
+    auth: true,
   });
 }

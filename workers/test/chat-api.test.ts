@@ -26,10 +26,12 @@ import {
 //   3. owner 未配 key 时返回 409 且不打上游
 //   4. messages 缺失时返回 400 且不打上游
 //   5. 上游报错时返回错误且不泄漏 owner key
-//   6. model 缺省时上游请求使用默认 deepseek-chat
+//   6. model 缺省时上游请求使用默认 DeepSeek-V4-Flash
 //   7. 已配 model 时上游请求使用 owner 的 model
+//   8. per-request 白名单 model 优先于 owner.model（对话级模型芯片，§13.6 / PR #65）
+//   9. 非白名单 model → 400 unsupported model 且不打上游（§13.6 / PR #65）
 //
-// Contract: SPEC.md §13.
+// Contract: SPEC.md §13 / §13.6.
 
 const BASE = "https://api.local";
 
@@ -227,33 +229,65 @@ describe("LLM proxy POST /api/chat (workers/features/llm-proxy.feature)", () => 
     }
   });
 
-  it("Scenario: model 缺省时上游请求使用默认 deepseek-chat", async () => {
+  it("Scenario: model 缺省时上游请求使用默认 DeepSeek-V4-Flash", async () => {
     // Given 一个已配置 DeepSeek key 但未指定 model 的 owner
     await configureOwner({ apiKey: OWNER_KEY }); // no model
     upstream = installUpstreamMock({ body: UPSTREAM_SSE });
 
-    // When 前端向 /api/chat 发送一组对话消息
+    // When 前端向 /api/chat 发送一组对话消息（不带 per-request model）
     const res = await postChat({ messages: MESSAGES });
     expect(res.status).toBe(200);
 
-    // Then 上游请求体里的 model 为 deepseek-chat
+    // Then 上游请求体里的 model 为全局默认 DeepSeek-V4-Flash（§13.6 兜底）。
     expect(upstream.calls).toHaveLength(1);
-    expect((upstream.calls[0].body as { model: string }).model).toBe("deepseek-chat");
+    expect((upstream.calls[0].body as { model: string }).model).toBe("DeepSeek-V4-Flash");
   });
 
   it("Scenario: 已配 model 时上游请求使用 owner 的 model", async () => {
-    // Given 一个已配置 DeepSeek key 且指定了 model 的 owner
-    await configureOwner({ apiKey: OWNER_KEY_2, model: "deepseek-reasoner" });
+    // Given 一个已配置 DeepSeek key 且保存了 model 的 owner（无 per-request model 时由它兜底）。
+    await configureOwner({ apiKey: OWNER_KEY_2, model: "DeepSeek-V4-Pro" });
     upstream = installUpstreamMock({ body: UPSTREAM_SSE });
 
-    // When 前端向 /api/chat 发送一组对话消息
+    // When 前端向 /api/chat 发送一组对话消息（不带 per-request model）
     const res = await postChat({ messages: MESSAGES });
     expect(res.status).toBe(200);
 
-    // Then 上游请求体里的 model 为 owner 配置的 model
+    // Then 上游请求体里的 model 为 owner 配置的 model（§13.6：无 per-request 时取 owner.model）。
     expect(upstream.calls).toHaveLength(1);
-    expect((upstream.calls[0].body as { model: string }).model).toBe("deepseek-reasoner");
+    expect((upstream.calls[0].body as { model: string }).model).toBe("DeepSeek-V4-Pro");
     // And the owner's (rotated) key, not a stale one, reached upstream.
     expect(upstream.calls[0].headers.get("authorization")).toBe(`Bearer ${OWNER_KEY_2}`);
+  });
+
+  it("Scenario: per-request 白名单 model 优先于 owner 的 model (§13.6)", async () => {
+    // Given 一个 owner 保存的 model 是 Flash，但本次对话级芯片选了 Pro。
+    await configureOwner({ apiKey: OWNER_KEY, model: "DeepSeek-V4-Flash" });
+    upstream = installUpstreamMock({ body: UPSTREAM_SSE });
+
+    // When 请求带上白名单内的 per-request model
+    const res = await postChat({ messages: MESSAGES, model: "DeepSeek-V4-Pro" });
+    expect(res.status).toBe(200);
+
+    // Then 上游用的是 per-request model（优先于 owner.model）。
+    expect(upstream.calls).toHaveLength(1);
+    expect((upstream.calls[0].body as { model: string }).model).toBe("DeepSeek-V4-Pro");
+  });
+
+  it("Scenario: 非白名单 model → 400 unsupported model 且不打上游 (§13.6)", async () => {
+    // Given 一个已配置 DeepSeek key 的 owner
+    await configureOwner({ apiKey: OWNER_KEY });
+    upstream = installUpstreamMock({ body: UPSTREAM_SSE });
+
+    // When 请求带上一个不在白名单内的 model（如 OpenAI 的 gpt-4）
+    const res = await postChat({ messages: MESSAGES, model: "gpt-4" });
+
+    // Then 代理拒绝该请求并返回 400 { error: "unsupported model" }
+    expect(res.status).toBe(400);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toBe("unsupported model");
+
+    // And 绝不向上游转发该请求（白名单守在 parse 阶段，§13.6）。
+    expect(upstream.called()).toBe(false);
   });
 });
