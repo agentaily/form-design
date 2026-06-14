@@ -752,18 +752,6 @@ body {
   color: var(--text-faint);
 }
 
-/* 横向滚动后,分页脚 / 表头保持贴合可视区不漂移(应用层兜底,作用域限定到 .sb-tablewrap;
-   根因在上游 DS DataTable 把脚/头放进了滚动容器,见 DONE 给 manager 的上游反馈)。 */
-.sb-tablewrap .ax-datatable__foot {
-  position: sticky;
-  left: 0;
-  background: var(--surface-card);
-}
-.sb-tablewrap .ax-datatable thead th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-}
 .sb-seq {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
