@@ -8,7 +8,12 @@
 // rather than apiClient itself, so these tests also pin that configClient routes
 // through apiFetch with Bearer injection and the typed ApiError surface.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getConfig, saveConfig, testConnections } from "../../src/core/configClient";
+import {
+  getConfig,
+  saveConfig,
+  testConnections,
+  testConnection,
+} from "../../src/core/configClient";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
 
 function jsonResponse(body, init = {}) {
@@ -210,6 +215,97 @@ describe("configClient · testConnections", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(testConnections()).rejects.toBeTruthy();
+  });
+});
+
+// Per-card single-service probe (§14, PR #72): testConnection(service, creds) sends
+// `{ service, [service]: creds }` (only the keys the owner typed — never the mask), and
+// resolves to JUST that block's ConnProbe.
+describe("configClient · testConnection (single-service)", () => {
+  it("POSTs only the DeepSeek block with the supplied candidate key and returns its probe", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ deepseek: { ok: true, message: "可连通" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await testConnection("deepseek", { apiKey: "sk-candidate" });
+
+    // Returns the single block's probe, not the whole result object.
+    expect(out).toEqual({ ok: true, message: "可连通" });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/config/test");
+    expect(init.method).toBe("POST");
+    expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
+    const body = JSON.parse(init.body);
+    expect(body).toEqual({ service: "deepseek", deepseek: { apiKey: "sk-candidate" } });
+    // 飞书 is NOT in the payload — only the targeted service.
+    expect(body.feishu).toBeUndefined();
+  });
+
+  it("OMITS the apiKey when the owner didn't edit it (mask fallback → test stored)", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse({ deepseek: { ok: true } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // No creds → backend falls back to the stored key; the mask is never sent.
+    await testConnection("deepseek");
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({ service: "deepseek" });
+    expect(body.deepseek).toBeUndefined();
+  });
+
+  it("sends 飞书 appId + appSecret and returns the 飞书 probe", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ feishu: { ok: false, message: "凭据无效" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await testConnection("feishu", { appId: "cli_x", appSecret: "secret-y" });
+
+    expect(out).toEqual({ ok: false, message: "凭据无效" });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({ service: "feishu", feishu: { appId: "cli_x", appSecret: "secret-y" } });
+  });
+
+  it("sends 飞书 appId alone (secret unchanged) so the backend keeps the stored secret", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse({ feishu: { ok: true } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await testConnection("feishu", { appId: "cli_x" });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({ service: "feishu", feishu: { appId: "cli_x" } });
+    expect(body.feishu.appSecret).toBeUndefined();
+  });
+
+  it("resolves (not rejects) a 200 ok:false — 测不通 is a normal single-card result", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ deepseek: { ok: false, message: "未配置" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(testConnection("deepseek")).resolves.toEqual({ ok: false, message: "未配置" });
+  });
+
+  it("degrades a missing block in the response to a normal 未配置 probe (never throws)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(testConnection("deepseek")).resolves.toEqual({ ok: false, message: "未配置" });
+  });
+
+  it("rejects only on a 401 (session expired → route into login)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(testConnection("deepseek")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 401,
+    });
   });
 });
 

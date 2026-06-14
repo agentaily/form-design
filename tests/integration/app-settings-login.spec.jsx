@@ -43,7 +43,7 @@ function baseStubs() {
     }),
     getConfig: vi.fn(async () => EMPTY_CONFIG),
     saveConfig: vi.fn(async () => EMPTY_CONFIG),
-    testConnections: vi.fn(async () => ({ deepseek: { ok: false }, feishu: { ok: false } })),
+    testConnection: vi.fn(async () => ({ ok: false })),
   };
 }
 

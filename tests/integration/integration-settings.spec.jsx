@@ -49,13 +49,12 @@ const MASKED_EMPTY = {
 };
 
 // Build an injectable fake client; each scenario overrides the relevant fn.
+// testConnection is the per-card single-service probe (PR #72): (service, creds?) → ConnProbe.
 function fakeClient(overrides = {}) {
   return {
     getConfig: overrides.getConfig ?? vi.fn(async () => MASKED_EMPTY),
     saveConfig: overrides.saveConfig ?? vi.fn(async () => MASKED_CONFIGURED),
-    testConnections:
-      overrides.testConnections ??
-      vi.fn(async () => ({ deepseek: { ok: true }, feishu: { ok: true } })),
+    testConnection: overrides.testConnection ?? vi.fn(async () => ({ ok: true })),
   };
 }
 
@@ -70,7 +69,7 @@ function openSettings(client, extra = {}) {
       onNeedLogin={extra.onNeedLogin ?? vi.fn()}
       getConfig={client.getConfig}
       saveConfig={client.saveConfig}
-      testConnections={client.testConnections}
+      testConnection={client.testConnection}
     />,
   );
 }
@@ -259,63 +258,134 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
   });
 
-  Scenario("测试连接逐条显示 DeepSeek 与飞书结果", ({ Given, When, And, Then }) => {
+  // 按卡测试（PR #72）：点某张卡的「测试连接」只测这张卡、用这张卡当前输入框的值、只更新这张卡。
+  Scenario("测 DeepSeek 用当前输入值且只更新 DeepSeek 卡", ({ Given, When, And, Then }) => {
     const client = fakeClient({
-      getConfig: vi.fn(async () => MASKED_CONFIGURED),
-      testConnections: vi.fn(async () => ({
-        deepseek: { ok: true, message: "可连通" },
-        feishu: { ok: false, message: "凭据无效" },
-      })),
+      getConfig: vi.fn(async () => MASKED_EMPTY),
+      testConnection: vi.fn(async (service) =>
+        service === "deepseek" ? { ok: true, message: "可连通" } : { ok: false },
+      ),
     });
     Given("owner 已登录并打开集成设置", async () => {
       openSettings(client);
       await waitFor(() => expect(testButtons().length).toBe(2));
     });
-    When("owner 点击测试连接", () => {
-      // Either card's Test triggers the stored-config probe; click the DeepSeek one.
+    When("owner 在 DeepSeek 卡填入一个未保存的 key 并点该卡的测试连接", () => {
+      // Type a NEW key into the DeepSeek card (empty editable, placeholder /sk-/) WITHOUT
+      // saving, then click ITS test button (the first TestRow button).
+      fireEvent.change(screen.getByPlaceholderText(/sk-/), { target: { value: "sk-unsaved" } });
       fireEvent.click(testButtons()[0]);
     });
-    And("后端返回 DeepSeek 可连通、飞书凭据无效", async () => {
-      await waitFor(() => expect(client.testConnections).toHaveBeenCalled());
+    And("后端用传入的 key 探测 DeepSeek 返回可连通", async () => {
+      await waitFor(() => expect(client.testConnection).toHaveBeenCalled());
+      // ONLY the DeepSeek service was probed, and with the just-typed (unsaved) key.
+      expect(client.testConnection).toHaveBeenCalledTimes(1);
+      const [service, creds] = client.testConnection.mock.calls[0];
+      expect(service).toBe("deepseek");
+      expect(creds).toMatchObject({ apiKey: "sk-unsaved" });
     });
     Then("设置页把 DeepSeek 标记为连通", async () => {
-      // DeepSeek's card flips to its connected state — the green "已连接" StatusPill + the
-      // backend note ("可连通") in its TestRow result line.
+      // DeepSeek's card flips to its connected state — the green "已连接" StatusPill + the note.
       await screen.findByText("可连通");
-      expect(screen.getAllByText("已连接").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("已连接").length).toBe(1);
     });
-    And("设置页把飞书标记为不可连通并显示其说明", async () => {
-      // 飞书's card flips to its error state — the red "连接失败" StatusPill + the note.
+    And("飞书卡的连接状态保持不变", () => {
+      // 飞书 was never probed (single call) and its card never flipped — no 连接失败 pill.
+      expect(client.testConnection).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText("连接失败")).not.toBeInTheDocument();
+    });
+  });
+
+  Scenario("测飞书只更新飞书卡", ({ Given, When, And, Then }) => {
+    const client = fakeClient({
+      getConfig: vi.fn(async () => MASKED_EMPTY),
+      testConnection: vi.fn(async (service) =>
+        service === "feishu" ? { ok: false, message: "凭据无效" } : { ok: true },
+      ),
+    });
+    Given("owner 已登录并打开集成设置", async () => {
+      openSettings(client);
+      await waitFor(() => expect(testButtons().length).toBe(2));
+    });
+    When("owner 在飞书卡填入未保存的凭据并点该卡的测试连接", () => {
+      fireEvent.change(screen.getByPlaceholderText("cli_xxxxxxxxxxxx"), {
+        target: { value: "cli_unsaved" },
+      });
+      const secretInput = document.querySelector('input[id="secret-app-secret"]');
+      fireEvent.change(secretInput, { target: { value: "feishu-unsaved" } });
+      fireEvent.click(testButtons()[1]);
+    });
+    And("后端用传入的飞书凭据探测返回凭据无效", async () => {
+      await waitFor(() => expect(client.testConnection).toHaveBeenCalled());
+      expect(client.testConnection).toHaveBeenCalledTimes(1);
+      const [service, creds] = client.testConnection.mock.calls[0];
+      expect(service).toBe("feishu");
+      expect(creds).toMatchObject({ appId: "cli_unsaved", appSecret: "feishu-unsaved" });
+    });
+    Then("设置页把飞书标记为不可连通并显示其说明", async () => {
       await screen.findByText("凭据无效");
-      expect(screen.getAllByText("连接失败").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("连接失败").length).toBe(1);
+    });
+    And("DeepSeek 卡的连接状态保持不变", () => {
+      expect(client.testConnection).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+    });
+  });
+
+  Scenario("密钥未改时点测试走测已存配置兜底", ({ Given, And, When, Then }) => {
+    const client = fakeClient({
+      getConfig: vi.fn(async () => MASKED_CONFIGURED),
+      testConnection: vi.fn(async () => ({ ok: true, message: "可连通" })),
+    });
+    Given("owner 已登录并打开集成设置", async () => {
+      openSettings(client);
+      await waitFor(() => expect(testButtons().length).toBe(2));
+    });
+    And("设置页回显着 DeepSeek key 的掩码值", async () => {
+      // The stored DeepSeek key surfaces its masked affordance (empty editable, mask placeholder).
+      await waitFor(() => {
+        expect(
+          screen.getAllByPlaceholderText(/已保存.*留空则保持不变/).length,
+        ).toBeGreaterThanOrEqual(1);
+      });
+    });
+    When("owner 不改 DeepSeek key 直接点该卡的测试连接", () => {
+      fireEvent.click(testButtons()[0]);
+    });
+    Then("测试请求不携带 DeepSeek key 的明文", async () => {
+      await waitFor(() => expect(client.testConnection).toHaveBeenCalled());
+      const [service, creds] = client.testConnection.mock.calls[0];
+      expect(service).toBe("deepseek");
+      // Unchanged secret → OMITTED so the backend tests the STORED key; no apiKey sent and the
+      // mask placeholder never leaks into the request.
+      expect(creds === undefined || creds.apiKey === undefined).toBe(true);
+      expect(JSON.stringify(creds ?? {})).not.toContain("sk-…wxyz");
+    });
+    And("设置页按后端结果把 DeepSeek 标记为连通", async () => {
+      await screen.findByText("可连通");
     });
   });
 
   Scenario("连不通是正常结果而非报错", ({ Given, When, And, Then }) => {
     const client = fakeClient({
       getConfig: vi.fn(async () => MASKED_EMPTY),
-      testConnections: vi.fn(async () => ({
-        deepseek: { ok: false, message: "未配置" },
-        feishu: { ok: false, message: "未配置" },
-      })),
+      testConnection: vi.fn(async () => ({ ok: false, message: "未配置" })),
     });
     Given("owner 已登录并打开集成设置", async () => {
       openSettings(client);
       await waitFor(() => expect(testButtons().length).toBe(2));
     });
-    When("owner 点击测试连接", () => {
+    When("owner 点击 DeepSeek 卡的测试连接", () => {
       fireEvent.click(testButtons()[0]);
     });
-    And("后端返回两块都未配置", async () => {
-      await waitFor(() => expect(client.testConnections).toHaveBeenCalled());
+    And("后端返回该连接未配置", async () => {
+      await waitFor(() => expect(client.testConnection).toHaveBeenCalled());
     });
-    Then("设置页逐条显示两块均不可连通及其说明", async () => {
-      // Both cards flip to their (normal) error state showing the "未配置" note — ok:false
-      // is a result, not a request failure.
-      await waitFor(() => {
-        expect(screen.getAllByText("未配置").length).toBe(2);
-        expect(screen.getAllByText("连接失败").length).toBe(2);
-      });
+    Then("设置页显示 DeepSeek 卡不可连通及其说明", async () => {
+      // The DeepSeek card flips to its (normal) error state showing the "未配置" note — ok:false
+      // is a result, not a request failure; only that one card flips.
+      await screen.findByText("未配置");
+      expect(screen.getAllByText("连接失败").length).toBe(1);
     });
     And("设置页不显示请求失败的报错", () => {
       // ok:false is a normal result, NOT a request failure — no failure Alert.

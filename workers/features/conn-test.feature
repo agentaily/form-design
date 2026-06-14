@@ -63,3 +63,44 @@ Feature: 连接测试 POST /api/config/test 探一下已保存配置能否连通
     When owner 触发连接测试
     Then 整个响应里不包含 owner 的明文 DeepSeek key
     And 整个响应里不包含 owner 的明文飞书 app secret
+
+  # 按卡测试 + 传入待测凭据（PR #72）：可只测一个服务、用请求体传入的凭据探测（verify-before-save，
+  # 不依赖已存配置）；凭据未传则回退到已存；传入的凭据同样绝不落响应 / message / 日志。
+  Scenario: 只测 DeepSeek 时不探测飞书
+    Given 一个已保存 DeepSeek key 与完整飞书凭据的 owner
+    And 上游 DeepSeek models 接口将返回成功
+    When owner 只触发 DeepSeek 的连接测试
+    Then 响应状态码为 200
+    And 响应只含 DeepSeek 这条结果
+    And DeepSeek 这条结果 ok 为真
+    And 没有向上游飞书发起任何请求
+
+  Scenario: 用请求体传入的 DeepSeek key 探测而非已存
+    Given 一个已保存 DeepSeek key 的 owner
+    And 上游 DeepSeek models 接口将返回成功
+    When owner 用一个未保存的 DeepSeek key 触发 DeepSeek 的连接测试
+    Then 响应状态码为 200
+    And DeepSeek 这条结果 ok 为真
+    And 上游收到的是请求体传入的那个 key 而非已存的 key
+
+  Scenario: 不传凭据时回退到已存配置
+    Given 一个已保存 DeepSeek key 的 owner
+    And 上游 DeepSeek models 接口将返回成功
+    When owner 不带凭据触发 DeepSeek 的连接测试
+    Then 响应状态码为 200
+    And 上游收到的是已存的 DeepSeek key
+
+  Scenario: 用请求体传入的飞书凭据探测未配置过飞书的 owner
+    Given 一个已保存 DeepSeek key 但未配置飞书的 owner
+    And 上游飞书 tenant_access_token 接口将返回 code 为 0
+    When owner 用一组未保存的飞书凭据触发飞书的连接测试
+    Then 响应状态码为 200
+    And 飞书这条结果 ok 为真
+    And 上游飞书收到的是请求体传入的那组凭据
+    And 没有向上游 DeepSeek 发起任何请求
+
+  Scenario: 传入的凭据不出现在响应里
+    Given 一个未配置任何凭据的 owner
+    And 上游 DeepSeek models 接口将以 401 拒绝
+    When owner 用一个未保存的 DeepSeek key 触发 DeepSeek 的连接测试
+    Then 整个响应里不包含请求体传入的明文 DeepSeek key

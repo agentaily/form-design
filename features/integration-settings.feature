@@ -48,18 +48,34 @@ Feature: 集成设置页 · owner 配置 DeepSeek 与飞书
     Then 提交里不包含 DeepSeek key 与飞书 app_secret 的密文
     And 后端保留原有的两个密钥不变
 
-  Scenario: 测试连接逐条显示 DeepSeek 与飞书结果
+  # 按卡测试（PR #72）：点某张卡的「测试连接」→ 只测这张卡的服务、用这张卡当前输入框的值
+  # （不用先保存）、只更新这张卡——不再「一个按钮测两个服务、两张卡一起变红」。
+  Scenario: 测 DeepSeek 用当前输入值且只更新 DeepSeek 卡
     Given owner 已登录并打开集成设置
-    When owner 点击测试连接
-    And 后端返回 DeepSeek 可连通、飞书凭据无效
+    When owner 在 DeepSeek 卡填入一个未保存的 key 并点该卡的测试连接
+    And 后端用传入的 key 探测 DeepSeek 返回可连通
     Then 设置页把 DeepSeek 标记为连通
-    And 设置页把飞书标记为不可连通并显示其说明
+    And 飞书卡的连接状态保持不变
+
+  Scenario: 测飞书只更新飞书卡
+    Given owner 已登录并打开集成设置
+    When owner 在飞书卡填入未保存的凭据并点该卡的测试连接
+    And 后端用传入的飞书凭据探测返回凭据无效
+    Then 设置页把飞书标记为不可连通并显示其说明
+    And DeepSeek 卡的连接状态保持不变
+
+  Scenario: 密钥未改时点测试走测已存配置兜底
+    Given owner 已登录并打开集成设置
+    And 设置页回显着 DeepSeek key 的掩码值
+    When owner 不改 DeepSeek key 直接点该卡的测试连接
+    Then 测试请求不携带 DeepSeek key 的明文
+    And 设置页按后端结果把 DeepSeek 标记为连通
 
   Scenario: 连不通是正常结果而非报错
     Given owner 已登录并打开集成设置
-    When owner 点击测试连接
-    And 后端返回两块都未配置
-    Then 设置页逐条显示两块均不可连通及其说明
+    When owner 点击 DeepSeek 卡的测试连接
+    And 后端返回该连接未配置
+    Then 设置页显示 DeepSeek 卡不可连通及其说明
     And 设置页不显示请求失败的报错
 
   Scenario: 未登录访问集成设置引导先登录

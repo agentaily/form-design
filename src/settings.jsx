@@ -36,15 +36,18 @@
 //   集成 save → saveConfig(input). 200 → "已保存" + re-echo masked view. 400 → surface the backend's
 //           ApiError.message verbatim (top-level + matching card field). 401 → onNeedLogin.
 //
-//   集成 test → testConnections() probes the STORED config and always resolves; "测不通"/"未配置"
-//           are normal results (status:"error" + note), NOT request failures — only a 401 / network
-//           reject is a failure (401 → onNeedLogin).
+//   集成 test → PER-CARD (§14, PR #72): each card's 测试连接 probes ONLY its own service with that
+//           card's CURRENT input value (dirty → the typed value verify-before-save; an unchanged
+//           secret is OMITTED so the backend tests the STORED one — the mask is never sent), via
+//           testConnection(service, creds), and updates ONLY that card. "测不通"/"未配置" are normal
+//           results (status:"error" + note), NOT request failures — only a 401 / network reject is a
+//           failure (401 → onNeedLogin).
 //
 //   账户 save → updateProfile(displayName). 200 → re-baseline the form (clean) + onProfileSaved so
 //           App refreshes the account control. 401 → onNeedLogin. A >64-char name is caught client
 //           side by the field's maxLength rule before submit; a backend 400 surfaces on the field.
 //
-// getConfig / saveConfig / testConnections / updateProfile default to the real seams but are
+// getConfig / saveConfig / testConnection / updateProfile default to the real seams but are
 // injectable so tests inject fakes and stay deterministic (same pattern as auth.jsx).
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
@@ -68,7 +71,7 @@ import { L, getLocale, setLocale } from "./core/i18n";
 import {
   getConfig as defaultGetConfig,
   saveConfig as defaultSaveConfig,
-  testConnections as defaultTestConnections,
+  testConnection as defaultTestConnection,
 } from "./core/configClient";
 import { updateProfile as defaultUpdateProfile } from "./core/auth";
 import { ApiError } from "./core/apiClient";
@@ -347,7 +350,7 @@ function FeishuConnectionCard({
  * @param {(me: object) => void} [props.onProfileSaved]   propagate a saved profile to App
  * @param {() => Promise} [props.getConfig]          injectable; defaults to configClient.getConfig
  * @param {(input) => Promise} [props.saveConfig]    injectable; defaults to configClient.saveConfig
- * @param {() => Promise} [props.testConnections]    injectable; defaults to configClient.testConnections
+ * @param {(service: string, creds?: object) => Promise} [props.testConnection]  injectable single-service probe; defaults to configClient.testConnection
  * @param {(name: string) => Promise} [props.updateProfile]  injectable; defaults to auth.updateProfile
  */
 export function SettingsOverlay({
@@ -361,7 +364,7 @@ export function SettingsOverlay({
   onProfileSaved = () => {},
   getConfig = defaultGetConfig,
   saveConfig = defaultSaveConfig,
-  testConnections = defaultTestConnections,
+  testConnection = defaultTestConnection,
   updateProfile = defaultUpdateProfile,
   // 邮箱验证状态 (§23.6) — 账户 tab 的 acct-verify 内联卡用。emailVerified 默认 true(无卡),
   // 与 App 的乐观默认一致;onResendVerification / resendCooldown / resending 接 App 的重发逻辑。
@@ -511,22 +514,39 @@ export function SettingsOverlay({
     }
   };
 
-  // Run the stored-config probe and push status/result into BOTH cards.
-  const runTest = async () => {
+  // 每卡独立「测试连接」(§14, PR #72):只测这张卡的服务、用这张卡当前输入框的值(dirty 就拿输入值
+  // verify-before-save;未改的密钥则 OMIT → 后端走「测已存配置」兜底,绝不把掩码串发出去),并且
+  // **只更新这张卡**的连接状态——点 DeepSeek 不再连带把飞书卡也改掉。
+  const backendUnreachable = () => ({
+    status: "error",
+    result: L("无法连接到后端，请检查网络。", "Can't reach the backend — check your network."),
+  });
+
+  // DeepSeek 卡:dirty(输入了新 key)→ 拿输入值探测;未改 → 不带 key,后端测已存。
+  const onTestDeepSeek = async () => {
     setDsConn((c) => ({ ...c, status: "testing" }));
-    setFsConn((c) => ({ ...c, status: "testing" }));
     try {
-      const r = await testConnections();
-      setDsConn(probeToConn(r.deepseek));
-      setFsConn(probeToConn(r.feishu));
+      const creds = apiKey.trim() ? { apiKey } : undefined;
+      setDsConn(probeToConn(await testConnection("deepseek", creds)));
     } catch (e) {
       if (handleError(e, L("登录后配置集成", "Sign in to configure integrations"))) return; // 401 → onNeedLogin
-      const failed = {
-        status: "error",
-        result: L("无法连接到后端，请检查网络。", "Can't reach the backend — check your network."),
-      };
-      setDsConn(failed);
-      setFsConn(failed);
+      setDsConn(backendUnreachable());
+    }
+  };
+
+  // 飞书卡:appId 是明文(回显在输入框,随时可发);appSecret 仅在 owner 改过时才带,未改则
+  // OMIT → 后端用已存 secret 兜底。两者都空(从未配置)则传 undefined → 后端报「未配置」。
+  const onTestFeishu = async () => {
+    setFsConn((c) => ({ ...c, status: "testing" }));
+    try {
+      const creds = {};
+      if (appId.trim()) creds.appId = appId;
+      if (secret.trim()) creds.appSecret = secret;
+      const has = Object.keys(creds).length > 0;
+      setFsConn(probeToConn(await testConnection("feishu", has ? creds : undefined)));
+    } catch (e) {
+      if (handleError(e, L("登录后配置集成", "Sign in to configure integrations"))) return; // 401 → onNeedLogin
+      setFsConn(backendUnreachable());
     }
   };
 
@@ -676,9 +696,9 @@ export function SettingsOverlay({
               keyError={fieldErrors.keyError}
               status={dsConn.status}
               result={dsConn.result}
-              onTest={runTest}
-              // Test probes the STORED backend config (§14), not the local fields, so it is
-              // always available once loaded — "未配置" is a normal result, not a reason to disable.
+              onTest={onTestDeepSeek}
+              // 测的是这张卡当前输入值(未改则后端测已存,§14),只更新这张卡;加载完即可用
+              // ——"未配置" 是正常结果,不是禁用理由。
               canTest={!loading}
             />
 
@@ -702,7 +722,7 @@ export function SettingsOverlay({
               secretError={fieldErrors.secretError}
               status={fsConn.status}
               result={fsConn.result}
-              onTest={runTest}
+              onTest={onTestFeishu}
               canTest={!loading}
             />
           </div>

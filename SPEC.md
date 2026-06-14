@@ -671,31 +671,46 @@ Worker 内部流程：
 
 ## 14. 后端 · 连接测试 `POST /api/config/test`（探一下已保存配置能否连通）
 
-> **与第 12/13 节的关系：** §12 把 owner 的 DeepSeek key 与飞书凭据加密存进 D1；§13 用 DeepSeek key 代理对话。本节给「集成设置」的「测试连接」按钮提供后端：用 owner **已保存的**那份配置（由 `getOwnerConfig` 解密得到，**不**在请求体里收凭据），各自探一下 DeepSeek 与飞书能否连通，把每条连接的结果分别回报。
+> **与第 12/13 节的关系：** §12 把 owner 的 DeepSeek key 与飞书凭据加密存进 D1；§13 用 DeepSeek key 代理对话。本节给「集成设置」的「测试连接」按钮提供后端：探一下 DeepSeek 与飞书能否连通，把每条连接的结果分别回报。
 >
-> **测的是 D1 里存的那份：** MVP 不接收请求体里的临时凭据——「测试连接」测的就是当前已保存、后续真正会用的那份配置。请求体为空（或被忽略）。
+> **按卡测试 + 待测凭据（PR #72 修订）：** 「测试连接」是**按卡**的——点某张卡只测该卡那一个服务（`service: "deepseek" | "feishu"`），并可**用请求体传入待测凭据**（DeepSeek 的 `apiKey` / 飞书的 `appId`+`appSecret`）先验后存（verify-before-save，不必先保存）。请求体里**未传**的凭据回退到 owner 在 D1 里**已存的那份**（前端对未改动的掩码字段一律 OMIT，绝不把掩码串发来）。**向后兼容：** 请求体**为空 / 无 `service`** 时退化为「测两块**已存**配置」的旧行为（返回 `{ deepseek, feishu }`）。
 >
-> **本节范围（第一刀，仅 Worker 端）：** `POST /api/config/test` 的探测目标（上游轻量端点）、判定规则、响应形状、未配置约定、安全（key/secret 不出网、不进 message）。
+> **本节范围（仅 Worker 端）：** `POST /api/config/test` 的请求形状（`service` + 可选待测凭据）、探测目标（上游轻量端点）、判定规则、响应形状（单服务 / 两块）、未配置约定、安全（key/secret 不出网、不进 message、传入的待测凭据同样不落响应/日志）。
 >
-> **不在本节：** 飞书多维表格的读写（`appToken` / `tableId` 是否指向有效表）、答题提交落库（那是 #4 `/api/submit`）、前端「测试连接」按钮接入。本刀只验**凭据级**连通性：DeepSeek key 是否有效、飞书自建应用的 `app_id` + `app_secret` 能否换到 `tenant_access_token`。
+> **不在本节：** 飞书多维表格的读写（`appToken` / `tableId` 是否指向有效表）、答题提交落库（那是 #4 `/api/submit`）。本节只验**凭据级**连通性：DeepSeek key 是否有效、飞书自建应用的 `app_id` + `app_secret` 能否换到 `tenant_access_token`。
 
 ### 14.1 端点职责
 
-`POST /api/config/test` 读取已保存配置（`getOwnerConfig`，§13.1 同一内部视图），对两块凭据**各自独立**发起一次轻量上游探测，互不影响地把两条结果汇成一个对象返回。任一探测的成败都**不**改变 HTTP 状态码——「连不上」是正常的探测结果，不是 HTTP 错误。
+`POST /api/config/test` 对**待测的那一块（或两块）**凭据**各自独立**发起一次轻量上游探测，互不影响地汇成结果返回。每块的凭据来源：**请求体里传入的待测凭据优先**（owner 在卡里刚敲、还没保存的值），未传则**回退到 `getOwnerConfig` 解密出的已存配置**（§13.1 同一内部视图）；两者都没有 → 该块 `{ ok:false, message:"未配置" }`，不打上游。任一探测的成败都**不**改变 HTTP 状态码——「连不上」是正常的探测结果，不是 HTTP 错误。
+
+请求体（JSON，所有字段可选）：
+
+```jsonc
+{
+  "service": "deepseek",            // 省略 ⇒ 测两块（旧行为）；指定 ⇒ 只测这一块（按卡）
+  "deepseek": { "apiKey": "sk-…" }, // 待测 DeepSeek key；省略 ⇒ 用已存
+  "feishu":   { "appId": "cli_…", "appSecret": "…" } // 待测飞书凭据；省略某项 ⇒ 该项用已存
+}
+```
 
 Worker 内部流程：
 
 ```
 1) importConfigKey(env.CONFIG_KEY)                  ← AES-GCM 主密钥（§12.2）
-2) getOwnerConfig(env.DB, key)                       ← 读单行 + 解密 → OwnerConfig 内部视图
-3) DeepSeek 探测：
-     owner.deepseek === null  → { ok:false, message:"未配置" }（不打上游）
-     否则 testDeepSeek(owner.deepseek.apiKey)
-4) 飞书探测：
-     owner.feishu === null    → { ok:false, message:"未配置" }（不打上游）
-     否则 testFeishu(owner.feishu.appId, owner.feishu.appSecret)
-5) 200 { deepseek, feishu }                          ← 两条结果各自独立
+2) getOwnerConfig(env.DB, key)                       ← 读单行 + 解密 → OwnerConfig 内部视图（兜底用）
+3) 解析请求体（缺/非 JSON 容错为 {}，不 400）
+4) DeepSeek 探测（仅当无 service 或 service==="deepseek" 时跑）：
+     apiKey = body.deepseek.apiKey（非空）?? owner.deepseek?.apiKey
+     apiKey 为空 → { ok:false, message:"未配置" }（不打上游）
+     否则 testDeepSeek(apiKey)
+5) 飞书探测（仅当无 service 或 service==="feishu" 时跑）：
+     appId/appSecret = body.feishu.* （非空）?? owner.feishu?.*
+     任一为空 → { ok:false, message:"未配置" }（不打上游）
+     否则 testFeishu(appId, appSecret)
+6) 200：单服务 → { <service>: probe }（只含该块）；旧行为 → { deepseek, feishu }（两块各自独立）
 ```
+
+> **响应只含测过的块：** 指定了 `service` 时响应只带那一块（前端据此只更新对应那张卡，不连带改另一张）；不指定时仍是两块。
 
 > 两条探测彼此**独立**：DeepSeek 连不通不影响飞书探测照常进行，反之亦然。任一上游不可达/超时也只把**那一条**判为 `ok:false`，另一条照常返回。
 
@@ -733,8 +748,8 @@ Worker 内部流程：
 
 ### 14.5 安全（凭据不出网、不进 message）
 
-- **明文凭据只发往对应上游：** owner 的 DeepSeek 明文 key 仅用于 DeepSeek 探测的 `Authorization: Bearer`；飞书 `app_secret`（与 `app_id`）仅用于飞书探测的请求体。它们解密自 `getOwnerConfig`，唯一去向是各自的上游探测请求。
-- **凭据绝不进响应：** key / `app_secret` **绝不**出现在响应 body（含任何 `message`）、响应头、或日志中。
+- **明文凭据只发往对应上游：** owner 的 DeepSeek 明文 key 仅用于 DeepSeek 探测的 `Authorization: Bearer`；飞书 `app_secret`（与 `app_id`）仅用于飞书探测的请求体。无论凭据来自 `getOwnerConfig` 解密的已存配置、还是请求体里传入的**待测凭据**（PR #72 verify-before-save），唯一去向都是各自的上游探测请求。
+- **凭据绝不进响应、不落日志：** key / `app_secret`（**已存的或请求体传入的**）**绝不**出现在响应 body（含任何 `message`）、响应头、或日志中——传入的待测凭据虽然出现在 test 请求体里，但同样不得被回显或记录。
 - **即便上游回错也不拼凭据：** 上游 `401`/`code≠0` 等错误转成 `message` 时，只保留「上游拒绝/出错」语义（可带上游状态码或飞书 `code` 这类**非敏感**摘要供排障），**绝不**把凭据或其片段拼进 `message`。
 - **沿用 §12 的加密边界：** 解密只发生在 Worker 内；D1 里仍是密文，浏览器侧拿不到明文。
 

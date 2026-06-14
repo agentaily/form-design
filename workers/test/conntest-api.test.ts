@@ -1,7 +1,12 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { applySchema, resetConfig, login, authHeader } from "./helpers";
-import { DEEPSEEK_MODELS_URL, FEISHU_TENANT_TOKEN_URL, type ConnTestResult } from "../src/conntest";
+import {
+  DEEPSEEK_MODELS_URL,
+  FEISHU_TENANT_TOKEN_URL,
+  type ConnTestResult,
+  type ConnTestSingleResult,
+} from "../src/conntest";
 
 // POST /api/config/test (and the POST /api/config setup it relies on) are now
 // owner-only (SPEC.md §17.1): every request carries `Authorization: Bearer <jwt>`
@@ -34,6 +39,13 @@ const OWNER_FEISHU_APP_ID = "cli_fixtureAppId9999";
 const OWNER_FEISHU_APP_SECRET = "feishu-APP-SECRET-qrstuvwxyz-7777-SHHH";
 const OWNER_FEISHU_APP_TOKEN = "bascnFixtureAppTokenXYZ";
 const OWNER_FEISHU_TABLE_ID = "tblFixture123";
+
+// Candidate (unsaved) credentials the owner types into a card and tests BEFORE saving
+// (PR #72 verify-before-save). Distinct from the stored fixtures so we can prove the
+// route probed with THESE, not the stored ones — and that they never leak into a response.
+const CANDIDATE_DEEPSEEK_KEY = "sk-candidate-UNSAVED-key-1111-2222-3333-4444";
+const CANDIDATE_FEISHU_APP_ID = "cli_candidateUnsaved8888";
+const CANDIDATE_FEISHU_APP_SECRET = "feishu-CANDIDATE-secret-unsaved-9999-zzz";
 
 // Feishu's quirk: HTTP is still 200 even on a credential failure — connectivity is
 // decided by the body `code` (0 = ok, non-zero = business error). SPEC.md §14.2.
@@ -185,6 +197,16 @@ function postConnTest(): Promise<Response> {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeader(token) },
     body: "{}",
+  });
+}
+
+// PR #72: per-card / candidate-credential request — send a structured body (which
+// single service to test + optional candidate credentials). Owner-only → Bearer token.
+function postConnTestBody(body: unknown): Promise<Response> {
+  return SELF.fetch(`${BASE}/api/config/test`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...authHeader(token) },
+    body: JSON.stringify(body),
   });
 }
 
@@ -389,6 +411,139 @@ describe("conn test POST /api/config/test (workers/features/conn-test.feature)",
     for (const [, value] of res.headers) {
       expect(value).not.toContain(OWNER_DEEPSEEK_KEY);
       expect(value).not.toContain(OWNER_FEISHU_APP_SECRET);
+    }
+  });
+
+  // ── 按卡测试 + 传入待测凭据（PR #72）─────────────────────────────────────────────
+
+  it("Scenario: 只测 DeepSeek 时不探测飞书", async () => {
+    // Given 一个已保存 DeepSeek key 与完整飞书凭据的 owner
+    await configureOwner({ deepseek: true, feishu: true });
+    // And 上游 DeepSeek models 接口将返回成功. Feishu reply OMITTED → probing it would THROW.
+    mock = installConnMock({
+      deepseek: { status: 200, body: JSON.stringify({ data: [] }) },
+    });
+
+    // When owner 只触发 DeepSeek 的连接测试
+    const res = await postConnTestBody({ service: "deepseek" });
+
+    // Then 响应状态码为 200
+    expect(res.status).toBe(200);
+    const result = (await res.json()) as ConnTestSingleResult;
+
+    // And 响应只含 DeepSeek 这条结果
+    expect(result.deepseek).toBeDefined();
+    expect(result.feishu).toBeUndefined();
+    // And DeepSeek 这条结果 ok 为真
+    expect(result.deepseek?.ok).toBe(true);
+
+    // And 没有向上游飞书发起任何请求
+    expect(mock.feishuCalls).toHaveLength(0);
+    expect(mock.deepseekCalls).toHaveLength(1);
+  });
+
+  it("Scenario: 用请求体传入的 DeepSeek key 探测而非已存", async () => {
+    // Given 一个已保存 DeepSeek key 的 owner
+    await configureOwner({ deepseek: true, feishu: false });
+    // And 上游 DeepSeek models 接口将返回成功
+    mock = installConnMock({
+      deepseek: { status: 200, body: JSON.stringify({ data: [] }) },
+    });
+
+    // When owner 用一个未保存的 DeepSeek key 触发 DeepSeek 的连接测试
+    const res = await postConnTestBody({
+      service: "deepseek",
+      deepseek: { apiKey: CANDIDATE_DEEPSEEK_KEY },
+    });
+
+    // Then 响应状态码为 200
+    expect(res.status).toBe(200);
+    const result = (await res.json()) as ConnTestSingleResult;
+    // And DeepSeek 这条结果 ok 为真
+    expect(result.deepseek?.ok).toBe(true);
+
+    // And 上游收到的是请求体传入的那个 key 而非已存的 key
+    expect(mock.deepseekCalls).toHaveLength(1);
+    expect(mock.deepseekCalls[0].headers.get("authorization")).toBe(
+      `Bearer ${CANDIDATE_DEEPSEEK_KEY}`,
+    );
+    expect(mock.deepseekCalls[0].headers.get("authorization")).not.toContain(OWNER_DEEPSEEK_KEY);
+  });
+
+  it("Scenario: 不传凭据时回退到已存配置", async () => {
+    // Given 一个已保存 DeepSeek key 的 owner
+    await configureOwner({ deepseek: true, feishu: false });
+    // And 上游 DeepSeek models 接口将返回成功
+    mock = installConnMock({
+      deepseek: { status: 200, body: JSON.stringify({ data: [] }) },
+    });
+
+    // When owner 不带凭据触发 DeepSeek 的连接测试 (no candidate creds → stored fallback)
+    const res = await postConnTestBody({ service: "deepseek" });
+
+    // Then 响应状态码为 200
+    expect(res.status).toBe(200);
+    // And 上游收到的是已存的 DeepSeek key
+    expect(mock.deepseekCalls).toHaveLength(1);
+    expect(mock.deepseekCalls[0].headers.get("authorization")).toBe(`Bearer ${OWNER_DEEPSEEK_KEY}`);
+  });
+
+  it("Scenario: 用请求体传入的飞书凭据探测未配置过飞书的 owner", async () => {
+    // Given 一个已保存 DeepSeek key 但未配置飞书的 owner
+    await configureOwner({ deepseek: true, feishu: false });
+    // And 上游飞书 tenant_access_token 接口将返回 code 为 0. DeepSeek reply OMITTED → THROWS if probed.
+    mock = installConnMock({
+      feishu: { status: 200, body: FEISHU_OK_BODY },
+    });
+
+    // When owner 用一组未保存的飞书凭据触发飞书的连接测试 (verify-before-save, no stored 飞书)
+    const res = await postConnTestBody({
+      service: "feishu",
+      feishu: { appId: CANDIDATE_FEISHU_APP_ID, appSecret: CANDIDATE_FEISHU_APP_SECRET },
+    });
+
+    // Then 响应状态码为 200
+    expect(res.status).toBe(200);
+    const result = (await res.json()) as ConnTestSingleResult;
+    // And 飞书这条结果 ok 为真 — even though 飞书 was never SAVED (probed with candidate creds).
+    expect(result.feishu?.ok).toBe(true);
+    expect(result.deepseek).toBeUndefined();
+
+    // And 上游飞书收到的是请求体传入的那组凭据
+    expect(mock.feishuCalls).toHaveLength(1);
+    expect(mock.feishuCalls[0].body).toMatchObject({
+      app_id: CANDIDATE_FEISHU_APP_ID,
+      app_secret: CANDIDATE_FEISHU_APP_SECRET,
+    });
+
+    // And 没有向上游 DeepSeek 发起任何请求
+    expect(mock.deepseekCalls).toHaveLength(0);
+  });
+
+  it("Scenario: 传入的凭据不出现在响应里", async () => {
+    // Given 一个未配置任何凭据的 owner (resetConfig in beforeEach, no configureOwner).
+    // And 上游 DeepSeek models 接口将以 401 拒绝 (failing path is riskiest for leakage).
+    mock = installConnMock({
+      deepseek: {
+        status: 401,
+        body: JSON.stringify({ error: { message: "Authentication Fails" } }),
+      },
+    });
+
+    // When owner 用一个未保存的 DeepSeek key 触发 DeepSeek 的连接测试
+    const res = await postConnTestBody({
+      service: "deepseek",
+      deepseek: { apiKey: CANDIDATE_DEEPSEEK_KEY },
+    });
+
+    // Guard the leakage scan against passing vacuously (must actually serve the test, §14.3).
+    expect(res.status).toBe(200);
+
+    // Then 整个响应里不包含请求体传入的明文 DeepSeek key — neither in the body nor any header.
+    const raw = await res.clone().text();
+    expect(raw).not.toContain(CANDIDATE_DEEPSEEK_KEY);
+    for (const [, value] of res.headers) {
+      expect(value).not.toContain(CANDIDATE_DEEPSEEK_KEY);
     }
   });
 });

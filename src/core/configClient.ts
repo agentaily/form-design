@@ -1,9 +1,11 @@
 // configClient.ts — frontend seam for owner integration settings (SPEC §12 + §14).
-// Three owner-only calls behind apiClient's Bearer injection (§17):
-//   getConfig()        → GET  /api/config        → masked view (MaskedConfig)
-//   saveConfig(input)  → POST /api/config        → masked view of what was saved
-//   testConnections()  → POST /api/config/test   → per-block connectivity probes
-// All three carry `auth: true`; a missing/expired session surfaces as a 401
+// Owner-only calls behind apiClient's Bearer injection (§17):
+//   getConfig()                  → GET  /api/config       → masked view (MaskedConfig)
+//   saveConfig(input)            → POST /api/config       → masked view of what was saved
+//   testConnection(service,creds)→ POST /api/config/test  → SINGLE-service probe with the
+//                                  card's current input value (per-card 测试连接, §14, PR #72)
+//   testConnections()            → POST /api/config/test  → legacy BOTH-block stored probe
+// All carry `auth: true`; a missing/expired session surfaces as a 401
 // ApiError for the caller to route into the login flow (§17.4). Secrets are never
 // returned in full — getConfig/saveConfig only ever hand back masked strings.
 //
@@ -106,6 +108,37 @@ export interface ConnTestResult {
   feishu: ConnProbe;
 }
 
+/** Which single connection {@link testConnection} probes (per-card 测试连接). */
+export type ConnService = "deepseek" | "feishu";
+
+/**
+ * Candidate credentials to probe a SINGLE connection WITH (verify-before-save, §14.1).
+ * Omit a secret the owner did NOT edit so the backend falls back to the STORED value —
+ * NEVER send the masked placeholder (the "don't submit the mask" rule, §12.4 / §14.1).
+ * For 飞书, `appId` is plaintext (always sendable); `appSecret` is the only masked field.
+ */
+export interface ConnTestCredentials {
+  /** DeepSeek candidate key (plaintext); omit to test the stored key. */
+  apiKey?: string;
+  /** 飞书 candidate app id (plaintext). */
+  appId?: string;
+  /** 飞书 candidate app secret (plaintext); omit to keep the stored secret. */
+  appSecret?: string;
+}
+
+/**
+ * Single-service test response (SPEC §14, per-card): only the probed block is present.
+ * The legacy both-blocks path still returns the full {@link ConnTestResult}.
+ */
+export type ConnTestSingleResult = Partial<ConnTestResult>;
+
+/** Request body for POST /api/config/test (SPEC §14.1, revised). All fields optional. */
+export interface ConnTestRequest {
+  service?: ConnService;
+  deepseek?: { apiKey?: string };
+  feishu?: { appId?: string; appSecret?: string };
+}
+
 /**
  * Read the current masked config (SPEC §12.3, owner-only §17). Never-configured →
  * all-null skeleton at HTTP 200. A 401 surfaces as an ApiError for the caller to
@@ -139,4 +172,38 @@ export function testConnections(): Promise<ConnTestResult> {
   // errors), so this resolves on 2xx; only a 401 (session) or network/infra failure
   // rejects via apiFetch's ApiError surface.
   return apiFetch<ConnTestResult>("/api/config/test", { method: "POST", auth: true });
+}
+
+/**
+ * Probe a SINGLE connection (SPEC §14, per-card 测试连接). Sends `{ service, [service]: creds }`
+ * so the backend probes ONLY that block — with the supplied candidate credentials when the owner
+ * edited them, or the owner's STORED config when omitted (verify-before-save, §14.1). A secret the
+ * owner did NOT edit must be OMITTED from `creds` (never the masked placeholder, §12.4); 飞书 `appId`
+ * is plaintext and always sendable. Resolves to that block's {@link ConnProbe} (always — "测不通" is
+ * a normal `ok:false` result); only a 401 (session) or network/infra failure rejects via ApiError.
+ * The owner key / app_secret are never echoed back (§14.5).
+ */
+export async function testConnection(
+  service: ConnService,
+  creds: ConnTestCredentials = {},
+): Promise<ConnProbe> {
+  // Only ever send the keys the owner actually typed — an omitted credential tells the
+  // backend to fall back to the stored value, so the mask placeholder is never transmitted.
+  const body: ConnTestRequest = { service };
+  if (service === "deepseek") {
+    if (creds.apiKey) body.deepseek = { apiKey: creds.apiKey };
+  } else {
+    const feishu: { appId?: string; appSecret?: string } = {};
+    if (creds.appId) feishu.appId = creds.appId;
+    if (creds.appSecret) feishu.appSecret = creds.appSecret;
+    if (feishu.appId !== undefined || feishu.appSecret !== undefined) body.feishu = feishu;
+  }
+  const result = await apiFetch<ConnTestSingleResult>("/api/config/test", {
+    method: "POST",
+    auth: true,
+    body,
+  });
+  // The single-service response carries exactly the probed block; a malformed/empty
+  // reply degrades to a normal "未配置" rather than throwing.
+  return result[service] ?? { ok: false, message: "未配置" };
 }
