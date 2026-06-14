@@ -10,8 +10,13 @@
 #   POST /api/forms 若返回 url 字段则以其为准，否则用本约定拼。第 6 步公开页用 /f/:slug
 #   解析 slug → GET /api/forms/:slug 拉 schema 渲染（本步不实现公开页本身）。
 #
-# 前端契约桩见 src/core/formsClient.ts，发布反馈 + 表单管理面板见 src/forms-panel.jsx，
-# 入口挂载（「我的表单」入口 + 发布按钮接线）见 src/App.jsx。
+# 发布交互（N-_ayo8x）：「发布」是顶栏的【直接动作】——点一下就把当前设计器表单上线
+#   （POST /api/forms → 高熵 slug），不再走「打开发布反馈浮层 → 在浮层里再点一次发布」的两步，
+#   也不往对话里发任何消息；成功后弹一个【仅链接、无二维码】的分享浮层（ShareDialog，"表单已发布"
+#   庆祝式），并把这份刚发布的表单接上既有的 编辑 / 更新 机制（见 features/form-editing.feature）。
+#   「分享」是【只读】：取当前已发布表单的公开链接弹同一个浮层（"分享这份表单"），不改状态、不发消息。
+# 前端契约桩见 src/core/formsClient.ts，分享浮层见 src/share-dialog.jsx，表单管理面板见
+#   src/forms-panel.jsx，发布/分享/「我的表单」入口接线（doPublish / openShare）见 src/App.jsx。
 Feature: 发布表单并管理我的表单
   作为表单作者(owner)
   我想把设计器里的表单发布成一个公开填写链接，并在「我的表单」里管理它们
@@ -44,6 +49,22 @@ Feature: 发布表单并管理我的表单
     And 后端返回 400 与错误说明
     Then 反馈里显示后端给出的错误说明
     And 顶栏状态仍为草稿
+
+  # —— 发布是直接动作 + 分享只读（N-_ayo8x）——
+
+  Scenario: 发布是直接动作并弹出分享浮层
+    Given owner 已登录
+    And 设计器里已有一份带标题和至少一个字段的表单
+    When owner 点击发布
+    And 后端返回新建表单的 slug
+    Then 直接弹出展示公开填写链接的分享浮层
+    And 发布过程不往对话里发任何消息
+
+  Scenario: 分享已发布的表单只读取链接
+    Given owner 刚发布了一份表单
+    When owner 点击分享
+    Then 弹出展示该表单公开填写链接的分享浮层
+    And 分享不发起改状态的请求也不往对话发消息
 
   # —— 表单管理：GET /api/forms 列出我的表单 ——
 

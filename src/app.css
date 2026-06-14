@@ -152,6 +152,51 @@ body {
   background: var(--surface-page);
 }
 
+/* 发布 / 分享浮层 (ShareDialog, N-_ayo8x) — 仅链接版,无二维码。Dialog chrome 由 DS 提供;这里只放
+   内层布局:一块等宽字体的公开链接代码块(可换行不溢出、悬停描边)+ 一行说明。值全引用 DS token。 */
+.d-share {
+  min-width: 0;
+}
+.d-share__url {
+  display: block;
+  margin: 7px 0 12px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-body);
+  text-decoration: none;
+  word-break: break-all;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2);
+  transition: border-color var(--dur-1) var(--ease-out);
+}
+.d-share__url:hover {
+  border-color: var(--border-strong);
+}
+.d-share__note {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  line-height: var(--leading-snug);
+}
+
+/* 发布失败提示 (N-_ayo8x) — 发布是直接动作,失败时贴 app 顶部一条可关闭的「对话外」提示(DS Alert),
+   不往对话发消息。flex:none 的内联条,坐在邮箱未验证条 .vb 与设计器主体 .app-stack__main 之间。 */
+.d-publish-error {
+  flex: none;
+  padding: 10px 16px 0;
+}
+.d-publish-error__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.d-publish-error__row > span {
+  flex: 1;
+  min-width: 0;
+}
+
 /* preview body */
 .d-pvbody {
   flex: 1;

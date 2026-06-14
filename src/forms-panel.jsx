@@ -1,5 +1,7 @@
-// forms-panel.jsx — owner "我的表单" management panel (SPEC §21, frontend) + the
-// publish-feedback surface (SPEC §16). The panel shell + primitives are
+// forms-panel.jsx — owner "我的表单" management panel (SPEC §21, frontend). The
+// post-publish surface is NO LONGER here: since N-_ayo8x 发布 is a direct action in App
+// (POST /api/forms → ShareDialog), so the old in-panel <PublishFeedback> overlay is gone.
+// The panel shell + primitives are
 // @agentaily/design-system (PanelSheet/PageSection/DropdownMenu/Dialog/Button/Badge/
 // Alert/AlertDialog/Spinner/Empty) — never hand-rolled chrome. The per-form CARD is
 // app-level layout (.mf-card, design N-_ayo8x) — its border/bg/radius live in app.css and
@@ -28,15 +30,8 @@
 //     Empty list → an empty state ("还没有发布过表单"), no error. A 401 from any call →
 //     onNeedLogin() (App closes this + pops login, mirroring settings.jsx §17 flow),
 //     NOT an inline error.
-//
-//   <PublishFeedback> — the post-publish surface. On open with at least one field it
-//     calls publishForm(meta, fields); on success it renders the new public fill link
-//     (publicFormUrl, or the backend url) + a copy action and fires onPublished so App
-//     marks the header status 已发布. On a 400 it shows the backend's ApiError.message;
-//     on 401 it routes through onNeedLogin. The 发布 button is disabled while there are
-//     no fields (an empty form can't publish) or while a publish is in flight.
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   PanelSheet,
   PageSection,
@@ -52,7 +47,6 @@ import {
 import { Icon } from "./chat.jsx";
 import { SubmissionsContent } from "./submissions-view.jsx";
 import {
-  publishForm as defaultPublishForm,
   listForms as defaultListForms,
   updateForm as defaultUpdateForm,
   deleteForm as defaultDeleteForm,
@@ -566,166 +560,5 @@ export function FormsPanel({
         onConfirm={confirmDelete}
       />
     </PanelSheet>
-  );
-}
-
-/**
- * Post-publish feedback surface (SPEC §16): publish the designer's current form on
- * open, then show the public fill link + a copy action.
- *
- * @param {object}   props
- * @param {boolean}  props.open                 whether the feedback is shown
- * @param {() => void} props.onClose            dismiss the feedback
- * @param {() => void} [props.onNeedLogin]      called on a 401 so App pops login (§17)
- * @param {import("./core/designerTools").FormMeta} [props.meta]   designer meta to publish
- * @param {import("./core/designerTools").UiField[]} [props.fields] designer fields to publish
- * @param {(meta, fields) => Promise<import("./core/formsClient").PublishResult>} [props.publishForm]
- * @param {(slug: string, base?: string) => string} [props.publicFormUrl]
- * @param {(result: import("./core/formsClient").PublishResult) => void} [props.onPublished]
- */
-export function PublishFeedback({
-  open,
-  onClose,
-  onNeedLogin,
-  meta,
-  fields,
-  publishForm = defaultPublishForm,
-  publicFormUrl = defaultPublicFormUrl,
-  onPublished,
-} = {}) {
-  const [publishing, setPublishing] = useState(false);
-  const [result, setResult] = useState(null);
-  // The backend's verbatim rejection message (e.g. "meta.title 必填") on a 400.
-  const [error, setError] = useState("");
-  // Set once a 401 has routed to login; disables the 发布 button. The synchronous
-  // guard (routedRef) is what actually de-dupes onNeedLogin (state is async).
-  const [routedToLogin, setRoutedToLogin] = useState(false);
-  // Refs are synchronous across renders, so they de-dupe even when an auto-publish
-  // and a click race within the same tick:
-  //   routedRef — a 401 hands off to login exactly once per (re)open.
-  //   inFlightRef — only one publish is ever in flight at a time.
-  const routedRef = useRef(false);
-  const inFlightRef = useRef(false);
-
-  const canPublish = Array.isArray(fields) && fields.length > 0;
-
-  const handleError = useCallback(
-    (e) => {
-      if (is401(e)) {
-        if (!routedRef.current) {
-          routedRef.current = true;
-          setRoutedToLogin(true);
-          onNeedLogin?.();
-        }
-        return true;
-      }
-      return false;
-    },
-    [onNeedLogin],
-  );
-
-  const doPublish = useCallback(async () => {
-    if (!canPublish || routedRef.current || inFlightRef.current) return;
-    inFlightRef.current = true;
-    setPublishing(true);
-    setError("");
-    try {
-      const res = await publishForm(meta, fields);
-      setResult(res);
-      onPublished?.(res);
-    } catch (e) {
-      if (handleError(e)) return; // 401 → login flow, no inline error
-      // 400 (missing title / bad fields) → surface the backend message verbatim.
-      setError(
-        e instanceof ApiError
-          ? e.message
-          : L("发布失败，请稍后重试。", "Publish failed. Please try again."),
-      );
-    } finally {
-      inFlightRef.current = false;
-      setPublishing(false);
-    }
-    // meta/fields/publishForm are stable per (re)open; publish on open only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canPublish, meta, fields, publishForm, onPublished, handleError]);
-
-  // On open with a publishable form, publish automatically (App opens this exactly
-  // when the owner pressed 发布). A closed feedback does no work.
-  useEffect(() => {
-    if (!open) return;
-    setResult(null);
-    setError("");
-    setRoutedToLogin(false);
-    routedRef.current = false;
-    inFlightRef.current = false;
-    if (canPublish) doPublish();
-    // run once per (re)open.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  if (!open) return null;
-
-  // Prefer the backend-provided ready-to-open url when present (§16.2/§16.4.1).
-  const displayLink = result ? result.url || publicFormUrl(result.slug) : "";
-
-  return (
-    <Dialog
-      open={open}
-      title={result ? L("表单已发布", "Form published") : L("发布表单", "Publish form")}
-      onClose={onClose}
-      footer={
-        result ? (
-          <Button
-            variant="primary"
-            icon={<Icon name="check" size={14} />}
-            onClick={() => copyLink(displayLink)}
-          >
-            {L("复制链接", "Copy link")}
-          </Button>
-        ) : (
-          <Button
-            variant="primary"
-            disabled={!canPublish || publishing || routedToLogin}
-            onClick={doPublish}
-          >
-            {publishing ? L("发布中…", "Publishing…") : L("发布", "Publish")}
-          </Button>
-        )
-      }
-    >
-      <div className="d-publish">
-        {error ? (
-          <Alert variant="danger" title={L("发布失败", "Publish failed")}>
-            {error}
-          </Alert>
-        ) : null}
-
-        {result ? (
-          <div className="d-publish__done">
-            <div className="ax-label">{L("公开填写链接", "Public fill link")}</div>
-            <a className="d-publish__url" href={displayLink} target="_blank" rel="noreferrer">
-              {displayLink}
-            </a>
-            <p className="d-publish__note">
-              {L(
-                "任何拿到链接的人都可以填写，提交会进入你连接的飞书多维表格。",
-                "Anyone with the link can fill it out, and submissions land in the Feishu base you connected.",
-              )}
-            </p>
-          </div>
-        ) : publishing ? (
-          <div className="d-publish__loading">
-            <Spinner size="md" />
-          </div>
-        ) : !canPublish ? (
-          <p className="d-publish__hint">
-            {L(
-              "先在设计器里添加至少一个字段，再发布表单。",
-              "Add at least one field in the designer before publishing.",
-            )}
-          </p>
-        ) : null}
-      </div>
-    </Dialog>
   );
 }
