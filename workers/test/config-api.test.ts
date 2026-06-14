@@ -245,9 +245,9 @@ describe("owner config API (workers/features/owner-config.feature)", () => {
     expect(count?.n).toBe(0);
   });
 
-  it("rejects a half-filled feishu block (all-or-nothing, SPEC §12.1)", async () => {
-    // valid DeepSeek key, but feishu only has appId → 400, nothing written
-    // (must not silently encrypt `undefined` into the secret column).
+  it("rejects a half-filled feishu block — app_id without app_secret (SPEC §16.9)", async () => {
+    // PR-3（§16.9）放宽后飞书账户级凭据只需 app_id + app_secret；但缺其一仍半填拒绝 → 400，
+    // 不写（绝不把 `undefined` 静默加密进 secret 列）。这里只给 appId、缺 appSecret。
     const res = await postConfig({
       deepseek: { apiKey: DEEPSEEK_KEY },
       feishu: { appId: "cli_only" },
@@ -259,5 +259,36 @@ describe("owner config API (workers/features/owner-config.feature)", () => {
       n: number;
     }>();
     expect(count?.n).toBe(0);
+  });
+
+  it("rejects a half-filled feishu block — app_secret without app_id (other direction, §16.9)", async () => {
+    // 对称半填：只给 appSecret、缺 appId（无 appId 换不到 token）→ 400、不写。
+    const res = await postConfig({
+      deepseek: { apiKey: DEEPSEEK_KEY },
+      feishu: { appSecret: FEISHU_SECRET },
+    });
+    expect(res.status).toBe(400);
+    const count = await testEnv.DB.prepare("SELECT COUNT(*) AS n FROM owner_config").first<{
+      n: number;
+    }>();
+    expect(count?.n).toBe(0);
+  });
+
+  it("Scenario: 飞书只填 app_id + app_secret 即可保存（不再要求 app_token/table_id，§16.9）", async () => {
+    // PR-3 解除旧 all-or-nothing：app_token / table_id 改由「发布即自动建表」per-form 产出，
+    // 不再由 owner 填。只给 app_id + app_secret 应保存成功。
+    const res = await postConfig({
+      deepseek: { apiKey: DEEPSEEK_KEY },
+      feishu: { appId: "cli_relaxed", appSecret: FEISHU_SECRET },
+    });
+    expect(res.status).toBe(200);
+
+    const view = (await getConfig().then((r) => r.json())) as MaskedConfig;
+    // app_id 明文回显、app_secret 掩码；app_token / table_id 未填 → NULL。
+    expect(view.feishu.appId).toBe("cli_relaxed");
+    expect(view.feishu.appSecret).toContain("…");
+    expect(view.feishu.appSecret).not.toBe(FEISHU_SECRET);
+    expect(view.feishu.appToken).toBeNull();
+    expect(view.feishu.tableId).toBeNull();
   });
 });

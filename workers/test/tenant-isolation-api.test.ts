@@ -7,10 +7,12 @@ import {
   resetUsers,
   resetSubmissions,
   registerOwner,
+  waitForFormFeishuTable,
   authHeader,
   type TestOwner,
 } from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
+import { FEISHU_BITABLE_APPS_URL, FEISHU_BITABLE_TABLES_URL } from "../src/feishu-schema";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Outer-loop acceptance specs for 多租户数据隔离 + 横向越权防护 — the HEAD-PRIORITY
@@ -60,15 +62,32 @@ const B_FEISHU = {
 const A_DEEPSEEK_KEY = "sk-owner-A-DEEPSEEK-secret-aaaa1111";
 const B_DEEPSEEK_KEY = "sk-owner-B-DEEPSEEK-secret-bbbb2222";
 
-const UPSTREAM_TENANT_TOKEN = "t-tenant-access-token-SECRET-9999";
+// §16.9 per-form 自动建表：两个 owner 的 tenant token 必须可区分，create-app 才能据 Authorization
+// 返回各自的 app_token，使 A 的表单建成 A 的飞书表、B 的建成 B 的（隔离的关键）。token 交换按请求
+// body 里的 app_id 分流（A_FEISHU.appId → A_TENANT_TOKEN，B → B_TENANT_TOKEN）。
+const A_TENANT_TOKEN = "t-tenant-access-token-OWNER-A-SECRET-AAAA";
+const B_TENANT_TOKEN = "t-tenant-access-token-OWNER-B-SECRET-BBBB";
 const UPSTREAM_RECORD_ID = "rec-isolation-xxxx";
 
-const FEISHU_TOKEN_OK_BODY = JSON.stringify({
-  code: 0,
-  msg: "ok",
-  tenant_access_token: UPSTREAM_TENANT_TOKEN,
-  expire: 7200,
-});
+function tokenBodyFor(appId: string): string {
+  const token =
+    appId === A_FEISHU.appId
+      ? A_TENANT_TOKEN
+      : appId === B_FEISHU.appId
+        ? B_TENANT_TOKEN
+        : "t-generic";
+  return JSON.stringify({ code: 0, msg: "ok", tenant_access_token: token, expire: 7200 });
+}
+
+// 自动建表端点 + 各 owner 的 OK 夹具：create-app 按 Authorization(=各自 tenant token) 返回该 owner 的
+// app_token、create-table 按 URL 里的 app_token 返回该 owner 的 table_id，使 per-form 表落成既有
+// bitableUrl(A_FEISHU)/bitableUrl(B_FEISHU) 那两对，提交据此各自路由（§16.9）。
+const A_TABLES_URL = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", A_FEISHU.appToken);
+const B_TABLES_URL = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", B_FEISHU.appToken);
+const appCreateBodyFor = (appToken: string): string =>
+  JSON.stringify({ code: 0, msg: "success", data: { app: { app_token: appToken } } });
+const tableCreateBodyFor = (tableId: string): string =>
+  JSON.stringify({ code: 0, msg: "success", data: { table_id: tableId } });
 const BITABLE_OK_BODY = JSON.stringify({
   code: 0,
   msg: "success",
@@ -152,7 +171,26 @@ function installFeishuMock(): FeishuMock {
 
     if (req.url === FEISHU_TENANT_TOKEN_URL) {
       tokenCalls.push(captured);
-      return new Response(FEISHU_TOKEN_OK_BODY, {
+      // 按请求 body 里的 app_id 分流出该 owner 的 tenant token（A / B 可区分，供 create-app 路由）。
+      const appId = (parsed as { app_id?: string } | undefined)?.app_id ?? "";
+      return new Response(tokenBodyFor(appId), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    // §16.9 发布即自动建表：建 app（POST /apps）按 Authorization(=各自 tenant token) 返回该 owner 的
+    // app_token；建数据表（POST /apps/{app_token}/tables）按 URL 里的 app_token 返回该 owner 的 table_id。
+    if (req.url === FEISHU_BITABLE_APPS_URL && req.method === "POST") {
+      const auth = req.headers.get("authorization") ?? "";
+      const appToken = auth === `Bearer ${B_TENANT_TOKEN}` ? B_FEISHU.appToken : A_FEISHU.appToken;
+      return new Response(appCreateBodyFor(appToken), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (req.url === A_TABLES_URL || req.url === B_TABLES_URL) {
+      const tableId = req.url === B_TABLES_URL ? B_FEISHU.tableId : A_FEISHU.tableId;
+      return new Response(tableCreateBodyFor(tableId), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -529,6 +567,7 @@ describe("tenant isolation + 横向越权 (workers/features/tenant-isolation.fea
     mock = installFeishuMock();
     const slugSA = await publishForm(A.token, "A 的公开表单");
     await drainBackgroundPreCreate(mock);
+    await waitForFormFeishuTable(slugSA); // 确定性等 per-form 表回写落定（§16.9），再提交
     mock.resetCalls();
 
     // When 一个匿名答题者向 slug SA 提交一份作答 (PUBLIC — no token)
@@ -564,6 +603,8 @@ describe("tenant isolation + 横向越权 (workers/features/tenant-isolation.fea
     const slugSA = await publishForm(A.token, "A 路由表单");
     const slugSB = await publishForm(B.token, "B 路由表单");
     await drainBackgroundPreCreate(mock, 2);
+    await waitForFormFeishuTable(slugSA); // 两份各自的 per-form 表都回写落定再提交（§16.9）
+    await waitForFormFeishuTable(slugSB);
     mock.resetCalls();
 
     // When 匿名答题者分别向 SA 与 SB 各提交一份作答

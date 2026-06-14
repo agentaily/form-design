@@ -19,6 +19,7 @@ import authTokensSchema from "../migrations/0002_auth_tokens.sql?raw";
 import chatSessionsSchema from "../migrations/0003_chat_sessions.sql?raw";
 import ownerDisplayName from "../migrations/0004_owner_display_name.sql?raw";
 import submissionsSchema from "../migrations/0005_submissions.sql?raw";
+import formFeishuTable from "../migrations/0006_form_feishu_table.sql?raw";
 
 // Schema migrations applied to the test D1, in order — mirrors what prod gets via
 // `wrangler d1 migrations apply`. Append future schema migrations to this list.
@@ -27,12 +28,14 @@ import submissionsSchema from "../migrations/0005_submissions.sql?raw";
 //   0003 — chat_sessions (设计对话持久化 + 刷新恢复，§26).
 //   0004 — users.display_name（owner 显示名，§17 个人资料）.
 //   0005 — submissions (提交落 D1 主存 + 飞书可选同步回执，§15 / §18).
+//   0006 — forms.feishu_app_token / feishu_table_id（per-form 飞书多维表格定位，§16.9）.
 const SCHEMA_MIGRATIONS = [
   initialSchema,
   authTokensSchema,
   chatSessionsSchema,
   ownerDisplayName,
   submissionsSchema,
+  formFeishuTable,
 ];
 
 /** The bindings the owner-config + owner-auth features rely on, surfaced for the tests. */
@@ -82,10 +85,11 @@ function toStatements(sql: string): string[] {
  * with multiple `describe` blocks each calling `applySchema()` in their own `beforeAll`
  * runs this more than once against the SAME storage. The `CREATE TABLE/INDEX IF NOT
  * EXISTS` migrations (0001–0003) are naturally idempotent, but `ALTER TABLE ADD COLUMN`
- * (0004 — users.display_name) is NOT: SQLite has no column-level `IF NOT EXISTS`, so a
- * second apply throws `duplicate column name`. We swallow exactly that error so repeated
- * applies stay a no-op — without changing prod behavior (prod runs each migration once
- * via the `d1_migrations` tracker, so it never hits the duplicate path).
+ * (0004 — users.display_name; 0006 — forms.feishu_app_token / feishu_table_id) is NOT:
+ * SQLite has no column-level `IF NOT EXISTS`, so a second apply throws `duplicate column
+ * name`. We swallow exactly that error so repeated applies stay a no-op — without changing
+ * prod behavior (prod runs each migration once via the `d1_migrations` tracker, so it never
+ * hits the duplicate path). The swallow is generic, so it covers every ADD COLUMN migration.
  */
 export async function applySchema(): Promise<void> {
   for (const migration of SCHEMA_MIGRATIONS) {
@@ -108,6 +112,33 @@ export async function applySchema(): Promise<void> {
 /** Empty the single-row config table between scenarios. */
 export async function resetConfig(): Promise<void> {
   await testEnv.DB.exec("DELETE FROM owner_config");
+}
+
+/**
+ * Deterministically wait until a form's per-form Feishu table has been written back
+ * (§16.9). Publishing a form with account-level Feishu configured kicks off
+ * `ensureFeishuTableForFormBestEffort` in `waitUntil` — token exchange → create app →
+ * create table → `setFormFeishuTable` writeback → pre-create columns. A subsequent submit
+ * reads `getFormFeishuTable(slug)` exactly ONCE (no retry) and skips sync on null, so a
+ * test that submits before the writeback lands would see no sync. This polls the `forms`
+ * row until `feishu_app_token` is non-NULL (the writeback landed) — a deterministic
+ * condition gate, NOT a fixed sleep — so submit/edit-after-publish assertions are stable
+ * under CI load. Times out (~1s) so a never-written expectation still fails loudly. Use it
+ * ONLY when Feishu IS configured (an unconfigured publish never writes the table → poll
+ * would time out by design).
+ */
+export async function waitForFormFeishuTable(slug: string): Promise<void> {
+  const deadline = Date.now() + 1000;
+  for (;;) {
+    const row = await testEnv.DB.prepare("SELECT feishu_app_token FROM forms WHERE slug = ?")
+      .bind(slug)
+      .first<{ feishu_app_token: string | null }>();
+    if (row?.feishu_app_token != null) return;
+    if (Date.now() > deadline) {
+      throw new Error(`waitForFormFeishuTable: form ${slug} never got a per-form Feishu table`);
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 /**

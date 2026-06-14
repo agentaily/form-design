@@ -16,6 +16,7 @@ import {
   FEISHU_CODE_FIELD_NOT_FOUND,
   FEISHU_CODE_FIELD_DUPLICATED,
 } from "../src/submit";
+import { FEISHU_BITABLE_APPS_URL, FEISHU_BITABLE_TABLES_URL } from "../src/feishu-schema";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Outer-loop acceptance specs for §15.8 飞书列自动创建（自愈）, driven through the
@@ -80,6 +81,22 @@ function pathKey(url: string): string {
   return u.origin + u.pathname;
 }
 const BITABLE_FIELDS_PATH = pathKey(BITABLE_FIELDS_URL);
+
+// §16.9 发布即自动建表：建 app（POST /apps）/ 建数据表（POST /apps/{app_token}/tables）端点 + OK 夹具。
+// 刻意让 create-app 返回 OWNER_FEISHU_APP_TOKEN、create-table 返回 OWNER_FEISHU_TABLE_ID，故发布把
+// per-form 表落成既有 BITABLE_RECORDS_URL / BITABLE_FIELDS_URL 那对——后续提交的列出 / 写记录 / 建列
+// 全命中既有 URL，无需另设夹具。两端点在发布后台 best-effort 调用，恒返回 OK。
+const TABLES_URL = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", OWNER_FEISHU_APP_TOKEN);
+const APP_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { app: { app_token: OWNER_FEISHU_APP_TOKEN } },
+});
+const TABLE_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { table_id: OWNER_FEISHU_TABLE_ID },
+});
 
 const FEISHU_TOKEN_OK_BODY = JSON.stringify({
   code: 0,
@@ -216,6 +233,22 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
       }
       tokenCalls.push(captured);
       return reply(opts.token);
+    }
+
+    // §16.9 发布即自动建表：建多维表格 app（POST /apps，精确匹配，不含 /apps/{token}/... 的更长
+    // 路径）/ 建数据表（POST /apps/{app_token}/tables，精确匹配，不含 .../tables/{id}/fields）。
+    // 恒返回 OK 夹具，让发布把 per-form 表落进 form 行（落成既有 BITABLE_*_URL 那对）；提交据此同步。
+    if (req.url === FEISHU_BITABLE_APPS_URL && req.method === "POST") {
+      return new Response(APP_CREATE_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (req.url === TABLES_URL && req.method === "POST") {
+      return new Response(TABLE_CREATE_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     }
 
     // ② add-record write — sequenced: nth call gets the nth configured reply.

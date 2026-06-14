@@ -2,7 +2,12 @@ import { SELF } from "cloudflare:test";
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { applySchema, resetConfig, resetForms, login, authHeader } from "./helpers";
 import { FEISHU_BITABLE_FIELDS_URL, FEISHU_FIELDS_LIST_PAGE_SIZE } from "../src/submit";
-import { FEISHU_BITABLE_FIELD_TYPE, FEISHU_BITABLE_FIELD_BY_ID_URL } from "../src/feishu-schema";
+import {
+  FEISHU_BITABLE_FIELD_TYPE,
+  FEISHU_BITABLE_FIELD_BY_ID_URL,
+  FEISHU_BITABLE_APPS_URL,
+  FEISHU_BITABLE_TABLES_URL,
+} from "../src/feishu-schema";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Outer-loop acceptance specs realizing features/feishu-column-rename.feature
@@ -70,6 +75,21 @@ const FEISHU_TOKEN_BAD_BODY = JSON.stringify({ code: 99991663, msg: "app ticket 
 const FIELD_CREATE_OK_BODY = JSON.stringify({ code: 0, msg: "success" });
 const RENAME_OK_BODY = JSON.stringify({ code: 0, msg: "success" });
 const RENAME_BAD_BODY = JSON.stringify({ code: 1254005, msg: "FieldNameDuplicated" });
+
+// §16.9 发布即自动建表端点 + OK 夹具：建 app 返回 OWNER_FEISHU_APP_TOKEN、建表返回
+// OWNER_FEISHU_TABLE_ID，使发布把 per-form 表落成既有 FIELDS_URL/RENAME_BASE 那一对，
+// 编辑改名据 form 行读到这张表（§16.9）。
+const TABLES_URL = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", OWNER_FEISHU_APP_TOKEN);
+const APP_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { app: { app_token: OWNER_FEISHU_APP_TOKEN } },
+});
+const TABLE_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { table_id: OWNER_FEISHU_TABLE_ID },
+});
 
 /**
  * A list-fields OK body carrying each column's name, real type AND飞书 `field_id`
@@ -190,6 +210,16 @@ function installFeishuMock(opts: FeishuMockOpts = {}): FeishuMock {
       tokenCalls.push(captured);
       allCalls.push(captured);
       return reply(tokenReply);
+    }
+    // §16.9 发布即自动建表：建 app（POST /apps）/ 建数据表（POST /apps/{token}/tables）恒 OK，
+    // 让发布把 per-form 表落进 form 行；编辑改名据此定位该表。两端点在发布后台 best-effort 调用。
+    if (req.url === FEISHU_BITABLE_APPS_URL && req.method === "POST") {
+      allCalls.push(captured);
+      return reply({ status: 200, body: APP_CREATE_OK_BODY });
+    }
+    if (req.url === TABLES_URL && req.method === "POST") {
+      allCalls.push(captured);
+      return reply({ status: 200, body: TABLE_CREATE_OK_BODY });
     }
     // Rename single column: PUT .../fields/{field_id}. Its pathname has an extra segment
     // beyond the bare fields endpoint, so match it FIRST (before the bare-fields branch).

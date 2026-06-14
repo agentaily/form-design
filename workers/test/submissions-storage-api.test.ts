@@ -10,6 +10,7 @@ import {
   authHeader,
 } from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
+import { FEISHU_BITABLE_APPS_URL, FEISHU_BITABLE_TABLES_URL } from "../src/feishu-schema";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Outer-loop acceptance specs for the D1-primary storage semantics (PR-2). Realizes
@@ -42,6 +43,21 @@ function pathKey(url: string): string {
   return u.origin + u.pathname;
 }
 const FIELDS_PATH = pathKey(BITABLE_FIELDS_URL);
+
+// §16.9 发布即自动建表：建 app（POST /apps）/ 建数据表（POST /apps/{token}/tables）端点 + OK 夹具。
+// 刻意让 create-app 返回 OWNER_FEISHU_APP_TOKEN、create-table 返回 OWNER_FEISHU_TABLE_ID，故发布把
+// per-form 表落成既有 BITABLE_URL / BITABLE_FIELDS_URL 那对，后续提交同步命中既有 URL。
+const TABLES_URL = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", OWNER_FEISHU_APP_TOKEN);
+const APP_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { app: { app_token: OWNER_FEISHU_APP_TOKEN } },
+});
+const TABLE_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { table_id: OWNER_FEISHU_TABLE_ID },
+});
 
 const FEISHU_TOKEN_OK_BODY = JSON.stringify({
   code: 0,
@@ -90,6 +106,20 @@ function installFeishuMock(opts: MockOpts): {
         headers: { "content-type": "application/json" },
       });
     }
+    // §16.9 发布即自动建表：建 app（POST /apps）/ 建数据表（POST /apps/{token}/tables）恒 OK，
+    // 让发布把 per-form 表落进 form 行；提交据此从 form 行读到表后才会同步。
+    if (req.url === FEISHU_BITABLE_APPS_URL && req.method === "POST") {
+      return new Response(APP_CREATE_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (req.url === TABLES_URL && req.method === "POST") {
+      return new Response(TABLE_CREATE_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (req.url === BITABLE_URL) {
       if (!opts.record) throw new Error(`unexpected record call to ${req.url}`);
       recordCalls += 1;
@@ -132,6 +162,21 @@ async function getRow(id: string): Promise<Row | null> {
   )
     .bind(id)
     .first<Row>();
+}
+
+/**
+ * 发布的 §16.9 自动建表跑在后台 `waitUntil`：等 forms 行写入 per-form 表（feishu_app_token 非
+ * NULL）再提交，否则提交读不到表会干净跳过同步。轮询 D1 直到落定（或 ~1.5s 超时）。
+ */
+async function waitForFormTable(slug: string): Promise<void> {
+  const deadline = Date.now() + 1500;
+  while (Date.now() < deadline) {
+    const row = await testEnv.DB.prepare("SELECT feishu_app_token FROM forms WHERE slug = ?")
+      .bind(slug)
+      .first<{ feishu_app_token: string | null }>();
+    if (row?.feishu_app_token != null) return;
+    await sleep(5);
+  }
 }
 
 async function waitForSyncSettled(id: string): Promise<Receipt> {
@@ -223,7 +268,7 @@ describe("submissions storage (workers/features/submissions-storage.feature)", (
     await configureOwner({ feishu: true });
     mock = installFeishuMock({ token: FEISHU_TOKEN_OK_BODY, record: BITABLE_OK_BODY });
     const slug = await publishFormAndGetSlug();
-    await settle(); // drain publish pre-create
+    await waitForFormTable(slug); // drain publish auto-create (§16.9)
 
     const { status, id } = await submit(slug);
     expect(status).toBe(200);
@@ -257,7 +302,7 @@ describe("submissions storage (workers/features/submissions-storage.feature)", (
     await configureOwner({ feishu: true });
     mock = installFeishuMock({ token: FEISHU_TOKEN_OK_BODY, record: BITABLE_OK_BODY });
     const slug = await publishFormAndGetSlug();
-    await settle();
+    await waitForFormTable(slug);
 
     const { status, id } = await submit(slug);
     expect(status).toBe(200);
@@ -270,10 +315,15 @@ describe("submissions storage (workers/features/submissions-storage.feature)", (
 
   it("Scenario: 配了飞书但同步失败时提交仍在 D1 且记下同步错误", async () => {
     await configureOwner({ feishu: true });
-    // token exchange returns non-zero code → sync fails before any record write.
-    mock = installFeishuMock({ token: FEISHU_TOKEN_BAD_BODY });
+    // §16.9：per-form 表在发布时建好（用全 OK 的 mock），故先发布把表建妥、restore，再换「换 token
+    // 失败」的 mock 测**提交同步**那一跳的 token 失败——否则 token 失败发生在发布自动建表、表根本没建
+    // 成，提交会因 form 无飞书表而干净跳过（不记 sync_error），就测不到「同步换 token 失败记错误」。
+    const okMock = installFeishuMock({ token: FEISHU_TOKEN_OK_BODY, record: BITABLE_OK_BODY });
     const slug = await publishFormAndGetSlug();
-    await settle();
+    await waitForFormTable(slug);
+    okMock.restore(); // 务必先 restore 旧 mock 再装新 mock（嵌套 install 会污染 realFetch 保存）。
+    // 提交同步用的 mock：token exchange returns non-zero code → sync fails before any record write.
+    mock = installFeishuMock({ token: FEISHU_TOKEN_BAD_BODY });
 
     const { status, id } = await submit(slug);
     expect(status).toBe(200);

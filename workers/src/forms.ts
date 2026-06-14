@@ -533,6 +533,82 @@ export async function getFormOwner(db: D1Database, slug: string): Promise<string
 }
 
 // ---------------------------------------------------------------------------
+// §16.9：per-form 飞书多维表格定位（发布即自动建表写回，提交 / 编辑读它同步）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一张 form 对应的飞书多维表格定位（§16.9）。`appToken` + `tableId` 成对——只有二者**都**有值
+ * 才算「这张表单已建好飞书表」；任一为 NULL（还没建 / 建表失败）→ {@link getFormFeishuTable}
+ * 返回 `null`（提交不同步、编辑不预建 / 不改名）。绝不含任何凭据（app_secret 仍在 owner_config）。
+ */
+export interface FormFeishuTable {
+  /** 该表单的飞书多维表格 app token（forms.feishu_app_token）。 */
+  appToken: string;
+  /** 该表单的飞书数据表 id（forms.feishu_table_id）。 */
+  tableId: string;
+}
+
+/**
+ * 读取某 slug 对应 form 的 per-form 飞书表定位（§16.9）。
+ *
+ * 供「发布即自动建表」幂等判定（已建过则不重复建）、提交同步（§15 syncSubmissionToFeishu 读它定位
+ * 目标表）、编辑预建 / 改名（按这张表增量补列 / 改名）。
+ *
+ * - 命中且 `feishu_app_token` / `feishu_table_id` **都**非 NULL：返回 {@link FormFeishuTable}。
+ * - slug 不存在 **或** 该 form 还没建飞书表（任一列 NULL）：返回 `null`——调用方据此跳过同步 /
+ *   预建（干净起步零回填：没建表的旧表单永远 `null`）。
+ *
+ * 只读这两列 + 不带 owner 维度（slug 全局唯一，已是定位键）；绝不读 owner_config / 凭据。
+ *
+ * @param db D1 binding。
+ * @param slug 目标表单 slug。
+ * @returns {@link FormFeishuTable} 已建表时，`null` 未建 / 不存在时。
+ */
+export async function getFormFeishuTable(
+  db: D1Database,
+  slug: string,
+): Promise<FormFeishuTable | null> {
+  const row = await db
+    .prepare(`SELECT feishu_app_token, feishu_table_id FROM forms WHERE slug = ?`)
+    .bind(slug)
+    .first<{ feishu_app_token: string | null; feishu_table_id: string | null }>();
+  // slug 不存在，或两列任一为 NULL（还没建表 / 建表失败）→ null（不同步、不预建）。
+  if (row === null || row.feishu_app_token === null || row.feishu_table_id === null) {
+    return null;
+  }
+  return { appToken: row.feishu_app_token, tableId: row.feishu_table_id };
+}
+
+/**
+ * 把「发布即自动建表」产出的飞书 app_token / table_id 回写进该 form 行（§16.9）——owner-only，
+ * **带横向越权防护**（`WHERE slug=? AND owner_id=?`，只写自己名下的表单）。
+ *
+ * 由 {@link import("./feishu-schema").ensureFeishuTableForFormBestEffort} 在建好 app + table 后调用，
+ * 把这张 form 的飞书表定位持久化；此后提交 / 编辑都能从 form 行读到它（§16.9）。两列一起写、成对。
+ *
+ * @param db D1 binding。
+ * @param slug 目标表单 slug（自动建表针对的那张表单）。
+ * @param ownerId 发布它的 owner 真实 user id（隔离键，§17.9）。
+ * @param appToken 自动建表产出的飞书多维表格 app token。
+ * @param tableId 自动建表产出的飞书数据表 id。
+ */
+export async function setFormFeishuTable(
+  db: D1Database,
+  slug: string,
+  ownerId: string,
+  appToken: string,
+  tableId: string,
+): Promise<void> {
+  // 横向越权防护：WHERE 带 AND owner_id=?——只回写自己名下的表单（slug 虽全局唯一仍按 owner 收口）。
+  await db
+    .prepare(
+      `UPDATE forms SET feishu_app_token = ?, feishu_table_id = ? WHERE slug = ? AND owner_id = ?`,
+    )
+    .bind(appToken, tableId, slug, ownerId)
+    .run();
+}
+
+// ---------------------------------------------------------------------------
 // §20：提交校验所需的 status / fields 读取（实现留给 implementer）
 // ---------------------------------------------------------------------------
 
