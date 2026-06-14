@@ -58,6 +58,7 @@ import {
 } from "./core/formsClient";
 import { listSubmissions as defaultListSubmissions } from "./core/submissionsClient";
 import { ApiError } from "./core/apiClient";
+import { L } from "./core/i18n";
 
 // A 401 from any owner-only call means the session is missing/expired (§17): hand off
 // to the login flow instead of rendering it as an inline panel/feedback error.
@@ -67,9 +68,9 @@ function is401(e) {
 
 // Human label + Badge variant for a form's lifecycle status (SPEC §21 / §16.7).
 function statusLabel(status) {
-  if (status === "published") return "已发布";
-  if (status === "closed") return "已关闭";
-  return "草稿";
+  if (status === "published") return L("已发布", "Live");
+  if (status === "closed") return L("已关闭", "Closed");
+  return L("草稿", "Draft");
 }
 function statusVariant(status) {
   if (status === "published") return "ok";
@@ -174,7 +175,9 @@ export function FormsPanel({
       .catch((e) => {
         if (!alive) return;
         if (handleError(e)) return; // 401 → login flow, no inline error
-        setLoadError("无法加载表单列表，请稍后重试。");
+        setLoadError(
+          L("无法加载表单列表，请稍后重试。", "Couldn't load your forms. Please try again."),
+        );
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -199,7 +202,9 @@ export function FormsPanel({
       setForms((fs) => fs.map((f) => (f.slug === form.slug ? { ...f, status } : f)));
     } catch (e) {
       if (handleError(e)) return; // 401 → login flow
-      setLoadError("更新表单状态失败，请稍后重试。");
+      setLoadError(
+        L("更新表单状态失败，请稍后重试。", "Couldn't update the form status. Please try again."),
+      );
     } finally {
       setBusy((b) => ({ ...b, [form.slug]: false }));
     }
@@ -217,7 +222,12 @@ export function FormsPanel({
       onEditForm?.(loaded);
     } catch (e) {
       if (handleError(e)) return; // 401 → login flow
-      setLoadError("载入这份表单进行编辑失败，请稍后重试。");
+      setLoadError(
+        L(
+          "载入这份表单进行编辑失败，请稍后重试。",
+          "Couldn't load this form for editing. Please try again.",
+        ),
+      );
     } finally {
       setEditingSlug(null);
     }
@@ -231,7 +241,7 @@ export function FormsPanel({
       setForms((fs) => fs.filter((f) => f.slug !== form.slug));
     } catch (e) {
       if (handleError(e)) return; // 401 → login flow
-      setLoadError("删除表单失败，请稍后重试。");
+      setLoadError(L("删除表单失败，请稍后重试。", "Couldn't delete the form. Please try again."));
     } finally {
       setPendingDelete(null);
     }
@@ -263,8 +273,13 @@ export function FormsPanel({
               </Badge>
             </div>
             {/* h2: one level under PageSection's h1 ("你发布的表单") — no outline skip. */}
-            <h2 className="d-formcard__title">{form.meta?.title || "未命名表单"}</h2>
-            <p className="d-formcard__sub">创建于 {formatCreatedAt(form.createdAt)}</p>
+            <h2 className="d-formcard__title">
+              {form.meta?.title || L("未命名表单", "Untitled form")}
+            </h2>
+            <p className="d-formcard__sub">
+              {L("创建于 ", "Created ")}
+              {formatCreatedAt(form.createdAt)}
+            </p>
           </div>
 
           {/* 「查看全部提交」(§18): a DS Button (no hand-rolled clickable chrome) that swaps
@@ -272,9 +287,9 @@ export function FormsPanel({
               NOT a new Dialog/panel (PR-6, chat13). 读真实 D1 数据 (#56). */}
           <div className="d-formcard__body">
             <div className="d-formcard__subs">
-              <span className="ax-label">最近提交</span>
+              <span className="ax-label">{L("最近提交", "Recent")}</span>
               <Button variant="ghost" size="sm" onClick={() => setViewing(form)}>
-                查看全部提交 ›
+                {L("查看全部提交 ›", "View all submissions ›")}
               </Button>
             </div>
           </div>
@@ -286,7 +301,7 @@ export function FormsPanel({
               icon={<Icon name="copy" size={14} />}
               onClick={() => copyLink(link)}
             >
-              复制链接
+              {L("复制链接", "Copy link")}
             </Button>
             <span className="d-formcard__foot-sp" />
             {/* 编辑/继续编辑 (PR-7「载回设计器编辑」): 拉取这份表单的 meta+fields → 交给 App
@@ -298,25 +313,29 @@ export function FormsPanel({
               disabled={!!editingSlug}
               onClick={() => onEditCard(form)}
             >
-              {editingSlug === form.slug ? "载入中…" : published ? "继续编辑" : "编辑"}
+              {editingSlug === form.slug
+                ? L("载入中…", "Loading…")
+                : published
+                  ? L("继续编辑", "Edit")
+                  : L("编辑", "Edit")}
             </Button>
             <DropdownMenu
               align="end"
               trigger={
-                <Button variant="ghost" size="sm" aria-label="更多操作">
+                <Button variant="ghost" size="sm" aria-label={L("更多操作", "More actions")}>
                   ⋯
                 </Button>
               }
               items={[
                 {
-                  label: published ? "关闭收集" : "重新发布",
+                  label: published ? L("关闭收集", "Close") : L("重新发布", "Republish"),
                   icon: <Icon name={published ? "power" : "refresh"} size={15} />,
                   disabled: !!busy[form.slug],
                   onSelect: () => onToggle(form),
                 },
                 { type: "separator" },
                 {
-                  label: "删除",
+                  label: L("删除", "Delete"),
                   icon: <Icon name="trash" size={15} />,
                   danger: true,
                   onSelect: () => setPendingDelete(form),
@@ -344,7 +363,7 @@ export function FormsPanel({
   const crumb = inSubs ? (
     <span className="sb-crumb">
       <button type="button" className="sb-crumb__back" onClick={backToList}>
-        我的表单
+        {L("我的表单", "My forms")}
       </button>
       <span className="sb-crumb__sep" aria-hidden="true">
         /
@@ -352,7 +371,7 @@ export function FormsPanel({
       {inDetail ? (
         <React.Fragment>
           <button type="button" className="sb-crumb__back" onClick={() => setDetail(null)}>
-            提交数据
+            {L("提交数据", "Submissions")}
           </button>
           <span className="sb-crumb__sep" aria-hidden="true">
             /
@@ -360,24 +379,27 @@ export function FormsPanel({
           <span className="sb-crumb__cur">{detail._label}</span>
         </React.Fragment>
       ) : (
-        <span className="sb-crumb__cur">提交数据</span>
+        <span className="sb-crumb__cur">{L("提交数据", "Submissions")}</span>
       )}
     </span>
   ) : (
-    "我的表单"
+    L("我的表单", "My forms")
   );
-  const barLabel = inSubs ? "提交数据" : "我的表单";
+  const barLabel = inSubs ? L("提交数据", "Submissions") : L("我的表单", "My forms");
 
   // The bar's right slot: in the submissions view, the form's collection status; in the
   // list view, the form count once loaded (no count while loading / on error / empty —
   // the empty state speaks for itself).
   const countBadge =
     !loading && !loadError && forms.length > 0 ? (
-      <Badge variant="neutral">{forms.length} 个表单</Badge>
+      <Badge variant="neutral">
+        {forms.length}
+        {L(" 个表单", " forms")}
+      </Badge>
     ) : null;
   const barActions = inSubs ? (
     <Badge variant={viewing.status === "published" ? "ok" : "neutral"} dot>
-      {viewing.status === "published" ? "收集中" : "已关闭"}
+      {viewing.status === "published" ? L("收集中", "Collecting") : L("已关闭", "Closed")}
     </Badge>
   ) : (
     countBadge
@@ -418,12 +440,15 @@ export function FormsPanel({
           />
         ) : (
           <PageSection
-            eyebrow="我的表单 · MY FORMS"
-            title="你发布的表单"
-            description="这里汇总你创建并发布的所有表单。复制链接分享给填表人、查看收集到的提交，或随时关闭收集与删除。"
+            eyebrow={L("我的表单 · MY FORMS", "MY FORMS")}
+            title={L("你发布的表单", "Your published forms")}
+            description={L(
+              "这里汇总你创建并发布的所有表单。复制链接分享给填表人、查看收集到的提交，或随时关闭收集与删除。",
+              "Every form you've created and published. Copy a link to share, view the submissions you've collected, or close and delete anytime.",
+            )}
           >
             {loadError ? (
-              <Alert variant="danger" title="出错了">
+              <Alert variant="danger" title={L("出错了", "Something went wrong")}>
                 {loadError}
               </Alert>
             ) : null}
@@ -435,8 +460,11 @@ export function FormsPanel({
             ) : forms.length === 0 ? (
               <Empty
                 icon={<Icon name="folder" size={18} />}
-                title="还没有发布过表单"
-                description="在设计器里搭好一份表单后点「发布」，发布过的表单会出现在这里。"
+                title={L("还没有发布过表单", "No published forms yet")}
+                description={L(
+                  "在设计器里搭好一份表单后点「发布」，发布过的表单会出现在这里。",
+                  "Build a form in the designer and hit Publish — your published forms will show up here.",
+                )}
               />
             ) : (
               <div className="d-forms__cards">{forms.map((f) => FormCardItem(f))}</div>
@@ -451,10 +479,13 @@ export function FormsPanel({
       <AlertDialog
         open={!!pendingDelete}
         tone="danger"
-        title="确认删除这份表单？"
-        description="该公开链接将立即失效，已收集到飞书的数据不受影响。"
-        cancelLabel="取消"
-        confirmLabel="确定"
+        title={L("确认删除这份表单？", "Delete this form?")}
+        description={L(
+          "该公开链接将立即失效，已收集到飞书的数据不受影响。",
+          "The public link stops working immediately. Data already collected in Feishu is unaffected.",
+        )}
+        cancelLabel={L("取消", "Cancel")}
+        confirmLabel={L("确定", "Confirm")}
         onCancel={() => setPendingDelete(null)}
         onConfirm={confirmDelete}
       />
@@ -529,7 +560,11 @@ export function PublishFeedback({
     } catch (e) {
       if (handleError(e)) return; // 401 → login flow, no inline error
       // 400 (missing title / bad fields) → surface the backend message verbatim.
-      setError(e instanceof ApiError ? e.message : "发布失败，请稍后重试。");
+      setError(
+        e instanceof ApiError
+          ? e.message
+          : L("发布失败，请稍后重试。", "Publish failed. Please try again."),
+      );
     } finally {
       inFlightRef.current = false;
       setPublishing(false);
@@ -560,7 +595,7 @@ export function PublishFeedback({
   return (
     <Dialog
       open={open}
-      title={result ? "表单已发布" : "发布表单"}
+      title={result ? L("表单已发布", "Form published") : L("发布表单", "Publish form")}
       onClose={onClose}
       footer={
         result ? (
@@ -569,7 +604,7 @@ export function PublishFeedback({
             icon={<Icon name="check" size={14} />}
             onClick={() => copyLink(displayLink)}
           >
-            复制链接
+            {L("复制链接", "Copy link")}
           </Button>
         ) : (
           <Button
@@ -577,26 +612,29 @@ export function PublishFeedback({
             disabled={!canPublish || publishing || routedToLogin}
             onClick={doPublish}
           >
-            {publishing ? "发布中…" : "发布"}
+            {publishing ? L("发布中…", "Publishing…") : L("发布", "Publish")}
           </Button>
         )
       }
     >
       <div className="d-publish">
         {error ? (
-          <Alert variant="danger" title="发布失败">
+          <Alert variant="danger" title={L("发布失败", "Publish failed")}>
             {error}
           </Alert>
         ) : null}
 
         {result ? (
           <div className="d-publish__done">
-            <div className="ax-label">公开填写链接</div>
+            <div className="ax-label">{L("公开填写链接", "Public fill link")}</div>
             <a className="d-publish__url" href={displayLink} target="_blank" rel="noreferrer">
               {displayLink}
             </a>
             <p className="d-publish__note">
-              任何拿到链接的人都可以填写，提交会进入你连接的飞书多维表格。
+              {L(
+                "任何拿到链接的人都可以填写，提交会进入你连接的飞书多维表格。",
+                "Anyone with the link can fill it out, and submissions land in the Feishu base you connected.",
+              )}
             </p>
           </div>
         ) : publishing ? (
@@ -604,7 +642,12 @@ export function PublishFeedback({
             <Spinner size="md" />
           </div>
         ) : !canPublish ? (
-          <p className="d-publish__hint">先在设计器里添加至少一个字段，再发布表单。</p>
+          <p className="d-publish__hint">
+            {L(
+              "先在设计器里添加至少一个字段，再发布表单。",
+              "Add at least one field in the designer before publishing.",
+            )}
+          </p>
         ) : null}
       </div>
     </Dialog>

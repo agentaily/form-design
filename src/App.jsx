@@ -25,6 +25,7 @@ import {
   BrandMark,
 } from "@agentaily/design-system";
 
+import { L } from "./core/i18n";
 import { Icon, renderChatTurn } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
 import { SettingsOverlay } from "./settings.jsx";
@@ -92,7 +93,11 @@ const AUTH_INTENT_KEY = "agentaily_auth_intent";
 // model output) — keeps "继续改" discoverable. ConversationThread has no persistent
 // followups slot, so they ride the closing assistant turn and render via the DS
 // Suggestions in renderChatTurn; clicking one routes back through onSend → the queue.
-const FOLLOWUPS = ["加一个备注字段", "把手机号设为必填", "换个封面文案"];
+const FOLLOWUPS = [
+  L("加一个备注字段", "Add a notes field"),
+  L("把手机号设为必填", "Make the phone number required"),
+  L("换个封面文案", "Rewrite the cover copy"),
+];
 
 // UI state for the designer. In the design prototype these were exposed through a
 // Tweaks panel; here they're plain app state — theme + split are user-driven, the
@@ -419,10 +424,19 @@ function DesignerApp({
   // Turn a backend/network failure into a human message for the thread.
   const errorMessage = (e) => {
     if (e instanceof ApiError) {
-      if (e.status === 401) return "请先登录 owner 后再使用对话设计。";
-      return e.message || `对话服务出错（${e.status}）。`;
+      if (e.status === 401)
+        return L(
+          "请先登录 owner 后再使用对话设计。",
+          "Please sign in as the owner to use conversational design.",
+        );
+      return (
+        e.message || L(`对话服务出错（${e.status}）。`, `Conversation service error (${e.status}).`)
+      );
     }
-    return "无法连接到对话服务，请检查网络或后端地址（VITE_API_BASE）。";
+    return L(
+      "无法连接到对话服务，请检查网络或后端地址（VITE_API_BASE）。",
+      "Can't reach the conversation service — check your network or the backend address (VITE_API_BASE).",
+    );
   };
 
   // ── owner session helpers (standalone /signin page model) ──────────────────────
@@ -595,7 +609,8 @@ function DesignerApp({
         restoredRef.current = true;
         applyRestoredSession(session);
       } catch (e) {
-        if (e instanceof ApiError && e.status === 401) needLogin("登录后恢复你的设计对话");
+        if (e instanceof ApiError && e.status === 401)
+          needLogin(L("登录后恢复你的设计对话", "Sign in to restore your design conversation"));
         // else: best-effort — leave the empty thread; the next save re-establishes the row.
       }
     })();
@@ -613,7 +628,8 @@ function DesignerApp({
       const { sessions: list } = await listChatSessions();
       if (Array.isArray(list)) setSessions(list);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) needLogin("登录后管理你的设计对话");
+      if (e instanceof ApiError && e.status === 401)
+        needLogin(L("登录后管理你的设计对话", "Sign in to manage your design conversations"));
       // else: best-effort — keep the prior list.
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -668,7 +684,8 @@ function DesignerApp({
       if (session) applyRestoredSession(session);
       else resetWorkspace();
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) needLogin("登录后切换你的设计对话");
+      if (e instanceof ApiError && e.status === 401)
+        needLogin(L("登录后切换你的设计对话", "Sign in to switch your design conversation"));
       // else: best-effort — leave the prior workspace.
     }
     refreshSessions();
@@ -683,7 +700,7 @@ function DesignerApp({
       await deleteChatSession(id);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
-        needLogin("登录后管理你的设计对话");
+        needLogin(L("登录后管理你的设计对话", "Sign in to manage your design conversations"));
         return;
       }
       // 404 / other: best-effort — fall through to a list refresh (the row drops off).
@@ -721,7 +738,8 @@ function DesignerApp({
       refreshMe();
     } catch (e) {
       setResendState("");
-      if (e instanceof ApiError && e.status === 401) needLogin("登录后重新发送验证邮件");
+      if (e instanceof ApiError && e.status === 401)
+        needLogin(L("登录后重新发送验证邮件", "Sign in to resend the verification email"));
     }
   };
 
@@ -801,7 +819,8 @@ function DesignerApp({
     } catch (e) {
       pushMsg({ role: "assistant", kind: "error", text: errorMessage(e) });
       // 401 means no/expired owner session — route into the standalone login (§17).
-      if (e instanceof ApiError && e.status === 401) needLogin("登录后继续对话设计");
+      if (e instanceof ApiError && e.status === 401)
+        needLogin(L("登录后继续对话设计", "Sign in to continue conversational design"));
     }
     syncModel();
     // 持久化 (§26.4): at TURN END (here, after the §4 loop settled — never during the
@@ -830,7 +849,8 @@ function DesignerApp({
       ...(publishedSlugRef.current ? { formSlug: publishedSlugRef.current } : {}),
     };
     Promise.resolve(saveChatTurns(sessionIdRef.current, input)).catch((e) => {
-      if (e instanceof ApiError && e.status === 401) needLogin("登录后继续对话设计");
+      if (e instanceof ApiError && e.status === 401)
+        needLogin(L("登录后继续对话设计", "Sign in to continue conversational design"));
       // else: best-effort, swallow — the next turn-end PUT overwrites (§26.4).
     });
   };
@@ -920,11 +940,17 @@ function DesignerApp({
     setDiscardOpen(false);
     setEditBaseline(editSig(loadedMeta, loadedFields));
     setTab("preview");
-    const title = loadedMeta?.title || "这份表单";
+    const title = loadedMeta?.title || L("这份表单", "this form");
     const note =
       form.status === "closed"
-        ? `已载入《${title}》的当前版本，共 ${loadedFields.length} 个字段。这份表单当前已关闭、未在收集；直接告诉我要改什么，改好点「更新」保存，需要时再「重新发布」让访问者看到新版本。不想保留这次改动就点「退出」。`
-        : `已载入《${title}》的当前版本，共 ${loadedFields.length} 个字段。直接告诉我要改什么，或在右侧预览里「指向修改」。改好后点「更新」即可对新访问者生效；不想保留这次改动就点「退出」。`;
+        ? L(
+            `已载入《${title}》的当前版本，共 ${loadedFields.length} 个字段。这份表单当前已关闭、未在收集；直接告诉我要改什么，改好点「更新」保存，需要时再「重新发布」让访问者看到新版本。不想保留这次改动就点「退出」。`,
+            `Loaded the current version of “${title}” — ${loadedFields.length} fields. This form is currently closed and not collecting; just tell me what to change, click “Update” to save, and “Republish” when ready so visitors see the new version. Click “Exit” if you don't want to keep these changes.`,
+          )
+        : L(
+            `已载入《${title}》的当前版本，共 ${loadedFields.length} 个字段。直接告诉我要改什么，或在右侧预览里「指向修改」。改好后点「更新」即可对新访问者生效；不想保留这次改动就点「退出」。`,
+            `Loaded the current version of “${title}” — ${loadedFields.length} fields. Just tell me what to change, or use “Point to edit” in the preview on the right. Click “Update” to apply it to new visitors; click “Exit” if you don't want to keep these changes.`,
+          );
     setMessagesTracked([{ id: uid("msg"), role: "assistant", kind: "text", text: note }]);
   };
 
@@ -943,7 +969,7 @@ function DesignerApp({
       setTimeout(() => setUpdateDone(false), 2200);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
-        needLogin("登录后保存你的表单改动");
+        needLogin(L("登录后保存你的表单改动", "Sign in to save your form changes"));
         return;
       }
       pushMsg({ role: "assistant", kind: "error", text: errorMessage(e) });
@@ -998,12 +1024,14 @@ function DesignerApp({
           <React.Fragment>
             <span style={{ fontSize: "var(--text-md)", color: "var(--text-muted)" }}>
               {/* 编辑态用实时 meta.title(改名后立即跟随预览),非载入时的快照。 */}
-              {editingForm ? meta?.title || "未命名表单" : "活动报名 · 未命名表单"}
+              {editingForm
+                ? meta?.title || L("未命名表单", "Untitled form")
+                : L("活动报名 · 未命名表单", "Event sign-up · Untitled form")}
             </span>
             {editingForm ? (
               // 编辑态徽章随真实状态自洽 (chat13): 已发布→LIVE，已关闭→已关闭（绝不把关闭表单当在线展示）。
               <Badge variant={editingForm.status === "published" ? "ok" : "neutral"} dot>
-                {editingForm.status === "published" ? "LIVE" : "已关闭"}
+                {editingForm.status === "published" ? "LIVE" : L("已关闭", "CLOSED")}
               </Badge>
             ) : (
               <Badge variant={published ? "ok" : "neutral"} dot>
@@ -1015,7 +1043,7 @@ function DesignerApp({
         actions={
           <React.Fragment>
             <IconButton
-              label="切换主题"
+              label={L("切换主题", "Toggle theme")}
               onClick={() => setTweak("theme", t.theme === "dark" ? "light" : "dark")}
             >
               <Icon name={t.theme === "dark" ? "sun" : "moon"} size={15} />
@@ -1023,9 +1051,17 @@ function DesignerApp({
             <Button
               variant="secondary"
               icon={<Icon name="share" size={14} />}
-              onClick={() => guard("share", "登录后即可分享表单并收集回复")}
+              onClick={() =>
+                guard(
+                  "share",
+                  L(
+                    "登录后即可分享表单并收集回复",
+                    "Sign in to share your form and collect responses",
+                  ),
+                )
+              }
             >
-              分享
+              {L("分享", "Share")}
             </Button>
             {editingForm ? (
               // 编辑态: 主按钮由「发布」变「更新」→ PATCH 写回 meta+fields。无改动时灰着。
@@ -1035,16 +1071,18 @@ function DesignerApp({
                 disabled={building || fieldCount === 0 || !editDirty}
                 onClick={updateLiveForm}
               >
-                {updateDone ? "已更新" : "更新"}
+                {updateDone ? L("已更新", "Updated") : L("更新", "Update")}
               </Button>
             ) : (
               <Button
                 variant="primary"
                 icon={<Icon name="spark" size={14} />}
                 disabled={building || fieldCount === 0}
-                onClick={() => guard("publish", "登录后即可发布表单")}
+                onClick={() =>
+                  guard("publish", L("登录后即可发布表单", "Sign in to publish your form"))
+                }
               >
-                发布
+                {L("发布", "Publish")}
               </Button>
             )}
           </React.Fragment>
@@ -1056,18 +1094,25 @@ function DesignerApp({
             onLogout={doLogout}
             // The email row opens the 账户 tab (§17 个人资料); menu items below it match the
             // design handoff order: 集成设置 (plug) above 我的表单 (folder), with a separator.
-            onProfile={() => guard("account", "登录后管理你的账户")}
+            onProfile={() =>
+              guard("account", L("登录后管理你的账户", "Sign in to manage your account"))
+            }
             items={[
               {
-                label: "集成设置",
+                label: L("集成设置", "Integrations"),
                 icon: <Icon name="plug" size={15} />,
-                onSelect: () => guard("settings", "登录后配置集成"),
+                onSelect: () =>
+                  guard("settings", L("登录后配置集成", "Sign in to configure integrations")),
               },
               { type: "separator" },
               {
-                label: "我的表单",
+                label: L("我的表单", "My forms"),
                 icon: <Icon name="folder" size={15} />,
-                onSelect: () => guard("forms", "登录后查看你发布的表单"),
+                onSelect: () =>
+                  guard(
+                    "forms",
+                    L("登录后查看你发布的表单", "Sign in to view the forms you've published"),
+                  ),
               },
             ]}
           />
@@ -1075,12 +1120,12 @@ function DesignerApp({
         mobileLabels={{
           chat: (
             <React.Fragment>
-              <Icon name="message" size={15} /> 对话
+              <Icon name="message" size={15} /> {L("对话", "Chat")}
             </React.Fragment>
           ),
           preview: (
             <React.Fragment>
-              <Icon name="eye" size={15} /> 预览{" "}
+              <Icon name="eye" size={15} /> {L("预览", "Preview")}{" "}
               {fieldCount ? <span className="ax-dshell__mcount">{fieldCount}</span> : null}
             </React.Fragment>
           ),
@@ -1093,7 +1138,7 @@ function DesignerApp({
           // `pill` 反映当前选择。
           <div className="cm-wrap">
             <ConversationThread
-              title="对话"
+              title={L("对话", "Chat")}
               model={chatModelPill(chatModel)}
               onModelClick={() => setModelMenuOpen((o) => !o)}
               actions={
@@ -1110,17 +1155,32 @@ function DesignerApp({
               onDraftChange={setDraft}
               controller={controller}
               renderTurn={(m, i, ctx) => renderChatTurn(m, ctx, onSend)}
-              emptyTitle="描述你想要的表单"
-              hints={["做一个线下活动报名表", "收集一份客户满意度问卷", "招聘投递表单"]}
-              placeholder="描述你想要的表单，例如：做一个活动报名表…"
-              busyPlaceholder="可继续输入，会收进缓冲区一起处理…"
-              note="AGENTAILY 会出错 · 发布前请核对字段"
+              emptyTitle={L("描述你想要的表单", "Describe the form you want")}
+              hints={[
+                L("做一个线下活动报名表", "Build an in-person event sign-up form"),
+                L("收集一份客户满意度问卷", "Collect a customer satisfaction survey"),
+                L("招聘投递表单", "A job application form"),
+              ]}
+              placeholder={L(
+                "描述你想要的表单，例如：做一个活动报名表…",
+                "Describe the form you want, e.g. build an event sign-up…",
+              )}
+              busyPlaceholder={L(
+                "可继续输入，会收进缓冲区一起处理…",
+                "Keep typing — it'll buffer and process together…",
+              )}
+              note={L(
+                "AGENTAILY 会出错 · 发布前请核对字段",
+                "AGENTAILY can make mistakes · review fields before publishing",
+              )}
             />
             {modelMenuOpen ? (
               <React.Fragment>
                 <div className="cm-scrim" onClick={() => setModelMenuOpen(false)} />
                 <div className="cm-menu">
-                  <div className="cm-menu__label ax-label">模型 · DeepSeek</div>
+                  <div className="cm-menu__label ax-label">
+                    {L("模型 · DeepSeek", "Model · DeepSeek")}
+                  </div>
                   {CHAT_MODELS.map((m) => (
                     <button
                       type="button"
@@ -1153,38 +1213,61 @@ function DesignerApp({
                 <span className="ax-label d-editbar__tag">EDITING</span>
                 <span className="d-editbar__txt">
                   {editingClosed
-                    ? "正在编辑已关闭的表单 · 表单未在收集，改动点「更新」保存"
-                    : "正在编辑已发布表单 · 改动点「更新」后才对访问者生效"}
+                    ? L(
+                        "正在编辑已关闭的表单 · 表单未在收集，改动点「更新」保存",
+                        "Editing a closed form · not collecting; click “Update” to save",
+                      )
+                    : L(
+                        "正在编辑已发布表单 · 改动点「更新」后才对访问者生效",
+                        "Editing a published form · changes go live only after you click “Update”",
+                      )}
                 </span>
                 <HoverCard
                   side="bottom"
                   className="d-editbar__more"
-                  trigger={<span className="d-editbar__moretxt">详情</span>}
+                  trigger={<span className="d-editbar__moretxt">{L("详情", "Details")}</span>}
                 >
                   <div className="d-editbar__pop">
                     {editingClosed ? (
                       <React.Fragment>
-                        <p>编辑已关闭的表单时</p>
+                        <p>{L("编辑已关闭的表单时", "When editing a closed form")}</p>
                         <ul>
-                          <li>表单当前已关闭，不接收新提交</li>
-                          <li>改动在「更新」后保存</li>
-                          <li>重新发布后，访问者看到的是新版本</li>
+                          <li>
+                            {L(
+                              "表单当前已关闭，不接收新提交",
+                              "The form is closed and accepts no new submissions",
+                            )}
+                          </li>
+                          <li>{L("改动在「更新」后保存", "Changes are saved after “Update”")}</li>
+                          <li>
+                            {L(
+                              "重新发布后，访问者看到的是新版本",
+                              "After republishing, visitors see the new version",
+                            )}
+                          </li>
                         </ul>
                       </React.Fragment>
                     ) : (
                       <React.Fragment>
-                        <p>编辑线上表单时</p>
+                        <p>{L("编辑线上表单时", "When editing a live form")}</p>
                         <ul>
-                          <li>历史提交保留不变</li>
-                          <li>新增字段对旧提交显示「—」</li>
-                          <li>编辑期间表单仍在收集</li>
+                          <li>{L("历史提交保留不变", "Past submissions stay unchanged")}</li>
+                          <li>
+                            {L(
+                              "新增字段对旧提交显示「—」",
+                              "New fields show “—” for old submissions",
+                            )}
+                          </li>
+                          <li>
+                            {L("编辑期间表单仍在收集", "The form keeps collecting while you edit")}
+                          </li>
                         </ul>
                       </React.Fragment>
                     )}
                   </div>
                 </HoverCard>
                 <button type="button" className="d-editbar__exit" onClick={exitEditing}>
-                  退出
+                  {L("退出", "Exit")}
                 </button>
               </div>
             ) : null}
@@ -1192,7 +1275,7 @@ function DesignerApp({
               <div className="d-pvhead__tabs">
                 <Tabs
                   items={[
-                    { id: "preview", label: "预览" },
+                    { id: "preview", label: L("预览", "Preview") },
                     { id: "schema", label: "Schema", count: fieldCount },
                   ]}
                   active={tab}
@@ -1203,7 +1286,7 @@ function DesignerApp({
               {tab === "preview" ? (
                 <div className="d-seg">
                   <IconButton
-                    label="指向修改"
+                    label={L("指向修改", "Point to edit")}
                     size="sm"
                     variant={markupOn ? "solid" : "outline"}
                     disabled={building || fieldCount === 0}
@@ -1214,7 +1297,7 @@ function DesignerApp({
                   <span className="d-devtoggles">
                     <span className="d-seg__sep" />
                     <IconButton
-                      label="桌面宽度"
+                      label={L("桌面宽度", "Desktop width")}
                       size="sm"
                       variant={device === "full" ? "solid" : "outline"}
                       onClick={() => setDevice("full")}
@@ -1222,7 +1305,7 @@ function DesignerApp({
                       <Icon name="monitor" size={13} />
                     </IconButton>
                     <IconButton
-                      label="手机宽度"
+                      label={L("手机宽度", "Phone width")}
                       size="sm"
                       variant={device === "phone" ? "solid" : "outline"}
                       onClick={() => setDevice("phone")}
@@ -1276,11 +1359,20 @@ function DesignerApp({
           in AND the AUTHORITATIVE verified bit from GET /api/auth/me is false. */}
       {loggedIn && !emailVerified ? (
         <div className="d-verify-banner" data-testid="verify-banner">
-          <Alert variant="warn" title="邮箱未验证" icon={<Icon name="mail" size={16} />}>
+          <Alert
+            variant="warn"
+            title={L("邮箱未验证", "Email unverified")}
+            icon={<Icon name="mail" size={16} />}
+          >
             <div className="d-verify-banner__row">
-              <span>验证你的邮箱可锁定它归你所有；在此之前所有功能照常可用。</span>
+              <span>
+                {L(
+                  "验证你的邮箱可锁定它归你所有；在此之前所有功能照常可用。",
+                  "Verify your email to lock it to your account; everything works as usual until then.",
+                )}
+              </span>
               {resendState === "sent" ? (
-                <span className="ax-label d-verify-banner__sent">已重新发送</span>
+                <span className="ax-label d-verify-banner__sent">{L("已重新发送", "Resent")}</span>
               ) : (
                 <Button
                   size="sm"
@@ -1288,7 +1380,7 @@ function DesignerApp({
                   disabled={resendState === "sending"}
                   onClick={resendVerification}
                 >
-                  {resendState === "sending" ? "发送中…" : "重新发送"}
+                  {resendState === "sending" ? L("发送中…", "Sending…") : L("重新发送", "Resend")}
                 </Button>
               )}
             </div>
@@ -1324,7 +1416,7 @@ function DesignerApp({
         onClose={() => setFormsOpen(false)}
         onNeedLogin={() => {
           setFormsOpen(false);
-          needLogin("登录后查看你发布的表单");
+          needLogin(L("登录后查看你发布的表单", "Sign in to view the forms you've published"));
         }}
         listForms={listForms}
         updateForm={updateForm}
@@ -1340,10 +1432,13 @@ function DesignerApp({
       <AlertDialog
         open={discardOpen}
         tone="warn"
-        title="放弃本次编辑？"
-        description={`你对《${meta?.title || editingForm?.meta?.title || "这份表单"}》的改动还没「更新」，退出后不会保存；已发布的版本保持不变。`}
-        cancelLabel="继续编辑"
-        confirmLabel="放弃改动"
+        title={L("放弃本次编辑？", "Discard these edits?")}
+        description={L(
+          `你对《${meta?.title || editingForm?.meta?.title || L("这份表单", "this form")}》的改动还没「更新」，退出后不会保存；已发布的版本保持不变。`,
+          `Your changes to “${meta?.title || editingForm?.meta?.title || L("这份表单", "this form")}” haven't been saved. Exiting won't keep them; the published version stays unchanged.`,
+        )}
+        cancelLabel={L("继续编辑", "Keep editing")}
+        confirmLabel={L("放弃改动", "Discard")}
         onCancel={() => setDiscardOpen(false)}
         onConfirm={doExit}
       />
@@ -1355,7 +1450,7 @@ function DesignerApp({
         onClose={() => setPublishOpen(false)}
         onNeedLogin={() => {
           setPublishOpen(false);
-          needLogin("登录后即可发布表单");
+          needLogin(L("登录后即可发布表单", "Sign in to publish your form"));
         }}
         meta={meta}
         fields={fields}

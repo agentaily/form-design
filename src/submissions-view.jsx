@@ -28,6 +28,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { PageSection, DataTable, Empty, Alert, Spinner, Button } from "@agentaily/design-system";
 import { Icon } from "./chat.jsx";
+import { L } from "./core/i18n";
 import { listSubmissions as defaultListSubmissions } from "./core/submissionsClient";
 import { ApiError } from "./core/apiClient";
 
@@ -251,7 +252,11 @@ export function SubmissionsContent({
         </span>
       ),
     })),
-    { key: "_time", label: "提交时间", render: (v) => <span className="sb-time">{v}</span> },
+    {
+      key: "_time",
+      label: L("提交时间", "Submitted"),
+      render: (v) => <span className="sb-time">{v}</span>,
+    },
     {
       key: "_act",
       label: "",
@@ -262,14 +267,14 @@ export function SubmissionsContent({
           className="sb-view"
           onClick={() => setDetail({ ...row._raw, _seq: row._seq, _label: row._label })}
         >
-          查看
+          {L("查看", "View")}
         </button>
       ),
     },
   ];
 
   const exportCsv = () => {
-    const head = ["编号", ...labels.map(stripStar), "提交时间"];
+    const head = [L("编号", "ID"), ...labels.map(stripStar), L("提交时间", "Submitted")];
     const esc = (s) => {
       s = String(s == null ? "" : s);
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
@@ -307,16 +312,22 @@ export function SubmissionsContent({
     const nameAnswer = (detail.answers || []).find((a) =>
       /姓名|名字|name|称呼/i.test(a.label || ""),
     );
-    const who = nameAnswer ? displayValue(nameAnswer.value) : "提交 " + (detail._label || "");
+    const who = nameAnswer
+      ? displayValue(nameAnswer.value)
+      : L("提交 ", "Submission ") + (detail._label || "");
     return (
       <PageSection
         eyebrow={
           <button type="button" className="sb-back" onClick={() => setDetail(null)}>
-            <Icon name="arrowLeft" size={13} /> 提交数据
+            <Icon name="arrowLeft" size={13} /> {L("提交数据", "Submissions")}
           </button>
         }
         title={who}
-        description={`${detail._label || ""} · 提交于 ${formatCreatedAt(detail.createdAt)}`}
+        description={
+          `${detail._label || ""}` +
+          L(" · 提交于 ", " · submitted ") +
+          formatCreatedAt(detail.createdAt)
+        }
       >
         <div className="sb-record" data-record={detail.id}>
           <dl className="sb-detail__list">
@@ -345,16 +356,19 @@ export function SubmissionsContent({
     );
   } else if (error === "retry") {
     body = (
-      <Alert variant="danger" title="出错了">
-        加载提交失败，请稍后重试。
+      <Alert variant="danger" title={L("出错了", "Something went wrong")}>
+        {L("加载提交失败，请稍后重试。", "Failed to load submissions. Please try again.")}
       </Alert>
     );
   } else if (submissions.length === 0) {
     body = (
       <Empty
         icon={<Icon name="inbox" size={18} />}
-        title="还没有收到提交"
-        description="这份表单还没有人填写。把公开链接分享出去，收到的提交会出现在这里。"
+        title={L("还没有收到提交", "No submissions yet")}
+        description={L(
+          "这份表单还没有人填写。把公开链接分享出去，收到的提交会出现在这里。",
+          "No one has filled out this form yet. Share the public link and submissions will show up here.",
+        )}
       />
     );
   } else {
@@ -362,19 +376,19 @@ export function SubmissionsContent({
       <React.Fragment>
         <div className="sb-stats">
           <div className="sb-stat">
-            <span className="ax-label sb-stat__k">累计提交</span>
+            <span className="ax-label sb-stat__k">{L("累计提交", "Total")}</span>
             <span className="sb-stat__v">{count.toLocaleString()}</span>
           </div>
           <div className="sb-stat">
-            <span className="ax-label sb-stat__k">今日新增</span>
+            <span className="ax-label sb-stat__k">{L("今日新增", "Today")}</span>
             <span className="sb-stat__v">+{today}</span>
           </div>
           <div className="sb-stat">
-            <span className="ax-label sb-stat__k">近 7 天</span>
+            <span className="ax-label sb-stat__k">{L("近 7 天", "Last 7 days")}</span>
             <span className="sb-stat__v">{week}</span>
           </div>
           <div className="sb-stat">
-            <span className="ax-label sb-stat__k">完成率</span>
+            <span className="ax-label sb-stat__k">{L("完成率", "Completion")}</span>
             <span className="sb-stat__v">{completion}%</span>
           </div>
         </div>
@@ -387,14 +401,16 @@ export function SubmissionsContent({
                 className="sb-search__input"
                 type="text"
                 value={query}
-                placeholder="搜索姓名、邮箱、任意字段…"
+                placeholder={L("搜索姓名、邮箱、任意字段…", "Search name, email, any field…")}
                 onChange={(e) => setQuery(e.target.value)}
               />
             </span>
             <span className="sb-toolbar__sp" />
             {q ? (
               <span className="sb-toolbar__count">
-                匹配 {filtered.length} / {rows.length} 条
+                {L("匹配 ", "Matched ")}
+                {filtered.length} / {rows.length}
+                {L(" 条", "")}
               </span>
             ) : null}
             <Button
@@ -403,7 +419,7 @@ export function SubmissionsContent({
               icon={<Icon name={exported ? "check" : "save"} size={14} />}
               onClick={exportCsv}
             >
-              {exported ? "已导出" : "导出 CSV"}
+              {exported ? L("已导出", "Exported") : L("导出 CSV", "Export CSV")}
             </Button>
             {/* 飞书表格外链（§16.9）：已建表时显示。它是真链接（要支持新标签 / 右键打开），DS Button
                 是 <button onClick> 做不到，故按设计 chat13 退化为复用 ax-btn 样式的真 <a>（非手搓外观）。 */}
@@ -414,7 +430,7 @@ export function SubmissionsContent({
                 target="_blank"
                 rel="noreferrer"
               >
-                <Icon name="external" size={14} /> 飞书表格
+                <Icon name="external" size={14} /> {L("飞书表格", "Feishu table")}
               </a>
             ) : null}
           </div>
@@ -423,7 +439,10 @@ export function SubmissionsContent({
             <div className="sb-closed">
               <Icon name="power" size={14} />
               <span>
-                这份表单已关闭收集，下面是关闭前累计的全部提交。重新发布后可继续接收新提交。
+                {L(
+                  "这份表单已关闭收集，下面是关闭前累计的全部提交。重新发布后可继续接收新提交。",
+                  "This form is closed. Below are all submissions collected before it closed. Republish to keep receiving new ones.",
+                )}
               </span>
             </div>
           ) : null}
@@ -432,8 +451,12 @@ export function SubmissionsContent({
             <Empty
               bordered
               icon={<Icon name="search" size={20} />}
-              title="没有匹配的提交"
-              description={`没有包含「${query}」的记录。试试别的关键词。`}
+              title={L("没有匹配的提交", "No matching submissions")}
+              description={
+                L("没有包含「", "Nothing contains “") +
+                query +
+                L("」的记录。试试别的关键词。", "”. Try a different keyword.")
+              }
             />
           ) : (
             <DataTable columns={columns} rows={filtered} pageSize={8} />
@@ -448,11 +471,14 @@ export function SubmissionsContent({
       className="sb-psec"
       eyebrow={
         <button type="button" className="sb-back" onClick={onBackToList}>
-          <Icon name="arrowLeft" size={13} /> 我的表单
+          <Icon name="arrowLeft" size={13} /> {L("我的表单", "My forms")}
         </button>
       }
-      title={form.meta?.title || "提交数据"}
-      description="收到的全部提交。点任意一行查看完整记录，或导出为 CSV 做进一步分析。"
+      title={form.meta?.title || L("提交数据", "Submissions")}
+      description={L(
+        "收到的全部提交。点任意一行查看完整记录，或导出为 CSV 做进一步分析。",
+        "Every submission received. Click any row for the full record, or export to CSV for deeper analysis.",
+      )}
     >
       {body}
     </PageSection>

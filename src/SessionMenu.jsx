@@ -14,6 +14,7 @@
 // — it never fetches; App owns listChatSessions / deleteChatSession.
 import React from "react";
 import { IconButton, Icon, Popover } from "@agentaily/design-system";
+import { L } from "./core/i18n";
 
 // Format an ISO-8601 updatedAt into a short, relative-ish Chinese label for the meta line
 // (刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / 本地日期). Best-effort: an unparseable value
@@ -24,13 +25,13 @@ export function formatSessionTime(iso) {
   if (Number.isNaN(then)) return String(iso);
   const diffMs = Date.now() - then;
   const min = Math.floor(diffMs / 60000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
+  if (min < 1) return L("刚刚", "just now");
+  if (min < 60) return L(`${min} 分钟前`, `${min}m ago`);
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} 小时前`;
+  if (hr < 24) return L(`${hr} 小时前`, `${hr}h ago`);
   const day = Math.floor(hr / 24);
-  if (day === 1) return "昨天";
-  if (day < 7) return `${day} 天前`;
+  if (day === 1) return L("昨天", "yesterday");
+  if (day < 7) return L(`${day} 天前`, `${day}d ago`);
   // older than a week → a plain local date (YYYY-M-D), stable across locales.
   const d = new Date(then);
   return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
@@ -42,7 +43,7 @@ export function SessionMenu({ sessions = [], activeId, onNewChat, onSelect, onDe
       side="bottom"
       align="end"
       trigger={
-        <IconButton label="会话" size="sm" variant="outline">
+        <IconButton label={L("会话", "Sessions")} size="sm" variant="outline">
           <Icon name="message" size={15} />
         </IconButton>
       }
@@ -57,10 +58,10 @@ export function SessionMenu({ sessions = [], activeId, onNewChat, onSelect, onDe
               onNewChat && onNewChat();
             }}
           >
-            <Icon name="plus" size={15} /> 新会话
+            <Icon name="plus" size={15} /> {L("新会话", "New chat")}
           </button>
           <div className="cs-menu__sep" />
-          <div className="cs-menu__label ax-label">最近会话</div>
+          <div className="cs-menu__label ax-label">{L("最近会话", "Recent")}</div>
           <div className="cs-menu__list">
             {sessions.map((s) => {
               const active = s.sessionId === activeId;
@@ -79,7 +80,7 @@ export function SessionMenu({ sessions = [], activeId, onNewChat, onSelect, onDe
                   <div className="cs-item__body">
                     <div className="cs-item__title">{s.title}</div>
                     <div className="cs-item__meta">
-                      {s.turnCount} 轮 · {formatSessionTime(s.updatedAt)}
+                      {s.turnCount} {L("轮", "turns")} · {formatSessionTime(s.updatedAt)}
                     </div>
                   </div>
                   {active ? (
@@ -90,7 +91,7 @@ export function SessionMenu({ sessions = [], activeId, onNewChat, onSelect, onDe
                     <button
                       type="button"
                       className="cs-item__del"
-                      aria-label="删除会话"
+                      aria-label={L("删除会话", "Delete session")}
                       onClick={(e) => {
                         // stay in the panel; deleting is a row side-action, not a select.
                         e.stopPropagation();

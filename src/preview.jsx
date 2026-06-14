@@ -13,6 +13,7 @@ import {
   Form,
 } from "@agentaily/design-system";
 import { fieldKindLabel, mkLabel } from "./core/markup";
+import { L } from "./core/i18n";
 
 // ── validation: one schema-style fn over the current (dynamic) fields ──
 const PV_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -31,18 +32,19 @@ function pvValidate(fields, vals) {
     if (f.required && pvIsEmpty(f, v)) {
       errs[f.id] =
         f.type === "consent"
-          ? "请勾选后再提交"
+          ? L("请勾选后再提交", "Please check this to continue")
           : f.type === "radio" || f.type === "select"
-            ? "请选择一项"
+            ? L("请选择一项", "Please select an option")
             : f.type === "checks"
-              ? "请至少选择一项"
-              : "此项必填";
+              ? L("请至少选择一项", "Please select at least one")
+              : L("此项必填", "This field is required");
       return;
     }
     if (pvIsEmpty(f, v)) return; // optional + empty → skip format checks
-    if (f.type === "email" && !PV_EMAIL_RE.test(String(v))) errs[f.id] = "请输入有效的邮箱地址";
+    if (f.type === "email" && !PV_EMAIL_RE.test(String(v)))
+      errs[f.id] = L("请输入有效的邮箱地址", "Please enter a valid email address");
     else if (f.type === "tel" && !PV_TEL_RE.test(String(v).replace(/[\s-]/g, "")))
-      errs[f.id] = "请输入有效的 11 位手机号";
+      errs[f.id] = L("请输入有效的 11 位手机号", "Please enter a valid 11-digit phone number");
   });
   return errs;
 }
@@ -100,7 +102,7 @@ function FieldView({ field, form }) {
     );
   } else if (type === "select") {
     const opts = [
-      { value: "", label: placeholder || "请选择" },
+      { value: "", label: placeholder || L("请选择", "Select") },
       ...options.map((o) => ({ value: o, label: o })),
     ];
     control = (
@@ -181,7 +183,7 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
   }, [form.values]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (submitted) {
-    const firstName = form.getValues(fields[0]?.id) || "你";
+    const firstName = form.getValues(fields[0]?.id) || L("你", "there");
     return (
       <div className={"pv-card pv-card--" + style + " pv-done"}>
         <div className="pv-done__mark">
@@ -198,10 +200,14 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
             <path d="M20 6 9 17l-5-5" />
           </svg>
         </div>
-        <h3 className="pv-done__h">报名成功</h3>
+        <h3 className="pv-done__h">{L("报名成功", "You’re registered")}</h3>
         <p className="pv-done__p">
-          我们已收到 <strong>{firstName}</strong>{" "}
-          的报名，确认信会发送到你的邮箱。现场签到请出示手机号。
+          {L("我们已收到 ", "We’ve received ")}
+          <strong>{firstName}</strong>
+          {L(
+            " 的报名，确认信会发送到你的邮箱。现场签到请出示手机号。",
+            "’s registration — a confirmation is on its way to your inbox. Show your phone number at on-site check-in.",
+          )}
         </p>
         <div className="pv-done__code">
           CONFIRM · AGS-2026-0628-{String(Math.floor(Math.random() * 900) + 100)}
@@ -213,7 +219,7 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
             form.reset({});
           }}
         >
-          再填一份
+          {L("再填一份", "Submit another")}
         </Button>
       </div>
     );
@@ -222,7 +228,11 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
   return (
     <div className={"pv-card pv-card--" + style}>
       {meta ? (
-        <header className="pv-hero pv-in" data-mk-label="表单标题与介绍" data-mk-kind="标题">
+        <header
+          className="pv-hero pv-in"
+          data-mk-label={L("表单标题与介绍", "Form title & intro")}
+          data-mk-kind={L("标题", "Heading")}
+        >
           <div className="pv-hero__kicker ax-label">{meta.kicker}</div>
           <h2 className="pv-hero__title">{meta.title}</h2>
           <p className="pv-hero__desc">{meta.desc}</p>
@@ -241,8 +251,13 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
 
       {fields.length === 0 && !meta ? (
         <div className="pv-blank ax-dotgrid">
-          <div className="pv-blank__txt">表单预览</div>
-          <div className="pv-blank__sub">发送需求后，字段会实时出现在这里</div>
+          <div className="pv-blank__txt">{L("表单预览", "Form preview")}</div>
+          <div className="pv-blank__sub">
+            {L(
+              "发送需求后，字段会实时出现在这里",
+              "Send a request and fields appear here in real time",
+            )}
+          </div>
         </div>
       ) : null}
 
@@ -254,17 +269,24 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
           <div className="pv-building">
             <span className="pv-building__dot" />
             <span className="pv-building__dot" />
-            <span className="pv-building__dot" /> 正在挂载字段…
+            <span className="pv-building__dot" /> {L("正在挂载字段…", "Mounting fields…")}
           </div>
         ) : null}
       </div>
 
       {fields.length > 0 ? (
-        <div className="pv-footer" data-mk-label="提交按钮" data-mk-kind="按钮">
+        <div
+          className="pv-footer"
+          data-mk-label={L("提交按钮", "Submit button")}
+          data-mk-kind={L("按钮", "Button")}
+        >
           <Button variant="primary" size="lg" full disabled={building} onClick={form.handleSubmit}>
-            提交报名
+            {L("提交报名", "Submit registration")}
           </Button>
-          <p className="pv-footer__note">提交即表示同意活动须知 · Powered by Agentaily Forms</p>
+          <p className="pv-footer__note">
+            {L("提交即表示同意活动须知", "By submitting you agree to the event terms")} · Powered by
+            Agentaily Forms
+          </p>
         </div>
       ) : null}
     </div>
