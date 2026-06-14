@@ -1226,7 +1226,7 @@ ALTER TABLE forms ADD COLUMN feishu_table_id  TEXT;  -- per-form 数据表 id，
 >
 > **前端登录 UI（已落地，2026-06-12）：** owner 登录是一个**独立 `/signin` 路由页**（`src/signin.jsx`，DS `SignInPage` 接 `core/auth` 的 login/register/找回密码），不是应用内弹窗；未登录触发受限操作（分享/发布/我的表单/集成设置/账户）→ 跳 `/signin?return=&reason=`，intent 经 sessionStorage 跨页、登录回跳后续跑。顶栏账户区用 DS `AccountControl`（头像下拉：邮箱行→账户 tab / 集成设置 / 我的表单 / 退出登录）。路由匹配器 `matchSignIn` 见 `src/core/router.ts`。
 >
-> **设置浮层（DS 0.8.0 起，PR #52）：** 「设置」不再是独立 `/settings` 路由页，而是**设计器内浮起浮层**（`src/settings.jsx` → `SettingsOverlay`，DS `SettingsSheet` 双 tab：账户 + 集成），叠在设计器之上、**不卸载它**。打开浮层会经 `history.pushState` **反映 `/settings` URL**（浏览器后退 / ✕ / Esc 关闭并复原进入前的页面状态），而非整页跳转——`App.jsx` 因此不在路由分流里 branch `/settings`，只用它决定浮层初始开合（deep-link）。账户 tab = 头像/邮箱 + 可编辑显示名（走 §17.13 profile 后端）+ 退出登录；集成 tab = §12/§14 的 BYOK 配置/测试（接线不变）。
+> **设置浮层（DS 0.8.0 起，PR #52；tab 进 URL：PR #76）：** 「设置」不再是独立 `/settings` 路由页，而是**设计器内浮起浮层**（`src/settings.jsx` → `SettingsOverlay`，DS `SettingsSheet` 双 tab：账户 + 集成），叠在设计器之上、**不卸载它**。打开浮层会经 `history.pushState` **反映 `/settings/:tab` URL**（PR #76 起把活跃 tab 也带进路径：`/settings/account` | `/settings/integrations`；裸 `/settings` 退化为默认集成 tab；未知子段不是设置路由 → 退化到设计器；切 tab 在原地 `replaceState`、保留 `?s=` 会话参数），浏览器后退 / ✕ / Esc 关闭并复原进入前的页面状态，而非整页跳转——`App.jsx` 因此不在路由分流里 branch 设置路由，只用 `matchSettings(pathname)`（`src/core/router.ts`，返 `{ section }`）决定浮层初始开合 + 初始 tab（deep-link / 刷新落回对应 tab）。账户 tab = 头像/邮箱 + 可编辑显示名（走 §17.13 profile 后端）+ 退出登录；集成 tab = §12/§14 的 BYOK 配置/测试（接线不变）。
 >
 > **数据迁移（运维一次性，不在本节细化）：** 现有线上 `owner_config` / `forms` 各有一行 `owner_id='default'`。部署新代码 + 建 `users` 表后，由运维用真实邮箱注册首个账号，再跑一次性 SQL 把 `owner_id='default'` 的行 `UPDATE` 成该账号的 `users.id`（脚本 `workers/migrations/002-migrate-default-owner.sql`，user id 部署时填）。这是运维动作，不属本节契约。
 
@@ -1971,6 +1971,8 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 > **本节范围：** keying 决策、未登录态、新增 D1 表 `chat_sessions` 列契约、`GET/PUT /api/chat/session/:sessionId`（owner-only）、写入时机（批量、非每 token）、跨设备恢复、隔离 / 横向越权约束。**§26.9（PR #65）补上多会话：** `GET /api/chat/sessions` 列出 owner 全部会话 + `DELETE /api/chat/session/:sessionId` 删一段会话（title / turnCount 运行期推导，不加列 / migration）。
 >
 > **不在本节：** 历史裁剪 / 上下文窗口压缩、对话搜索、删除单条回合、协作 / 实时同步。**多会话列表 / 切换的 UI 放置**（芯片 / 列表组件挂在哪）由设计另拍，本节只钉后端列表 / 删除端点 + 列表项契约（§26.9）。
+>
+> **URL 状态持久化 + 工作区恢复（PR #76，纯前端、无新 D1 / migration）：** 活跃 `designSessionId` 反映进设计器 URL 的 **`?s=<sessionId>` query**（`src/core/router.ts` `readSessionId` / `withSessionId`；与 `/settings/:tab` 路径正交、可共存）：进设计器即把会话规整进 URL（`replaceState`），带 `?s=` 刷新 / 深链 / 分享 → `setActiveDesignSessionId` + 按该 id 走本节的恢复路径；新建 / 切换 `pushState`、浏览器前进后退切回对应会话。**乱序到达防护：** 每次异步会话加载（mount 恢复 + 切换 + popstate）领一个单调 load-sequence token，await 回来后只在「仍是最新加载且活跃会话未变」时才应用——否则**绝不**用过期结果覆盖当前会话（不串会话）。**工作区（右侧表单预览模型）恢复：** §26 只持久化对话（`turns` + `history`），不存表单模型；回放 tool 调用重建不可靠（字段 `uid` 与消息 id 交错→引用错位）。故把模型快照（`meta` + `fields`）作为**一条合成 turn**（`id = WORKSPACE_SNAPSHOT_ID`、`role: "assistant"`、`kind: "workspace"`）搭进 §26.6 既有的**不透明 `turns_json`**（后端零改、不影响按 `role==="user"` 推的 `title` / `turnCount`），恢复时由 `splitWorkspaceSnapshot` 摘出重建预览、绝不渲染成对话气泡（`src/core/chatSessionClient.ts` `buildWorkspaceSnapshotTurn` / `splitWorkspaceSnapshot`）。行为契约见 `features/url-state-persistence.feature`。
 
 ### 26.1 端点职责与鉴权
 

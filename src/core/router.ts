@@ -131,20 +131,83 @@ export function matchSignIn(pathname: string): SignInRoute | null {
   return isExactPath(pathname, SIGNIN_PATH) ? {} : null;
 }
 
-/** A recognised /settings path. Carries no params — the settings surface reads its config
- *  off the backend (getConfig) / the owner's profile, not off the URL. */
-export type SettingsRoute = Record<string, never>;
+/** The two settings tabs reflected into the URL (`/settings/:tab`, PR #76). */
+export type SettingsSection = "account" | "integrations";
+
+/** A recognised /settings route, carrying the active tab parsed from `/settings/:tab` (PR #76). */
+export interface SettingsRoute {
+  /** The active tab; bare `/settings` (no tab segment) defaults to "integrations". */
+  section: SettingsSection;
+}
 
 /**
- * Match the 设置 path (SPEC §12 + §14 + §17). Pure: return `{}` when the path is `/settings`
- * (one trailing slash tolerated), else `null`. Since DS 0.8.0 设置 is NOT a bare route page —
- * it is a floating overlay (<SettingsOverlay>) DesignerApp opens over itself, reflecting a
- * /settings URL via history WITHOUT unmounting the designer. So App does NOT branch on this in
- * its route split; DesignerApp uses the /settings path only to decide the overlay's initial
- * open state (deep-link). Kept as a pure, tested helper for that path comparison.
+ * Match the 设置 route (SPEC §12 + §14 + §17, tab reflected per PR #76). Pure: return
+ * `{ section }` for `/settings` (→ default "integrations"), `/settings/account`, or
+ * `/settings/integrations` (one trailing slash tolerated on each), else `null`. An unknown
+ * sub-segment (`/settings/foo`) or a deeper path is NOT a settings route → `null`, so a
+ * typo'd deep-link degrades to the designer rather than a half-open overlay.
+ *
+ * Since DS 0.8.0 设置 is a floating overlay (<SettingsOverlay>) DesignerApp opens over itself,
+ * reflecting a `/settings/:tab` URL via history WITHOUT unmounting the designer. So App does NOT
+ * branch its route split on this; DesignerApp uses the match only to pick the overlay's initial
+ * open state + tab (deep-link) and to keep the overlay's tab in sync with Back/Forward.
  */
 export function matchSettings(pathname: string): SettingsRoute | null {
-  return isExactPath(pathname, SETTINGS_PATH) ? {} : null;
+  if (typeof pathname !== "string") return null;
+  // Normalise exactly one trailing slash (but never the root "/settings" itself away).
+  let p = pathname;
+  if (p.length > SETTINGS_PATH.length && p.endsWith("/")) p = p.slice(0, -1);
+  if (p === SETTINGS_PATH) return { section: "integrations" };
+  if (p === `${SETTINGS_PATH}/account`) return { section: "account" };
+  if (p === `${SETTINGS_PATH}/integrations`) return { section: "integrations" };
+  return null;
+}
+
+/**
+ * Build the `/settings/:tab` path reflecting a tab (PR #76): `/settings/account` or
+ * `/settings/integrations`. Pure; round-trips through {@link matchSettings}. App pushes/
+ * replaces this (preserving any `?s=` session query) when opening settings or switching tabs.
+ */
+export function settingsPath(section: SettingsSection): string {
+  return section === "account" ? `${SETTINGS_PATH}/account` : `${SETTINGS_PATH}/integrations`;
+}
+
+/**
+ * Query param carrying the active design-session id on the designer route (PR #76). The value
+ * is the §26.2 client-minted stable session id, so a refresh / deep-link / shared link restores
+ * the same conversation + workspace. `?s=` is orthogonal to the `/settings/:tab` path (both can
+ * coexist, e.g. `/settings/integrations?s=<id>`).
+ */
+export const SESSION_PARAM = "s";
+
+/**
+ * Read the active design-session id off a search string (`?s=<id>`), URL-decoded and trimmed;
+ * "" when absent / blank / whitespace-only / malformed (the caller then falls back to the
+ * getOrCreate session id, §26.2). Pure.
+ */
+export function readSessionId(search: string): string {
+  return readQueryParam(search, SESSION_PARAM).trim();
+}
+
+/**
+ * Return a new search string (leading "?", or "" when empty) that reflects `sessionId` in the
+ * `s` param while PRESERVING every other param already in `search`. A blank `sessionId` removes
+ * the param (and may yield ""). Pure — App uses it to build the URL it push/replaces so the rest
+ * of the query (if any) survives.
+ */
+export function withSessionId(search: string, sessionId: string): string {
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(
+      typeof search === "string" && search.startsWith("?") ? search.slice(1) : search || "",
+    );
+  } catch {
+    params = new URLSearchParams();
+  }
+  if (sessionId) params.set(SESSION_PARAM, sessionId);
+  else params.delete(SESSION_PARAM);
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
 }
 
 /**
