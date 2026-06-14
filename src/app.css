@@ -553,61 +553,301 @@ body {
   margin: 8px 0 0;
 }
 
-/* ── 数据后台「看提交」(owner 侧, 第 6 步) ───────────────────────────────────── */
-.d-subs {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.d-subs__count {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-faint);
-}
+/* ── 数据后台「提交数据」(owner 侧, 第 6 步 · PR-6 chat13)──────────────────────────────
+   「我的表单」面板内 list ↔ 提交数据 ↔ 记录详情 的内容切换。PanelSheet / PageSection / DataTable /
+   Empty 都是 DS 组件;下面只编排布局 + 内容切换的过场动画,所有值引用 DS token。 */
 .d-subs__loading {
   display: flex;
   justify-content: center;
   padding: 28px 0;
 }
-.d-subs__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
+
+/* 同一面板内 列表↔提交数据↔详情 的内容切换:整块 PanelSheet 不重新过场,只内层内容淡入(换 key 重挂)。 */
+.mf-swap {
+  animation: mf-swap 240ms var(--ease-out) both;
+}
+@keyframes mf-swap {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mf-swap {
+    animation: none;
+  }
+}
+
+/* 面包屑(PanelSheet 顶栏 crumb 槽位):我的表单 / 提交数据 / #记录号,各级可点回退。 */
+.sb-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.sb-crumb__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: var(--radius-1);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.01em;
+  transition:
+    color var(--dur-1) var(--ease-out),
+    background var(--dur-1) var(--ease-out);
+}
+.sb-crumb__back:hover {
+  color: var(--text-body);
+  background: var(--surface-raised);
+}
+.sb-crumb__sep {
+  color: var(--text-faint);
+}
+.sb-crumb__cur {
+  color: var(--text-body);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.01em;
+}
+
+/* 列表 / 详情子页标题上方的可点击返回箭头(落在 PageSection eyebrow 槽位)。 */
+.sb-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 3px 7px;
+  margin: -3px -7px;
+  border-radius: var(--radius-1);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition:
+    color var(--dur-1) var(--ease-out),
+    background var(--dur-1) var(--ease-out);
+}
+.sb-back:hover {
+  color: var(--text-body);
+  background: var(--surface-raised);
+}
+
+/* 概览统计卡:累计 / 今日新增 / 近 7 天 / 完成率。 */
+.sb-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
 }
-.d-subrow {
+.sb-stat {
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-3, 8px);
+  border-radius: var(--radius-3);
+  background: var(--surface-card);
   padding: 14px 16px;
-}
-.d-subrow__fields {
-  margin: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.d-subrow__pair {
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
-}
-.d-subrow__key {
-  flex: none;
-  min-width: 96px;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  letter-spacing: var(--tracking-label, 0.08em);
-  text-transform: uppercase;
+.sb-stat__k {
   color: var(--text-faint);
 }
-.d-subrow__val {
+.sb-stat__v {
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 500;
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-body);
+  line-height: 1;
+}
+
+/* 搜索工具栏 + 表格是一个整体:包成一组,组内贴紧;与上方统计卡保持章节间距(30px)。 */
+.sb-psec .ax-psec__body {
+  gap: 30px;
+}
+.sb-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.sb-search {
+  flex: 1;
+  min-width: 0;
+  max-width: 360px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2);
+  background: var(--surface-page);
+  padding: 0 11px;
+  color: var(--text-faint);
+  transition: border-color var(--dur-1) var(--ease-out);
+}
+.sb-search:focus-within {
+  border-color: var(--border-strong);
+}
+.sb-search svg {
+  flex: none;
+}
+.sb-search__input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  border: none;
+  background: none;
+  outline: none;
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  color: var(--text-body);
+  padding: 9px 0;
+}
+.sb-search__input::placeholder {
+  color: var(--text-faint);
+}
+.sb-toolbar__sp {
+  flex: 1 1 auto;
+}
+.sb-toolbar__count {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.sb-closed {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 14px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2);
+  background: var(--surface-page);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  line-height: var(--leading-snug);
+}
+.sb-closed svg {
+  flex: none;
+  color: var(--text-faint);
+}
+
+/* 横向滚动后,分页脚 / 表头保持贴合可视区不漂移(应用层兜底,作用域限定到 .sb-tablewrap;
+   根因在上游 DS DataTable 把脚/头放进了滚动容器,见 DONE 给 manager 的上游反馈)。 */
+.sb-tablewrap .ax-datatable__foot {
+  position: sticky;
+  left: 0;
+  background: var(--surface-card);
+}
+.sb-tablewrap .ax-datatable thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.sb-seq {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+.sb-cell {
+  display: inline-block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.sb-time {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.sb-view {
+  appearance: none;
+  border: 1px solid var(--border-default);
+  background: var(--surface-card);
+  color: var(--text-body);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  border-radius: var(--radius-1);
+  padding: 3px 9px;
+  white-space: nowrap;
+  transition: border-color var(--dur-1) var(--ease-out);
+}
+.sb-view:hover {
+  border-color: var(--text-faint);
+}
+
+/* 记录详情子页:面板内、非 Dialog。 */
+.sb-record {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-3);
+  background: var(--surface-card);
+  padding: 4px 22px;
+}
+.sb-detail__list {
+  margin: 0;
+}
+.sb-detail__row {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 14px;
+  padding: 12px 0;
+  align-items: baseline;
+}
+.sb-detail__row + .sb-detail__row {
+  border-top: 1px solid var(--border-default);
+}
+.sb-detail__row dt {
+  color: var(--text-faint);
+}
+.sb-detail__row dd {
   margin: 0;
   font-size: var(--text-sm);
   color: var(--text-body);
+  line-height: var(--leading-snug);
   word-break: break-word;
+}
+
+@media (max-width: 720px) {
+  .sb-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .sb-toolbar {
+    flex-wrap: wrap;
+  }
+  .sb-search {
+    max-width: none;
+    flex: 1 1 100%;
+    order: -1;
+  }
+  .sb-detail__row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
 }
 
 /* ───────────────────── 我的表单（PanelSheet 内的卡片网格 · PR-5）─────────────────────

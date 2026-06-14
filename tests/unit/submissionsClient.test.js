@@ -6,7 +6,7 @@
 // goes through apiFetch with `auth:true`, so the owner's session token is attached as
 // `Authorization: Bearer <token>`. We prove that by setting an owner token and
 // asserting the outgoing request carries it. A missing/expired session surfaces as a
-// 401 ApiError for SubmissionsView to route into login (onNeedLogin, §17.4).
+// 401 ApiError for SubmissionsContent to route into login (onNeedLogin, §17.4).
 //
 // We mock the lowest seam (global `fetch`) so these also pin path / method / the
 // { submissions, count } shape pass-through and the typed ApiError surface. The
@@ -23,16 +23,25 @@ function jsonResponse(body, init = {}) {
   });
 }
 
-// A §18.2 submissions payload: rows with recordId + fields (string OR string[] values)
-// + optional createdTime, plus the count.
+// A §18.2 submissions payload, **D1 主存投影**：每条提交是 { id, answers, createdAt, feishu }
+// （不再是旧飞书的 { recordId, fields, createdTime }）。answers 的 value 可为 string 或 string[]。
 const RESULT = {
   submissions: [
     {
-      recordId: "recAAA",
-      fields: { 姓名: "张三", 兴趣: ["阅读", "运动"] },
-      createdTime: 1700000000000,
+      id: "sub-AAA",
+      answers: [
+        { label: "姓名", value: "张三" },
+        { label: "兴趣", value: ["阅读", "运动"] },
+      ],
+      createdAt: "2026-06-10T08:00:00.000Z",
+      feishu: { recordId: "recAAA", syncedAt: "2026-06-10T08:00:05.000Z", error: null },
     },
-    { recordId: "recBBB", fields: { 姓名: "李四" } },
+    {
+      id: "sub-BBB",
+      answers: [{ label: "姓名", value: "李四" }],
+      createdAt: "2026-06-09T08:00:00.000Z",
+      feishu: { recordId: null, syncedAt: null, error: null },
+    },
   ],
   count: 2,
 };
@@ -83,38 +92,16 @@ describe("submissionsClient · listSubmissions", () => {
     });
   });
 
-  it("rejects with a 404 ApiError for an unknown slug (§18.5)", async () => {
+  it("rejects with a 404 ApiError for an unknown slug / 非本人表单 (§18.5)", async () => {
     setToken("jwt-owner");
-    const fetchMock = vi.fn(async () => jsonResponse({ error: "no such form" }, { status: 404 }));
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "form not found" }, { status: 404 }));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(listSubmissions("gone")).rejects.toMatchObject({ name: "ApiError", status: 404 });
   });
 
-  it("rejects with a 409 ApiError when the owner hasn't connected 飞书 (§18.5)", async () => {
-    setToken("jwt-owner");
-    const fetchMock = vi.fn(async () =>
-      jsonResponse({ error: "owner 未配置飞书" }, { status: 409 }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(listSubmissions("f8Kq2pXa")).rejects.toMatchObject({
-      name: "ApiError",
-      status: 409,
-      message: "owner 未配置飞书",
-    });
-  });
-
-  it("rejects with a 502 ApiError on an upstream (飞书) error (§18.5)", async () => {
-    setToken("jwt-owner");
-    const fetchMock = vi.fn(async () => jsonResponse({ error: "upstream" }, { status: 502 }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(listSubmissions("f8Kq2pXa")).rejects.toMatchObject({
-      name: "ApiError",
-      status: 502,
-    });
-  });
+  // D1 主存版本：读端不打飞书，故后端**不再**在此返回 409 未配飞书 / 502 上游错误。本读端只
+  // 区分 401（未登录）/ 404（不存在或非本人）；任何意外的非 2xx 仍统一收敛成 ApiError（见下）。
 });
 
 // Sanity: ApiError is the surface these calls reject with (keeps the import meaningful).

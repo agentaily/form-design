@@ -128,10 +128,12 @@ export interface SubmitInput {
   answers: Answer[];
 }
 
-/** Success body of POST /api/submit (SPEC §15.4): the new 飞书 record id. */
+/** Success body of POST /api/submit (SPEC §15.4, **D1 主存版本**)：`id` 是新提交在 D1 主存里的
+ *  稳定主键（crypto.randomUUID()）。飞书 record_id 已降为异步 best-effort 同步产物，**不在**此
+ *  同步返回（数据后台投影飞书同步状态，§18）——故这里是 `{ ok, id }`，不再是旧的 `{ ok, recordId }`。 */
 export interface SubmitResult {
   ok: true;
-  recordId: string;
+  id: string;
 }
 
 /**
@@ -153,14 +155,13 @@ export function getPublicForm(slug: string): Promise<PublicForm> {
 /**
  * Submit an answer set to a published form (SPEC §15/§16.5/§20). PUBLIC — sends NO
  * Authorization header (the answers come from the answerer, not the owner). Resolves
- * {@link SubmitResult} on 200. The page branches on the rejected {@link ApiError}'s
- * `status`:
+ * {@link SubmitResult} (`{ ok, id }`) on 200 — the提交已落 D1 主存。The page branches on the
+ * rejected {@link ApiError}'s `status`:
  *   - 400 → 缺必填 / 请求体形状非法 (the page may also pre-validate required client-side)
  *   - 404 → the form no longer exists
- *   - 409 → 表单未开放提交 (draft/closed, §20.2) OR owner 未配飞书 (§15.6) — distinguished
- *           by the backend's `{ error }` message, surfaced via ApiError.message
- *   - 502 → 上游(飞书)出错
- * Stub. Same no-Bearer build note as {@link getPublicForm}.
+ *   - 409 → 表单未开放提交 (draft/closed, §20.2)，由后端 `{ error }` 文案说明，经 ApiError.message 透出
+ * （D1 主存版本：未配飞书**不再** 409——照常落 D1 返回成功；飞书同步在后台 best-effort，故也**无** 502。）
+ * Same no-Bearer build note as {@link getPublicForm}.
  */
 export function submitForm(slug: string, answers: Answer[]): Promise<SubmitResult> {
   const body: SubmitInput = { formSlug: slug, answers };
