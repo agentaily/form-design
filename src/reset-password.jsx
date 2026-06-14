@@ -26,6 +26,7 @@ import { Input, Button, Alert, Empty } from "@agentaily/design-system";
 import { Icon } from "./chat.jsx";
 import { confirmPasswordReset as defaultConfirm } from "./core/auth";
 import { ApiError } from "./core/apiClient";
+import { L } from "./core/i18n";
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -58,11 +59,16 @@ export function ResetPasswordPage({
     const pw = password;
     // Local pre-checks before the round-trip: length (mirrors §17.2 ≥ 8) + match.
     if (pw.length < MIN_PASSWORD_LENGTH) {
-      setError(`密码至少 ${MIN_PASSWORD_LENGTH} 位。`);
+      setError(
+        L(
+          `密码至少 ${MIN_PASSWORD_LENGTH} 位。`,
+          `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`,
+        ),
+      );
       return;
     }
     if (pw !== confirm) {
-      setError("两次输入的密码不一致。");
+      setError(L("两次输入的密码不一致。", "The two passwords don’t match."));
       return;
     }
     setBusy(true);
@@ -86,19 +92,25 @@ export function ResetPasswordPage({
       <div className="auth-land__state">
         <Empty
           icon={<Icon name="lock" size={18} />}
-          title="链接无效"
-          description="这个重置链接缺少必要的信息，可能已损坏。请回到登录页重新发起「忘记密码」。"
+          title={L("链接无效", "Invalid link")}
+          description={L(
+            "这个重置链接缺少必要的信息，可能已损坏。请回到登录页重新发起「忘记密码」。",
+            "This reset link is missing required information and may be broken. Head back to the sign-in page and start “Forgot password” again.",
+          )}
         />
         <Button variant="secondary" full onClick={onBackToLogin}>
-          回到登录
+          {L("回到登录", "Back to sign in")}
         </Button>
       </div>
     );
   } else if (done) {
     body = (
       <div className="auth-land__state">
-        <Alert variant="ok" title="改密成功">
-          你的密码已重置，请用新密码重新登录。
+        <Alert variant="ok" title={L("改密成功", "Password changed")}>
+          {L(
+            "你的密码已重置，请用新密码重新登录。",
+            "Your password has been reset — sign in again with your new password.",
+          )}
         </Alert>
         <Button
           variant="primary"
@@ -106,7 +118,7 @@ export function ResetPasswordPage({
           icon={<Icon name="check" size={14} />}
           onClick={onBackToLogin}
         >
-          回到登录
+          {L("回到登录", "Back to sign in")}
         </Button>
       </div>
     );
@@ -120,19 +132,22 @@ export function ResetPasswordPage({
         }}
       >
         <Input
-          label="新密码"
+          label={L("新密码", "New password")}
           type="password"
           required
-          placeholder="设置一个至少 8 位的新密码"
+          placeholder={L(
+            "设置一个至少 8 位的新密码",
+            "Set a new password of at least 8 characters",
+          )}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           autoFocus
         />
         <Input
-          label="确认新密码"
+          label={L("确认新密码", "Confirm new password")}
           type="password"
           required
-          placeholder="再次输入新密码"
+          placeholder={L("再次输入新密码", "Enter your new password again")}
           value={confirm}
           error={error || undefined}
           onChange={(e) => setConfirm(e.target.value)}
@@ -147,7 +162,7 @@ export function ResetPasswordPage({
           icon={<Icon name="check" size={14} />}
           onClick={submit}
         >
-          {busy ? "提交中…" : "重置密码"}
+          {busy ? L("提交中…", "Submitting…") : L("重置密码", "Reset password")}
         </Button>
       </form>
     );
@@ -157,8 +172,13 @@ export function ResetPasswordPage({
     <div className="pf-page">
       <div className="pf-card auth-land">
         <header className="pf-head">
-          <h1 className="pf-title">重置密码</h1>
-          <p className="pf-desc">为你的 agentaily forms 账户设置一个新密码。</p>
+          <h1 className="pf-title">{L("重置密码", "Reset password")}</h1>
+          <p className="pf-desc">
+            {L(
+              "为你的 agentaily forms 账户设置一个新密码。",
+              "Set a new password for your agentaily forms account.",
+            )}
+          </p>
         </header>
         {body}
         <p className="pf-foot ax-label">Powered by agentaily forms</p>
@@ -171,8 +191,18 @@ export function ResetPasswordPage({
 // 「链接失效 / 密码过弱」 from §24.3 — the backend does not distinguish, so neither do we.
 function messageFor(e) {
   if (e instanceof ApiError) {
-    if (e.status === 400) return "链接已失效或密码过弱（至少 8 位），请重新发起找回密码。";
-    return e.message || `重置失败（${e.status}），请稍后重试。`;
+    if (e.status === 400)
+      return L(
+        "链接已失效或密码过弱（至少 8 位），请重新发起找回密码。",
+        "This link has expired or the password is too weak (at least 8 characters). Please start password recovery again.",
+      );
+    return (
+      e.message ||
+      L(
+        `重置失败（${e.status}），请稍后重试。`,
+        `Reset failed (${e.status}). Please try again shortly.`,
+      )
+    );
   }
-  return "无法连接到后端，请稍后重试。";
+  return L("无法连接到后端，请稍后重试。", "Couldn’t reach the server. Please try again shortly.");
 }

@@ -59,10 +59,12 @@ import {
   Avatar,
   Field,
   Input,
+  Select,
   Button,
   Form,
 } from "@agentaily/design-system";
 import { Icon } from "./chat.jsx";
+import { L, getLocale, setLocale } from "./core/i18n";
 import {
   getConfig as defaultGetConfig,
   saveConfig as defaultSaveConfig,
@@ -91,20 +93,26 @@ const IDLE = { status: "idle", result: undefined };
  */
 function AccountSection({ user, form, onLogout }) {
   const u = user || {};
-  const ident = u.displayName || u.email || "未登录";
+  const ident = u.displayName || u.email || L("未登录", "Not signed in");
   // Register the field WITH a maxLength rule so a too-long name is caught before submit
   // (the SettingsSaveBar gates 保存 on validity); the backend 400 is only a fallback.
   const dn = form.field("displayName", {
     maxLength: {
       value: MAX_DISPLAY_NAME_LENGTH,
-      message: `显示名称最多 ${MAX_DISPLAY_NAME_LENGTH} 个字符`,
+      message: L(
+        `显示名称最多 ${MAX_DISPLAY_NAME_LENGTH} 个字符`,
+        `Display name can be at most ${MAX_DISPLAY_NAME_LENGTH} characters`,
+      ),
     },
   });
   return (
     <PageSection
-      eyebrow="账户 · ACCOUNT"
-      title="你的账户"
-      description="管理你的登录身份与个人偏好。这些设置只对你自己可见。"
+      eyebrow={L("账户 · ACCOUNT", "Account · ACCOUNT")}
+      title={L("你的账户", "Your account")}
+      description={L(
+        "管理你的登录身份与个人偏好。这些设置只对你自己可见。",
+        "Manage your sign-in identity and personal preferences. These settings are visible only to you.",
+      )}
     >
       <div className="acct-id">
         <Avatar name={ident} size="lg" />
@@ -118,14 +126,17 @@ function AccountSection({ user, form, onLogout }) {
           icon={<Icon name="logout" size={14} />}
           onClick={onLogout}
         >
-          退出登录
+          {L("退出登录", "Sign out")}
         </Button>
       </div>
 
       <div className="acct-fields">
         <Field
-          label="显示名称"
-          hint="出现在你创建的表单与提交记录里。留空则用邮箱。"
+          label={L("显示名称", "Display name")}
+          hint={L(
+            "出现在你创建的表单与提交记录里。留空则用邮箱。",
+            "Shown on the forms you create and in submission records. Leave blank to use your email.",
+          )}
           error={dn.error}
         >
           <Input
@@ -133,11 +144,30 @@ function AccountSection({ user, form, onLogout }) {
             value={dn.value || ""}
             onChange={dn.onChange}
             onBlur={dn.onBlur}
-            placeholder="如：陈伟"
+            placeholder={L("如：陈伟", "e.g. Alex Chen")}
           />
         </Field>
-        <Field label="登录邮箱" hint="邮箱用于登录，暂不可修改。">
+        <Field
+          label={L("登录邮箱", "Sign-in email")}
+          hint={L(
+            "邮箱用于登录，暂不可修改。",
+            "Email is used to sign in and can't be changed for now.",
+          )}
+        >
           <Input value={u.email || ""} disabled />
+        </Field>
+        <Field
+          label={L("语言 / Language", "Language / 语言")}
+          hint={L("切换后页面会重新加载。", "The page reloads after switching.")}
+        >
+          <Select
+            value={getLocale()}
+            onChange={(e) => setLocale(e.target.value)}
+            options={[
+              { value: "zh", label: "中文" },
+              { value: "en", label: "English" },
+            ]}
+          />
         </Field>
       </div>
     </PageSection>
@@ -182,17 +212,20 @@ function FeishuConnectionCard({
   return (
     <ConnectionCard
       icon="table"
-      title="飞书多维表格"
-      desc="连接你的飞书自建应用。连上后，发布表单时会自动为它创建一张多维表格，每次提交写入一行——不用你先去飞书建表。"
+      title={L("飞书多维表格", "Feishu Bitable")}
+      desc={L(
+        "连接你的飞书自建应用。连上后，发布表单时会自动为它创建一张多维表格，每次提交写入一行——不用你先去飞书建表。",
+        "Connect your Feishu custom app. Once linked, publishing a form auto-creates a Bitable for it and writes one row per submission — no need to build the table yourself.",
+      )}
       status={status}
       result={result}
       onTest={onTest}
       testDisabled={testDisabled}
-      idleHint="填写应用凭证后测试连接"
+      idleHint={L("填写应用凭证后测试连接", "Enter app credentials, then test the connection")}
     >
       <Input
         label="App ID"
-        hint="应用标识，可公开。"
+        hint={L("应用标识，可公开。", "App identifier — safe to expose.")}
         error={appIdError}
         mono
         value={appId}
@@ -205,30 +238,53 @@ function FeishuConnectionCard({
         value={secret}
         onChange={onSecretChange}
         placeholder={
-          secretMaskedNow ? "已保存 ········  ·  留空则保持不变" : "应用密钥（与 App ID 配对）"
+          secretMaskedNow
+            ? L("已保存 ········  ·  留空则保持不变", "Saved ········  ·  leave blank to keep")
+            : L("应用密钥（与 App ID 配对）", "App secret (paired with App ID)")
         }
         hint={
-          secretMaskedNow ? "已存密钥 · 留空表示不修改，输入新值即覆盖" : "应用密钥，加密存储。"
+          secretMaskedNow
+            ? L(
+                "已存密钥 · 留空表示不修改，输入新值即覆盖",
+                "Stored · leave blank to keep, type a new value to overwrite",
+              )
+            : L("应用密钥，加密存储。", "App secret — stored encrypted.")
         }
         error={secretError}
       />
       <HelpSteps
-        title="如何获取飞书应用凭证？"
+        title={L("如何获取飞书应用凭证？", "How to get Feishu app credentials")}
         steps={[
           <React.Fragment>
-            打开飞书开放平台 <code>open.feishu.cn</code>，创建一个「企业自建应用」。
+            {L("打开飞书开放平台 ", "Open the Feishu Open Platform ")}
+            <code>open.feishu.cn</code>
+            {L("，创建一个「企业自建应用」。", " and create a “custom app”.")}
           </React.Fragment>,
           <React.Fragment>
-            在「凭证与基础信息」中复制 <code>App ID</code> 与 <code>App Secret</code>。
+            {L("在「凭证与基础信息」中复制 ", "In “Credentials & Basic Info”, copy the ")}
+            <code>App ID</code>
+            {L(" 与 ", " and ")}
+            <code>App Secret</code>
+            {L("。", ".")}
           </React.Fragment>,
           <React.Fragment>
-            到「权限管理」开通多维表格读写权限 <code>bitable:app</code>，并发布版本。
+            {L(
+              "到「权限管理」开通多维表格读写权限 ",
+              "Under “Permissions”, enable Bitable read/write ",
+            )}
+            <code>bitable:app</code>
+            {L("，并发布版本。", ", then publish a version.")}
           </React.Fragment>,
           <React.Fragment>
-            连接后由 Agentaily <strong>自动建表</strong>，无需你手动创建多维表格。
+            {L("连接后由 Agentaily ", "After connecting, Agentaily ")}
+            <strong>{L("自动建表", "creates the table automatically")}</strong>
+            {L("，无需你手动创建多维表格。", " — no manual Bitable setup needed.")}
           </React.Fragment>,
         ]}
-        link={{ href: "https://open.feishu.cn", label: "打开飞书开放平台" }}
+        link={{
+          href: "https://open.feishu.cn",
+          label: L("打开飞书开放平台", "Open Feishu Open Platform"),
+        }}
       />
     </ConnectionCard>
   );
@@ -328,7 +384,7 @@ export function SettingsOverlay({
         if (alive) echo(cfg);
       })
       .catch((e) => {
-        if (alive) handleError(e, "登录后配置集成");
+        if (alive) handleError(e, L("登录后配置集成", "Sign in to configure integrations"));
       })
       .finally(() => {
         if (alive) setLoading(false);
@@ -393,8 +449,15 @@ export function SettingsOverlay({
       setDirty(false);
       setSaved(true);
     } catch (e) {
-      if (handleError(e, "登录后配置集成")) return; // 401 → onNeedLogin, no inline error
-      applyBackendError(e instanceof ApiError ? e.message : "保存失败，请检查网络或后端地址。");
+      if (handleError(e, L("登录后配置集成", "Sign in to configure integrations"))) return; // 401 → onNeedLogin, no inline error
+      applyBackendError(
+        e instanceof ApiError
+          ? e.message
+          : L(
+              "保存失败，请检查网络或后端地址。",
+              "Save failed — check your network or backend address.",
+            ),
+      );
     } finally {
       setSaving(false);
     }
@@ -409,8 +472,11 @@ export function SettingsOverlay({
       setDsConn(probeToConn(r.deepseek));
       setFsConn(probeToConn(r.feishu));
     } catch (e) {
-      if (handleError(e, "登录后配置集成")) return; // 401 → onNeedLogin
-      const failed = { status: "error", result: "无法连接到后端，请检查网络。" };
+      if (handleError(e, L("登录后配置集成", "Sign in to configure integrations"))) return; // 401 → onNeedLogin
+      const failed = {
+        status: "error",
+        result: L("无法连接到后端，请检查网络。", "Can't reach the backend — check your network."),
+      };
       setDsConn(failed);
       setFsConn(failed);
     }
@@ -432,8 +498,11 @@ export function SettingsOverlay({
   };
 
   const intro = loading
-    ? "加载中…"
-    : "连接你自己的 DeepSeek key 与飞书多维表格 —— 对话设计走你的额度，答题落库进你的租户。";
+    ? L("加载中…", "Loading…")
+    : L(
+        "连接你自己的 DeepSeek key 与飞书多维表格 —— 对话设计走你的额度，答题落库进你的租户。",
+        "Connect your own DeepSeek key and Feishu Bitable — conversational design runs on your quota, and answers land in your tenant.",
+      );
 
   // ── 账户 tab state ────────────────────────────────────────────────────────────
   // Form.useForm owns the editable 显示名; SettingsSaveBar (form mode) gates 保存 on dirty+valid,
@@ -451,13 +520,15 @@ export function SettingsOverlay({
       onProfileSaved(me);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
-        onNeedLogin("登录后管理你的账户");
+        onNeedLogin(L("登录后管理你的账户", "Sign in to manage your account"));
         return;
       }
       // A backend 400 (e.g. 显示名称过长 — normally caught client-side) surfaces on the field.
       accountForm.setError(
         "displayName",
-        e instanceof ApiError ? e.message : "保存失败，请检查网络后重试。",
+        e instanceof ApiError
+          ? e.message
+          : L("保存失败，请检查网络后重试。", "Save failed — check your network and try again."),
       );
     }
   };
@@ -480,12 +551,12 @@ export function SettingsOverlay({
   return (
     <SettingsSheet
       open={open}
-      crumb="设置"
-      label="设置"
+      crumb={L("设置", "Settings")}
+      label={L("设置", "Settings")}
       onClose={onClose}
       nav={[
-        { id: "account", label: "账户", icon: "user" },
-        { id: "integrations", label: "集成", icon: "plug" },
+        { id: "account", label: L("账户", "Account"), icon: "user" },
+        { id: "integrations", label: L("集成", "Integrations"), icon: "plug" },
       ]}
       active={section}
       onNavigate={onNavigate}
@@ -494,7 +565,11 @@ export function SettingsOverlay({
       {section === "account" ? (
         <AccountSection user={user} form={accountForm} onLogout={onLogout} />
       ) : (
-        <PageSection eyebrow="集成 · INTEGRATIONS" title="连接你的服务" description={intro}>
+        <PageSection
+          eyebrow={L("集成 · INTEGRATIONS", "Integrations · INTEGRATIONS")}
+          title={L("连接你的服务", "Connect your services")}
+          description={intro}
+        >
           {/* 自组合就绪栏(替代已移除的 IntegrationSettings 内置 rail):单个 dot 只 gate DeepSeek;
               飞书显示「已连接 / 可选」,不参与 gating(chat13)。 */}
           <div className="d-ready">
@@ -504,16 +579,30 @@ export function SettingsOverlay({
             <div className="d-ready__txt">
               {dsReady ? (
                 <span>
-                  <strong>DeepSeek 已连接，可以开始运行。</strong>飞书多维表格为可选。
+                  <strong>
+                    {L(
+                      "DeepSeek 已连接，可以开始运行。",
+                      "DeepSeek connected — you're ready to go.",
+                    )}
+                  </strong>
+                  {L("飞书多维表格为可选。", "Feishu Bitable is optional.")}
                 </span>
               ) : (
                 <span>
-                  连接 <strong>DeepSeek</strong>{" "}
-                  后即可开始运行；飞书多维表格为可选，连上后提交会自动写入。
+                  {L("连接 ", "Connect ")}
+                  <strong>DeepSeek</strong>
+                  {L(
+                    " 后即可开始运行；飞书多维表格为可选，连上后提交会自动写入。",
+                    " to get started; Feishu Bitable is optional — once linked, submissions are written automatically.",
+                  )}
                 </span>
               )}
             </div>
-            <span className="d-ready__count">{fsReady ? "飞书 · 已连接" : "飞书 · 可选"}</span>
+            <span className="d-ready__count">
+              {fsReady
+                ? L("飞书 · 已连接", "Feishu · Connected")
+                : L("飞书 · 可选", "Feishu · Optional")}
+            </span>
           </div>
 
           <div className="d-integ-cards">
@@ -571,7 +660,7 @@ export function SettingsOverlay({
 // state. ok → green "已连接" pill + the (optional) note; not-ok is a NORMAL result ("未配置" /
 // "凭据无效"), expressed as the card's "error" state carrying that note — NOT a request failure.
 function probeToConn(probe) {
-  if (!probe) return { status: "error", result: "未配置" };
-  if (probe.ok) return { status: "ok", result: probe.message || "已连接" };
-  return { status: "error", result: probe.message || "不可连通" };
+  if (!probe) return { status: "error", result: L("未配置", "Not configured") };
+  if (probe.ok) return { status: "ok", result: probe.message || L("已连接", "Connected") };
+  return { status: "error", result: probe.message || L("不可连通", "Unreachable") };
 }

@@ -56,6 +56,7 @@ import {
   submitForm as defaultSubmitForm,
 } from "./core/publicClient";
 import { ApiError } from "./core/apiClient";
+import { L } from "./core/i18n";
 
 /**
  * Map a backend PublicFieldType (SPEC §16.2) to the design-system control the public
@@ -195,7 +196,7 @@ function PublicField({ field, value, onChange }) {
   }
 
   if (type === "select") {
-    const opts = [{ value: "", label: "请选择" }, ...(options || [])];
+    const opts = [{ value: "", label: L("请选择", "Select") }, ...(options || [])];
     return (
       <Field label={label} required={required}>
         <Select
@@ -271,7 +272,12 @@ export function PublicFormPage({
     const fields = form.fields || [];
     const missing = fields.find((f) => f.required && !isAnswered(f, values[f.id]));
     if (missing) {
-      setRequiredError(`「${missing.label}」为必填项，请填写后再提交。`);
+      setRequiredError(
+        L(
+          `「${missing.label}」为必填项，请填写后再提交。`,
+          `“${missing.label}” is required — please fill it in before submitting.`,
+        ),
+      );
       return;
     }
     setRequiredError("");
@@ -285,14 +291,18 @@ export function PublicFormPage({
       if (e instanceof ApiError) {
         if (e.status === 400 || e.status === 409) {
           // surface the backend message verbatim (缺必填 / 已停止收集 / 未配飞书)
-          setSubmitError(e.message || "提交失败，请稍后重试。");
+          setSubmitError(
+            e.message || L("提交失败，请稍后重试。", "Submission failed, please try again later."),
+          );
         } else if (e.status === 404) {
-          setSubmitError("该表单不存在或已被删除。");
+          setSubmitError(
+            L("该表单不存在或已被删除。", "This form doesn’t exist or has been deleted."),
+          );
         } else {
-          setSubmitError("提交失败，请稍后重试。");
+          setSubmitError(L("提交失败，请稍后重试。", "Submission failed, please try again later."));
         }
       } else {
-        setSubmitError("提交失败，请稍后重试。");
+        setSubmitError(L("提交失败，请稍后重试。", "Submission failed, please try again later."));
       }
     } finally {
       setSubmitting(false);
@@ -310,14 +320,17 @@ export function PublicFormPage({
     body = (
       <Empty
         icon={<Icon name="layout" size={18} />}
-        title="表单不存在"
-        description="这个链接可能已失效，或表单已被删除。请向分享给你的人确认。"
+        title={L("表单不存在", "Form not found")}
+        description={L(
+          "这个链接可能已失效，或表单已被删除。请向分享给你的人确认。",
+          "This link may have expired, or the form has been deleted. Please check with whoever shared it with you.",
+        )}
       />
     );
   } else if (loadState === "error" || !form) {
     body = (
-      <Alert variant="danger" title="加载失败">
-        无法加载这个表单，请稍后重试。
+      <Alert variant="danger" title={L("加载失败", "Couldn’t load")}>
+        {L("无法加载这个表单，请稍后重试。", "We couldn’t load this form, please try again later.")}
       </Alert>
     );
   } else if (done) {
@@ -325,8 +338,11 @@ export function PublicFormPage({
       <div className="pf-done">
         <Empty
           icon={<Icon name="check" size={18} />}
-          title="提交成功"
-          description="我们已经收到你的填写内容，可以关闭页面了。"
+          title={L("提交成功", "Submitted")}
+          description={L(
+            "我们已经收到你的填写内容，可以关闭页面了。",
+            "We’ve received your responses — you can close this page now.",
+          )}
         />
       </div>
     );
@@ -342,18 +358,18 @@ export function PublicFormPage({
           />
         ))}
         {requiredError ? (
-          <Alert variant="warn" title="还差一点">
+          <Alert variant="warn" title={L("还差一点", "Almost there")}>
             {requiredError}
           </Alert>
         ) : null}
         {submitError ? (
-          <Alert variant="danger" title="无法提交">
+          <Alert variant="danger" title={L("无法提交", "Couldn’t submit")}>
             {submitError}
           </Alert>
         ) : null}
         <div className="pf-actions">
           <Button variant="primary" size="lg" full disabled={submitting} onClick={onSubmit}>
-            {submitting ? "提交中…" : "提交"}
+            {submitting ? L("提交中…", "Submitting…") : L("提交", "Submit")}
           </Button>
         </div>
       </div>

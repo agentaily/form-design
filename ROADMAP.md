@@ -80,6 +80,8 @@
 - ✅ 集成设置 modal 接 `GET/POST /api/config` + `POST /api/config/test`：`settings.jsx`（掩码回显 / 不重交密文 §12.4 / 401 引导登录 / 逐条测连接）+ `core/configClient.ts` —— **已完成**（`integration-settings.spec.jsx` / `app-settings-login.spec.jsx`）
 - ✅ 发布 + 表单管理：`forms-panel.jsx` + `PublishFeedback` + `core/formsClient.ts`（发布 `POST /api/forms`、列表 / 改状态 / 删 `GET/PATCH/DELETE /api/forms`）—— **已完成**（`form-publish-mgmt.spec.jsx` / `app-forms-login.spec.jsx`）
 - ✅ 公开填写页 + 数据后台：`public-form.jsx`（`/f/:slug` 渲染 + `POST /api/submit`，`core/publicClient.ts`，不带 Bearer）+ `submissions-view.jsx`（`GET /api/forms/:slug/submissions`，`core/submissionsClient.ts`）—— **已完成**（`public-fill.spec.jsx` / `fill-and-submit.spec.jsx` / `data-dashboard.spec.jsx`）
+- ✅ **i18n 国际化（en/zh，PR #67 / design-sync `P9-DW3zm`）**：极简双语层 `src/core/i18n.ts` —— 调用点翻译 `L("中文","English")`（无字典不漂移）、locale 读 `localStorage agentaily.locale.v1`（默认 zh、加载即缓存、`<html lang>` 反映）、`setLocale` 写入 + `location.reload()` 应用。把 12 个 `src/*.jsx` 的硬编码中文显示串逐个包成 `L(zh,en)`（**zh 逐字不变 → 非破坏，断言中文的现有测试全绿**），设置「账户」tab 加 DS `Select` 语言切换器（owner 受众）。TDD（`tests/unit/i18n.test.js` + en 渲染冒烟 `i18n-render.test.jsx`）。**已知小缺口**：`core/markup.ts` 字段类型标签（指向修改工具）暂留 zh；登录前页面（signin/verify）无切换入口（主切换器在设置）。
+- ✅ **邮箱验证落地页接 DS 0.12.0 `VerifyEmailPage`（PR #67）**：`/verify-email` 从手搓 Empty/Button 垫片改为消费官方 DS 组件（bump `@agentaily/design-system ^0.11.0→^0.12.0`）。后端 server 端 confirm + 302 带 `?status=` 的架构**不变**（§23.4），故组件走 **controlled 模式**（传 `status`/`error` 展示已决 verdict、零后端契约变更），注入 `onResend`（owner-only `requestEmailVerification`）/ `returnTo` / `onContinue`（内部回设计器，无开放重定向）/ `onBackToSignIn` + 全 i18n `copy`；硬约束（失败不自动跳 / 成功倒计时 / 重发冷却 + 幂等 +「重发≠已验证」）由组件保证。`verify-email.test.jsx` 重写。
 
 ### 产品（SPEC §10 Phase 4）
 

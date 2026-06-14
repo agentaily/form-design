@@ -28,43 +28,58 @@ import {
 } from "./core/auth";
 import { ApiError } from "./core/apiClient";
 import { currentSearch } from "./core/router";
+import { L } from "./core/i18n";
 
 const MIN_PASSWORD_LENGTH = 8;
 
 // The single neutral copy shown after any 找回密码 发起 — registered or not, success or
 // backend hiccup — so the page never leaks whether the email exists (§24.5).
-const RESET_NEUTRAL_COPY = "若该邮箱已注册，我们已发送重置链接，请查收邮件。";
+const RESET_NEUTRAL_COPY = L(
+  "若该邮箱已注册，我们已发送重置链接，请查收邮件。",
+  "If that email is registered, we've sent a reset link — check your inbox.",
+);
 
 // Localized copy for the DS SignInPage: per-mode strings under signin/signup, shared
 // labels/placeholders/errors at the top level. `terms: null` hides the signup terms line.
 const SIGNIN_COPY = {
   signin: {
-    title: "登录 Agentaily Forms",
-    submit: "登录",
-    switchText: "还没有账户？",
-    switchCta: "注册一个",
+    title: L("登录 Agentaily Forms", "Sign in to Agentaily Forms"),
+    submit: L("登录", "Sign in"),
+    switchText: L("还没有账户？", "No account yet?"),
+    switchCta: L("注册一个", "Create one"),
   },
   signup: {
-    title: "创建 owner 账户",
-    subtitle: "用邮箱 + 密码注册即成为 owner（密码至少 8 位），注册即登录。",
-    submit: "注册并继续",
-    switchText: "已经有账户？",
-    switchCta: "去登录",
+    title: L("创建 owner 账户", "Create your owner account"),
+    subtitle: L(
+      "用邮箱 + 密码注册即成为 owner（密码至少 8 位），注册即登录。",
+      "Register with an email + password to become the owner (password ≥ 8 chars); you're signed in right away.",
+    ),
+    submit: L("注册并继续", "Register & continue"),
+    switchText: L("已经有账户？", "Already have an account?"),
+    switchCta: L("去登录", "Sign in"),
   },
-  labels: { email: "邮箱", password: "密码", confirm: "确认密码", forgot: "忘记密码？" },
+  labels: {
+    email: L("邮箱", "Email"),
+    password: L("密码", "Password"),
+    confirm: L("确认密码", "Confirm password"),
+    forgot: L("忘记密码？", "Forgot password?"),
+  },
   placeholders: {
     email: "owner@example.com",
-    password: "输入登录密码",
-    passwordNew: "设置一个至少 8 位的密码",
-    confirm: "再次输入密码",
+    password: L("输入登录密码", "Enter your password"),
+    passwordNew: L("设置一个至少 8 位的密码", "Set a password (≥ 8 chars)"),
+    confirm: L("再次输入密码", "Re-enter your password"),
   },
   errors: {
-    emailRequired: "请输入邮箱",
-    emailInvalid: "请输入有效的邮箱地址",
-    passwordRequired: "请输入密码",
-    passwordShort: `密码至少 ${MIN_PASSWORD_LENGTH} 位`,
-    confirmRequired: "请再次输入密码",
-    confirmMismatch: "两次输入的密码不一致",
+    emailRequired: L("请输入邮箱", "Enter your email"),
+    emailInvalid: L("请输入有效的邮箱地址", "Enter a valid email address"),
+    passwordRequired: L("请输入密码", "Enter your password"),
+    passwordShort: L(
+      `密码至少 ${MIN_PASSWORD_LENGTH} 位`,
+      `Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+    ),
+    confirmRequired: L("请再次输入密码", "Re-enter your password"),
+    confirmMismatch: L("两次输入的密码不一致", "The two passwords don't match"),
   },
   terms: null,
 };
@@ -106,7 +121,12 @@ export function SignInScreen({
   // The gated `reason` (e.g. 登录后即可分享…) rides in as the signin subtitle.
   const copy = {
     ...SIGNIN_COPY,
-    signin: { ...SIGNIN_COPY.signin, subtitle: reason || "登录以继续编辑与发布你的表单。" },
+    signin: {
+      ...SIGNIN_COPY.signin,
+      subtitle:
+        reason ||
+        L("登录以继续编辑与发布你的表单。", "Sign in to keep editing and publishing your forms."),
+    },
   };
 
   // SignInPage validates client-side first, then calls this with the clean values.
@@ -179,7 +199,7 @@ export function SignInScreen({
       {/* 找回密码 (§24.5) — anti-enumeration neutral copy in every branch */}
       <Dialog
         open={forgotOpen}
-        title="找回密码"
+        title={L("找回密码", "Reset your password")}
         onClose={() => setForgotOpen(false)}
         footer={
           resetSent ? (
@@ -188,7 +208,7 @@ export function SignInScreen({
               icon={<Icon name="check" size={14} />}
               onClick={() => setForgotOpen(false)}
             >
-              好的
+              {L("好的", "Got it")}
             </Button>
           ) : (
             <Button
@@ -197,20 +217,26 @@ export function SignInScreen({
               disabled={!resetEmail.trim() || busy}
               onClick={submitReset}
             >
-              {busy ? "发送中…" : "发送重置链接"}
+              {busy ? L("发送中…", "Sending…") : L("发送重置链接", "Send reset link")}
             </Button>
           )
         }
       >
         <div className="d-auth-body">
           {resetSent ? (
-            <Alert variant="ok" title="已发送（若该邮箱已注册）">
+            <Alert
+              variant="ok"
+              title={L("已发送（若该邮箱已注册）", "Sent (if that email is registered)")}
+            >
               {RESET_NEUTRAL_COPY}
             </Alert>
           ) : (
             <React.Fragment>
               <p className="d-auth__note">
-                输入你的注册邮箱，我们会发送一个重置链接。出于安全，无论邮箱是否注册，提示都相同。
+                {L(
+                  "输入你的注册邮箱，我们会发送一个重置链接。出于安全，无论邮箱是否注册，提示都相同。",
+                  "Enter your registered email and we'll send a reset link. For your security, the message is the same whether or not the email is registered.",
+                )}
               </p>
               <form
                 onSubmit={(e) => {
@@ -219,7 +245,7 @@ export function SignInScreen({
                 }}
               >
                 <Input
-                  label="邮箱"
+                  label={L("邮箱", "Email")}
                   type="email"
                   required
                   placeholder="owner@example.com"
@@ -248,12 +274,28 @@ export function SignInScreen({
 //   • 400 → 弱密码 / 非法邮箱 (register backstop)  • else → network / backend
 export function messageFor(e, registering) {
   if (e instanceof ApiError) {
-    if (e.status === 409) return "该邮箱已注册，请直接登录。";
-    if (e.status === 401) return "账号或密码错误，请重试。";
+    if (e.status === 409)
+      return L("该邮箱已注册，请直接登录。", "That email is already registered — please sign in.");
+    if (e.status === 401)
+      return L("账号或密码错误，请重试。", "Wrong email or password. Please try again.");
     if (e.status === 400) {
-      return registering ? "邮箱格式不对或密码过弱（至少 8 位）。" : "请求有误，请检查邮箱与密码。";
+      return registering
+        ? L(
+            "邮箱格式不对或密码过弱（至少 8 位）。",
+            "Invalid email or weak password (at least 8 characters).",
+          )
+        : L("请求有误，请检查邮箱与密码。", "Bad request — check your email and password.");
     }
-    return e.message || `${registering ? "注册" : "登录"}失败（${e.status}）。`;
+    return (
+      e.message ||
+      L(
+        `${registering ? "注册" : "登录"}失败（${e.status}）。`,
+        `${registering ? "Sign-up" : "Sign-in"} failed (${e.status}).`,
+      )
+    );
   }
-  return "无法连接到后端，请检查网络或后端地址（VITE_API_BASE）。";
+  return L(
+    "无法连接到后端，请检查网络或后端地址（VITE_API_BASE）。",
+    "Couldn't reach the backend — check your network or the API base (VITE_API_BASE).",
+  );
 }

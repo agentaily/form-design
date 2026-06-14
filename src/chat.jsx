@@ -8,6 +8,7 @@
 //   • exports `renderChatTurn`, the per-turn renderer fed to <ConversationThread
 //     renderTurn>, mapping our message model onto the DS chat/ai atoms.
 import React from "react";
+import { L } from "./core/i18n";
 import {
   Message,
   Markdown,
@@ -55,7 +56,7 @@ export function renderChatTurn(m, ctx, onSuggest) {
   }
   if (m.kind === "error") {
     return (
-      <Alert variant="danger" title="对话出错">
+      <Alert variant="danger" title={L("对话出错", "Conversation error")}>
         {m.text}
       </Alert>
     );
