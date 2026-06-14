@@ -1,5 +1,11 @@
 # agentaily-forms
 
+## 0.13.0
+
+### Minor Changes
+
+- [#67](https://github.com/agentaily/form-design/pull/67) [`10c21c5`](https://github.com/agentaily/form-design/commit/10c21c54c939f9670a3840b741f9a5d452389cb1) Thanks [@yarnovo](https://github.com/yarnovo)! - i18n 国际化（en/zh 双语层 `src/core/i18n.ts` + 逐文件 `L(zh,en)` + 设置语言切换器）+ 邮箱验证落地页接入 DS 0.12.0 官方 `VerifyEmailPage`（controlled 模式，零后端契约变更）。design-sync handoff `P9-DW3zm`。
+
 ## 0.12.0
 
 ### Minor Changes
