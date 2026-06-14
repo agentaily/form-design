@@ -20,9 +20,18 @@ describe("chatModels · isValidChatModel", () => {
     }
   });
 
-  it("accepts the current shipping model ids (DeepSeek-V4-Flash / DeepSeek-V4-Pro)", () => {
-    expect(isValidChatModel("DeepSeek-V4-Flash")).toBe(true);
-    expect(isValidChatModel("DeepSeek-V4-Pro")).toBe(true);
+  it("accepts the current shipping model ids — the lowercase API ids (deepseek-v4-flash / -pro)", () => {
+    // The wire value is the case-sensitive lowercase API id (the camelCase 显示名 lives only on
+    // label/pill); these are what the backend whitelist expects.
+    expect(isValidChatModel("deepseek-v4-flash")).toBe(true);
+    expect(isValidChatModel("deepseek-v4-pro")).toBe(true);
+  });
+
+  it("rejects the camelCase DISPLAY names — they 400 upstream, must never be forwarded", () => {
+    // The original bug: the camelCase display name was sent as the wire `model` and 400'd.
+    // It is NOT a valid wire value — only the lowercase id is.
+    expect(isValidChatModel("DeepSeek-V4-Flash")).toBe(false);
+    expect(isValidChatModel("DeepSeek-V4-Pro")).toBe(false);
   });
 
   it("returns false for an unknown / retired value (must NOT be forwarded — backend 400s)", () => {
@@ -42,9 +51,9 @@ describe("chatModels · isValidChatModel", () => {
 });
 
 describe("chatModels · chatModelPill", () => {
-  it("returns the matching option's pill for a known value", () => {
-    expect(chatModelPill("DeepSeek-V4-Flash")).toBe("DeepSeek · V4-Flash");
-    expect(chatModelPill("DeepSeek-V4-Pro")).toBe("DeepSeek · V4-Pro");
+  it("returns the matching option's pill for a known value (looked up by the lowercase id)", () => {
+    expect(chatModelPill("deepseek-v4-flash")).toBe("DeepSeek · V4-Flash");
+    expect(chatModelPill("deepseek-v4-pro")).toBe("DeepSeek · V4-Pro");
   });
 
   it("falls back to the default model's pill for an unknown value (no blank chip on stale storage)", () => {

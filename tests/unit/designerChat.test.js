@@ -37,11 +37,11 @@ describe("designerChat · streamDesignerChat model passthrough", () => {
     const fetchMock = vi.fn(async () => sseResponse());
     vi.stubGlobal("fetch", fetchMock);
 
-    await streamDesignerChat({ messages, model: "DeepSeek-V4-Pro" });
+    await streamDesignerChat({ messages, model: "deepseek-v4-pro" });
 
     const [, init] = fetchMock.mock.calls[0];
     const sent = JSON.parse(init.body);
-    expect(sent.model).toBe("DeepSeek-V4-Pro");
+    expect(sent.model).toBe("deepseek-v4-pro");
     // it still carries the messages + tools (model is additive).
     expect(sent.messages).toEqual(messages);
     expect(Array.isArray(sent.tools)).toBe(true);

@@ -86,28 +86,32 @@ Feature: 设计对话的多会话管理与对话级模型选择
 
   # —— 对话级模型芯片：选中值经 per-request model 进代理 ——
 
-  Scenario Outline: 对话级选用模型后请求带上该 per-request 模型
+  # 型号有两个名:界面上的「显示名」(DeepSeek-V4-Flash) 与发上游的「API model id」。DeepSeek 的
+  # OpenAI 兼容端点对 model id 大小写敏感、未知 id 直接 400,故 wire 值必须是小写真 id
+  # (deepseek-v4-flash / deepseek-v4-pro)。owner 选的是显示名 (label),发出去的是小写 id (wire)。
+  Scenario Outline: 对话级选用模型后请求带上该型号对应的小写 API id
     Given owner 已登录设计器
-    When owner 为当前对话选用模型 "<model>"
+    When owner 为当前对话选用模型 "<label>"
     And owner 在该对话里发送一条消息
-    Then 发往对话代理的请求带上 model 参数 "<model>"
+    Then 发往对话代理的请求带上 model 参数 "<wire>"
 
     Examples:
-      | model              |
-      | DeepSeek-V4-Flash  |
-      | DeepSeek-V4-Pro    |
+      | label             | wire              |
+      | DeepSeek-V4-Flash | deepseek-v4-flash |
+      | DeepSeek-V4-Pro   | deepseek-v4-pro   |
 
-  # 前端:模型选择器默认选中 V4-Flash，故每次发送都带上当前(默认)型号——由 App 集成测试 realize。
-  Scenario: 未显式切换型号时对话仍带上默认型号 V4-Flash
+  # 前端:模型选择器默认选中 V4-Flash,故每次发送都带上当前(默认)型号的小写 id——由 App 集成测试 realize。
+  Scenario: 未显式切换型号时对话仍带上默认型号 V4-Flash 的小写 id
     Given owner 已登录设计器且未手动切换对话模型
     When owner 在该对话里发送一条消息
-    Then 发往对话代理的请求带上默认型号 "DeepSeek-V4-Flash"
+    Then 发往对话代理的请求带上默认型号的小写 id "deepseek-v4-flash"
 
-  # 后端:代理收到不带 per-request model 的请求时回退——由 workers chat-api 测试 realize。
-  Scenario: 对话请求未带 per-request 模型时代理回退到 owner 保存的模型 / 默认
+  # 后端:代理收到不带 per-request model 的请求时回退,并把 owner 保存的(可能是旧驼峰显示名脏数据的)
+  # model 归一化成合法小写 id 再发上游——由 workers chat-api 测试 realize。
+  Scenario: 对话请求未带 per-request 模型时代理回退到 owner 保存的模型 / 默认(归一化成小写 id)
     Given owner 已配置 DeepSeek 凭据
     When 对话代理收到一个不带 per-request model 参数的请求
-    Then 代理用 owner 保存的模型或全局默认模型 "DeepSeek-V4-Flash" 兜底
+    Then 代理用 owner 保存的模型或全局默认模型兜底,并归一化成合法小写 id "deepseek-v4-flash" 再发上游
 
   Scenario: 代理拒绝不在白名单内的对话级模型
     Given owner 已登录设计器

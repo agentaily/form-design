@@ -2,10 +2,11 @@
 // features/email-verification.feature. The backend behaviors (注册即发、确认置位、去重三态)
 // are realized at the worker level (workers/test/email-verification-api.test.ts); this
 // file pins the FRONTEND-only scenarios the feature calls out:
-//   - 未验证时显示可重新发送的提示条  → the 未验证 banner shows with a 重新发送 entry
+//   - 未验证时显示可重新发送的提示条  → the 未验证 banner (新设计:顶部内联 .vb 条) shows with a
+//                                       「待验证」tag + the owner's email + a 重新发送 entry
 //   - 已验证时不显示提示条           → a verified owner sees NO banner
-//   - 未验证 owner 重新发送验证邮件   → clicking 重新发送 calls the owner-only resend and
-//                                       shows the neutral「已重新发送」feedback
+//   - 未验证 owner 重新发送验证邮件   → clicking 重新发送 calls the owner-only resend and the
+//                                       button enters a cooldown (重新发送 · {n}s, disabled)
 //   - 落地页文案（点击有效/失效链接）  → /verify-email?status=ok|invalid copy
 //
 // The banner's verified bit is the AUTHORITATIVE one from GET /api/auth/me
@@ -19,7 +20,7 @@
 import React from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
 // /pure → no auto cleanup; we unmount + clear the token store explicitly between cases.
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
+import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
 
@@ -55,11 +56,13 @@ describe("邮箱验证 banner + 落地页 (features/email-verification.feature, 
     // When 进入设计器 — the mount effect reads me and adopts the authoritative bit.
     await waitFor(() => expect(getCurrentUser).toHaveBeenCalled());
 
-    // Then 显示「邮箱未验证」的提示条且带「重新发送」入口.
+    // Then 顶部出现未验证内联条(新设计 .vb):「待验证」脉冲标签 + 「已发送至 <email>」+「重新发送」。
     const banner = await screen.findByTestId("verify-banner");
     expect(banner).toBeInTheDocument();
-    expect(screen.getByText("邮箱未验证")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "重新发送" })).toBeInTheDocument();
+    expect(within(banner).getByText("待验证")).toBeInTheDocument();
+    // 邮箱在 .vb__email 里加粗显示。
+    expect(within(banner).getByText("owner@example.com")).toBeInTheDocument();
+    expect(within(banner).getByRole("button", { name: "重新发送" })).toBeInTheDocument();
   });
 
   it("Scenario: 已验证时不显示提示条", async () => {
@@ -95,7 +98,7 @@ describe("邮箱验证 banner + 落地页 (features/email-verification.feature, 
     await waitFor(() => expect(screen.queryByTestId("verify-banner")).not.toBeInTheDocument());
   });
 
-  it("Scenario: 未验证 owner 重新发送验证邮件（中性「已重新发送」反馈）", async () => {
+  it("Scenario: 未验证 owner 重新发送验证邮件（成功后进入冷却倒计时）", async () => {
     // Given 一个邮箱未验证的 owner 已登录 (banner shown).
     asLoggedIn();
     const getCurrentUser = vi.fn(async () => ({
@@ -111,16 +114,20 @@ describe("邮箱验证 banner + 落地页 (features/email-verification.feature, 
         requestEmailVerification={requestEmailVerification}
       />,
     );
-    await screen.findByTestId("verify-banner");
+    const banner = await screen.findByTestId("verify-banner");
 
     // When 该 owner 点击「重新发送」
-    fireEvent.click(screen.getByRole("button", { name: "重新发送" }));
+    fireEvent.click(within(banner).getByRole("button", { name: "重新发送" }));
 
     // Then 系统再次向其邮箱发出验证邮件 (the owner-only resend was called)
     await waitFor(() => expect(requestEmailVerification).toHaveBeenCalled());
-    // And 给出「已重新发送」的中性反馈 — never leaking already-verified/send状态 (§23.3).
-    await screen.findByText("已重新发送");
-    expect(screen.getByText("已重新发送")).toBeInTheDocument();
+    // And 新设计:成功后按钮进入冷却(「重新发送 · {n}s」且禁用),防连点,取代旧的「已重新发送」终态。
+    await waitFor(() => {
+      const btn = within(banner).getByRole("button", { name: /重新发送 · \d+s/ });
+      expect(btn).toBeDisabled();
+    });
+    // 不再有旧的「已重新发送」终态文案。
+    expect(screen.queryByText("已重新发送")).not.toBeInTheDocument();
   });
 
   it("Scenario: 重发遇 401 时引导先登录（会话失效）", async () => {
@@ -144,9 +151,9 @@ describe("邮箱验证 banner + 落地页 (features/email-verification.feature, 
         requestEmailVerification={requestEmailVerification}
       />,
     );
-    await screen.findByTestId("verify-banner");
+    const banner = await screen.findByTestId("verify-banner");
 
-    fireEvent.click(screen.getByRole("button", { name: "重新发送" }));
+    fireEvent.click(within(banner).getByRole("button", { name: "重新发送" }));
 
     // A 401 routes the owner to the standalone /signin page (§23.3) and never surfaces
     // the raw 未授权.

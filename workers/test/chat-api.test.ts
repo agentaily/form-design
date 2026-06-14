@@ -229,7 +229,7 @@ describe("LLM proxy POST /api/chat (workers/features/llm-proxy.feature)", () => 
     }
   });
 
-  it("Scenario: model 缺省时上游请求使用默认 DeepSeek-V4-Flash", async () => {
+  it("Scenario: model 缺省时上游请求使用默认 deepseek-v4-flash", async () => {
     // Given 一个已配置 DeepSeek key 但未指定 model 的 owner
     await configureOwner({ apiKey: OWNER_KEY }); // no model
     upstream = installUpstreamMock({ body: UPSTREAM_SSE });
@@ -238,14 +238,14 @@ describe("LLM proxy POST /api/chat (workers/features/llm-proxy.feature)", () => 
     const res = await postChat({ messages: MESSAGES });
     expect(res.status).toBe(200);
 
-    // Then 上游请求体里的 model 为全局默认 DeepSeek-V4-Flash（§13.6 兜底）。
+    // Then 上游请求体里的 model 为全局默认 deepseek-v4-flash（小写 wire id，§13.6 兜底）。
     expect(upstream.calls).toHaveLength(1);
-    expect((upstream.calls[0].body as { model: string }).model).toBe("DeepSeek-V4-Flash");
+    expect((upstream.calls[0].body as { model: string }).model).toBe("deepseek-v4-flash");
   });
 
   it("Scenario: 已配 model 时上游请求使用 owner 的 model", async () => {
-    // Given 一个已配置 DeepSeek key 且保存了 model 的 owner（无 per-request model 时由它兜底）。
-    await configureOwner({ apiKey: OWNER_KEY_2, model: "DeepSeek-V4-Pro" });
+    // Given 一个已配置 DeepSeek key 且保存了（合法小写 id）model 的 owner（无 per-request 时由它兜底）。
+    await configureOwner({ apiKey: OWNER_KEY_2, model: "deepseek-v4-pro" });
     upstream = installUpstreamMock({ body: UPSTREAM_SSE });
 
     // When 前端向 /api/chat 发送一组对话消息（不带 per-request model）
@@ -254,23 +254,38 @@ describe("LLM proxy POST /api/chat (workers/features/llm-proxy.feature)", () => 
 
     // Then 上游请求体里的 model 为 owner 配置的 model（§13.6：无 per-request 时取 owner.model）。
     expect(upstream.calls).toHaveLength(1);
-    expect((upstream.calls[0].body as { model: string }).model).toBe("DeepSeek-V4-Pro");
+    expect((upstream.calls[0].body as { model: string }).model).toBe("deepseek-v4-pro");
     // And the owner's (rotated) key, not a stale one, reached upstream.
     expect(upstream.calls[0].headers.get("authorization")).toBe(`Bearer ${OWNER_KEY_2}`);
   });
 
+  it("Scenario: owner 存了旧驼峰显示名脏配置 → 归一化成小写 id 再发上游（老用户不用重存）", async () => {
+    // Given D1 里把 deepseek_model 存成旧驼峰显示名 "DeepSeek-V4-Pro" 的 owner（casing 修复前
+    // 存的脏数据）。未归一化直接发上游会 400 —— 这正是本 PR 兜的回归。
+    await configureOwner({ apiKey: OWNER_KEY, model: "DeepSeek-V4-Pro" });
+    upstream = installUpstreamMock({ body: UPSTREAM_SSE });
+
+    // When 不带 per-request model 发送（回退到 owner 保存的脏 model）
+    const res = await postChat({ messages: MESSAGES });
+    expect(res.status).toBe(200);
+
+    // Then 上游收到的是归一化后的小写 id，而非驼峰显示名（兜住脏配置，避免 400）。
+    expect(upstream.calls).toHaveLength(1);
+    expect((upstream.calls[0].body as { model: string }).model).toBe("deepseek-v4-pro");
+  });
+
   it("Scenario: per-request 白名单 model 优先于 owner 的 model (§13.6)", async () => {
     // Given 一个 owner 保存的 model 是 Flash，但本次对话级芯片选了 Pro。
-    await configureOwner({ apiKey: OWNER_KEY, model: "DeepSeek-V4-Flash" });
+    await configureOwner({ apiKey: OWNER_KEY, model: "deepseek-v4-flash" });
     upstream = installUpstreamMock({ body: UPSTREAM_SSE });
 
     // When 请求带上白名单内的 per-request model
-    const res = await postChat({ messages: MESSAGES, model: "DeepSeek-V4-Pro" });
+    const res = await postChat({ messages: MESSAGES, model: "deepseek-v4-pro" });
     expect(res.status).toBe(200);
 
     // Then 上游用的是 per-request model（优先于 owner.model）。
     expect(upstream.calls).toHaveLength(1);
-    expect((upstream.calls[0].body as { model: string }).model).toBe("DeepSeek-V4-Pro");
+    expect((upstream.calls[0].body as { model: string }).model).toBe("deepseek-v4-pro");
   });
 
   it("Scenario: 非白名单 model → 400 unsupported model 且不打上游 (§13.6)", async () => {

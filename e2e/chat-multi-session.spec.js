@@ -249,12 +249,13 @@ test.describe("Agentaily Forms · 多会话管理 + 对话级模型 (§26.9 / §
     await popup.getByText("DeepSeek-V4-Pro", { exact: true }).click();
     await expect(chip).toContainText("DeepSeek · V4-Pro");
 
-    // 此后发一条消息 → POST /api/chat 请求体带 model: "DeepSeek-V4-Pro"。
+    // 此后发一条消息 → POST /api/chat 请求体带 model = V4-Pro 的小写 wire id（显示名 DeepSeek-V4-Pro，
+    // 发上游的是 deepseek-v4-pro —— 大小写敏感,驼峰会 400)。
     await page.getByText("做一个线下活动报名表").click();
     await expect(page.getByRole("button", { name: "发布", exact: true })).toBeEnabled({
       timeout: 20_000,
     });
     expect(sentModels.length).toBeGreaterThan(0);
-    expect(sentModels[0]).toBe("DeepSeek-V4-Pro");
+    expect(sentModels[0]).toBe("deepseek-v4-pro");
   });
 });
