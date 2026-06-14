@@ -13,6 +13,9 @@
 # 前端契约桩见 src/core/chatSessionClient.ts（getOrCreateDesignSessionId / loadChatSession /
 # saveChatTurns + PersistedChatSession / PersistedTurn / Save·LoadChatSession DTO）；
 # 设计器接线见 src/App.jsx（DesignerApp 的 messages / historyRef）。
+#
+# 多会话（列出 / 切换 / 删除 / 新建）+ 对话级模型芯片的行为见 features/chat-multi-session.feature
+# （SPEC §26.9 / §13.6，PR #65）——本 feature 只管单会话的持久化 / 恢复。
 Feature: 设计对话的持久化与刷新恢复
   作为表单作者(owner)
   我希望我和设计 Agent 的对话被记住、刷新或换设备后还能续上

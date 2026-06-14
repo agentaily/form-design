@@ -1,1 +1,2 @@
 - [PR-2 D1 submissions turn + frontend handoff](project_d1-submissions-architecture-turn.md) — submit 主存翻 D1，飞书降可选同步；wire shape 改了但前端故意没改，留给 PR-6
+- [D1 列表排序时间戳打平 flake](project_d1-list-ordering-timestamp-tie-flake.md) — ORDER BY updated_at 无次级 tiebreak，同毫秒写入排序未定义 → 负载相关假红

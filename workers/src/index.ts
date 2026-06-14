@@ -84,7 +84,12 @@ import {
   recordFeishuSync,
   recordFeishuSyncError,
 } from "./submissions";
-import { loadChatSession, upsertChatSession } from "./chatSessions";
+import {
+  loadChatSession,
+  upsertChatSession,
+  listChatSessions,
+  deleteChatSession,
+} from "./chatSessions";
 import {
   rateLimit,
   SUBMIT_RATE_LIMITS,
@@ -319,10 +324,16 @@ app.use("/api/config", guard);
 app.post("/api/config/test", guard);
 app.post("/api/chat", guard);
 // 设计对话持久化 (§26.1)，owner-only。逐条点名 method+path（不用宽匹配，与 /api/forms 同纪律）：
-//   - GET /api/chat/session/:sessionId → owner 读回自己的会话（命中 { session } / 无 { session:null }）。
-//   - PUT /api/chat/session/:sessionId → owner upsert 自己的会话（整段替换，last-write-wins）。
-// 二者都按 (owner_id, session_id) 隔离（ownerId = c.get("session").sub）。POST /api/chat 是
-// 另一条已 guard 的对话代理（§13），与这两条按 method+精确路径区分，互不影响。
+//   - GET    /api/chat/sessions           → owner 列出自己的全部会话摘要（§26.9，PR #65）。
+//   - DELETE /api/chat/session/:sessionId  → owner 删自己的一段会话（§26.9，PR #65）。
+//   - GET    /api/chat/session/:sessionId  → owner 读回自己的会话（命中 { session } / 无 { session:null }）。
+//   - PUT    /api/chat/session/:sessionId  → owner upsert 自己的会话（整段替换，last-write-wins）。
+// 都按 (owner_id, session_id) 隔离（ownerId = c.get("session").sub）。POST /api/chat 是另一条已
+// guard 的对话代理（§13）。**注意路由区分**：`/api/chat/sessions`（复数、无 :id）与
+// `/api/chat/session/:sessionId`（单数 + 段）是两条不同路由，Hono 精确匹配区分；逐条点名 guard，
+// 绝不用宽匹配，否则 `:sessionId` 段会把复数列表路由也吞进来。
+app.get("/api/chat/sessions", guard);
+app.delete("/api/chat/session/:sessionId", guard);
 app.get("/api/chat/session/:sessionId", guard);
 app.put("/api/chat/session/:sessionId", guard);
 // POST /api/auth/verify-email/request → owner-only 重发验证邮件（§23.3）。其它三个邮件端点
@@ -703,7 +714,9 @@ app.post("/api/chat", async (c) => {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        model: deepseek.model || DEFAULT_DEEPSEEK_MODEL,
+        // §13.6 优先级：per-request model（对话级模型芯片，已 parseChatRequest 白名单校验）→
+        // owner 保存的 model → 全局默认。带上 model 时它已 ∈ DEEPSEEK_MODELS（否则 parse 阶段已 400）。
+        model: request.model || deepseek.model || DEFAULT_DEEPSEEK_MODEL,
         messages: request.messages,
         ...(request.tools !== undefined ? { tools: request.tools } : {}),
         stream: true,
@@ -1067,6 +1080,24 @@ app.put("/api/chat/session/:sessionId", async (c) => {
   });
 
   return c.json(result, 200);
+});
+
+// GET /api/chat/sessions — owner 列出自己名下的全部会话摘要（owner-only，已挂 guard，§26.9）。
+// 仅 WHERE owner_id=?（跨 owner 隔离，§26.8），按 updated_at DESC（最近在前）；每项含 title /
+// turnCount（从该行 turns_json 运行期推导）+ formSlug + updatedAt，不含两份完整转写、不含 owner_id /
+// 凭据（§26.8）。owner 名下零会话 → 200 { sessions: [] }（正常空态，非错误）。
+app.get("/api/chat/sessions", async (c) => {
+  const sessions = await listChatSessions(c.env.DB, c.get("session").sub);
+  return c.json({ sessions }, 200);
+});
+
+// DELETE /api/chat/session/:sessionId — owner 删自己名下指定会话（owner-only，已挂 guard，§26.9）。
+// 按 (owner_id, sessionId) 删（owner 隔离 + 横向越权防护，§26.8）：删到 → 200 { deleted:true }；
+// 无匹配行（从未存过 / 属于别的 owner）→ 404 { error: "会话不存在" }——A 删 B 的 id → A 名下无此行
+// → false → 404，B 的行不动、不暴露 B 有这段对话（与 GET 空态同纪律）。
+app.delete("/api/chat/session/:sessionId", async (c) => {
+  const ok = await deleteChatSession(c.env.DB, c.get("session").sub, c.req.param("sessionId"));
+  return ok ? c.json({ deleted: true }, 200) : c.json({ error: "会话不存在" }, 404);
 });
 
 export default app;

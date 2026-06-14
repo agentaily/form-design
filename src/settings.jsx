@@ -273,7 +273,7 @@ export function SettingsOverlay({
   // Controlled card fields. Secret editables (apiKey / secret) start empty so the masked
   // affordance shows; a non-empty value is the new plaintext to overwrite with.
   const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState("deepseek-chat");
+  const [model, setModel] = useState("DeepSeek-V4-Flash");
   const [appId, setAppId] = useState("");
   const [secret, setSecret] = useState("");
   // loading reflects the integration fetch; only meaningful once the 集成 tab is shown.
@@ -309,7 +309,7 @@ export function SettingsOverlay({
   // reset to empty (so the masked affordance shows).
   const echo = useCallback((cfg) => {
     setConfig(cfg);
-    setModel(cfg?.deepseek?.model || "deepseek-chat");
+    setModel(cfg?.deepseek?.model || "DeepSeek-V4-Flash");
     setAppId(cfg?.feishu?.appId ?? "");
     setApiKey("");
     setSecret("");

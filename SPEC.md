@@ -506,7 +506,7 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
 {
   "deepseek": {
     "apiKey": "sk-xxxxxxxxxxxxxxxx",   // 必填，非空
-    "model": "deepseek-chat"            // 可选；缺省/空串表示未指定
+    "model": "DeepSeek-V4-Flash"        // 可选；缺省/空串表示未指定
   },
   "feishu": {                           // 可选整块；留空表示「暂不配置飞书」（link-less：只 app_id + app_secret）
     "appId": "cli_xxx",
@@ -527,7 +527,7 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
 {
   "deepseek": {
     "apiKey": "sk-…wxyz",   // 掩码串；从未配置时为 null
-    "model": "deepseek-chat" // 明文回显；未指定为 null
+    "model": "DeepSeek-V4-Flash" // 明文回显；未指定为 null
   },
   "feishu": {
     "appId": "cli_xxx",      // 明文回显；未配置为 null
@@ -601,7 +601,7 @@ Worker 内部流程：
 4) fetch https://api.deepseek.com/chat/completions   ← 用 owner 明文 key
      headers: Authorization: Bearer <ownerKey>, content-type: application/json
      body: { model, messages, tools?, stream: true }
-       - model = owner.deepseek.model || "deepseek-chat"
+       - model = request.model（白名单内）|| owner.deepseek.model || "DeepSeek-V4-Flash"（§13.6）
        - messages / tools 透传自请求体
 5) 上游 2xx          → 把上游响应体（SSE）原样透传，Content-Type: text/event-stream
    上游 4xx/5xx       → 包装成可辨识错误响应（见 §13.4），绝不回显 owner key
@@ -652,6 +652,16 @@ Worker 内部流程：
 - **明文 key 只进 Authorization、不出网（除上游）：** owner 的 DeepSeek 明文 key 仅在 Worker 内由 `getOwnerConfig` 解密得到，唯一去向是发往 `api.deepseek.com` 的 `Authorization: Bearer` 头。它**绝不**出现在：返回给前端的任何响应（成功流或错误体）、HTTP 头回显、日志。
 - **不回显上游凭据相关信息：** 上游 4xx（如 401 invalid key）转成给前端的错误时，只保留「上游拒绝/出错」语义，不把 owner key 或可反推 key 的内容带回。
 - **沿用 §12 的加密边界：** key 的解密只发生在 Worker 内（`CONFIG_KEY` + `getOwnerConfig`）；D1 里仍是密文，浏览器侧自始至终拿不到明文。
+
+### 13.6 对话级模型选择（per-request `model`，PR #65）
+
+> **新增：** 设计器对话支持「模型(型号)选择器」——owner 为**这一段对话**选用哪个 DeepSeek 型号（V4-Flash 通用·快 vs V4-Pro 更强·深度推理）。选择经 `POST /api/chat` 的**可选 `model` 参数**带入代理，与 §12 集成设置里**保存的凭据/默认模型**正交（选择器是对话级的瞬态选择，不是凭据）。
+>
+> **型号名（manager from-parent-1/2，2026-06）：** DeepSeek 现仅两个型号 —— `DeepSeek-V4-Flash`(通用·快,**默认**) / `DeepSeek-V4-Pro`(更强·深度推理)。旧 `deepseek-chat`/`deepseek-reasoner` 作废。
+
+- **请求带可选 `model`：** `ChatRequest` 多一个可选 `model`（§13.2 的 `ChatRequest`）。带上时**必须**∈ 白名单 `DEEPSEEK_MODELS = ["DeepSeek-V4-Flash", "DeepSeek-V4-Pro"]`（`workers/src/chat.ts`），否则 `parseChatRequest` reject → route 映射 `400 { error: "unsupported model" }`，**不**把任意 model 串透传上游。不带 `model` 则省略该字段。
+- **代理 model 取值优先级：** `request.model`（白名单内）`|| owner.deepseek.model`（§12 owner 保存的）`|| DEFAULT_DEEPSEEK_MODEL`（`"DeepSeek-V4-Flash"`）。即：对话级选择器经 per-request `model` 参数带入并**优先**，owner 凭据里的默认模型 / 全局默认仅作兜底（无 per-request model 时生效）。
+- **前端契约：** 可选项 + 默认 + 校验在 `src/core/chatModels.ts`（`CHAT_MODELS` / `DEFAULT_CHAT_MODEL` / `isValidChatModel` / `chatModelPill` / `CHAT_MODEL_STORAGE_KEY`），`value` 与后端 `DEEPSEEK_MODELS` 一一对应。选择只作 UI 偏好持久化（localStorage），**绝不**当凭据存、**绝不**带 key。**UI（最终 spec，from-parent-2）：** 收起 pill 显示当前型号（默认「DeepSeek · V4-Flash」），点开两项下拉（型号名 + 描述 + 当前打勾），放在 composer（沿用既有模型选择器布局/交互，只换型号名+描述）。
 
 ---
 
@@ -1216,9 +1226,11 @@ ALTER TABLE forms ADD COLUMN feishu_table_id  TEXT;  -- per-form 数据表 id，
 | `GET /api/config` | owner | **owner-only** | 读**当前 owner**的掩码配置（§12） |
 | `POST /api/config` | owner | **owner-only** | 保存**当前 owner**的配置（§12） |
 | `POST /api/config/test` | owner | **owner-only** | 测**当前 owner**的连接（§14） |
-| `POST /api/chat` | owner（设计态） | **owner-only** | LLM 代理（§13），用**当前 owner**的 DeepSeek key |
+| `POST /api/chat` | owner（设计态） | **owner-only** | LLM 代理（§13），用**当前 owner**的 DeepSeek key；可选 `model` ∈ 白名单 → 对话级模型芯片（§13.6）|
+| `GET /api/chat/sessions` | owner（设计器） | **owner-only** | 列**当前 owner**全部会话摘要（`ChatSessionSummary[]`，updated_at DESC）；零会话 → `{ sessions: [] }`（§26.9）|
 | `GET /api/chat/session/:sessionId` | owner（设计器） | **owner-only** | 读回**当前 owner**按 `(owner_id, sessionId)` 持久化的设计对话；从未持久化 → `{ session: null }`（§26）|
 | `PUT /api/chat/session/:sessionId` | owner（设计器） | **owner-only** | upsert**当前 owner**该会话的 UI 回合 + LLM 历史（§26）|
+| `DELETE /api/chat/session/:sessionId` | owner（设计器） | **owner-only** | 删**当前 owner**该会话；删到 → `{ deleted: true }`，无匹配行 → **404**（§26.9）|
 | `POST /api/forms` | owner（设计器） | **owner-only** | 发布表单，归属**当前 owner**（§16） |
 | `GET /api/forms` | owner（管理台） | **owner-only** | 只列**当前 owner**的表单（§21） |
 | `PATCH /api/forms/:slug` | owner | **owner-only** | 改表单，须属**当前 owner**，否则 404（§17.9 / §21） |
@@ -1936,18 +1948,20 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 
 > **与第 4 / 13 / 17 节的关系：** §4 / §4.1 定义了设计器左侧的对话回合（ReAct loop + 消息队列），§13 让对话经 `POST /api/chat` 代理 DeepSeek，§17 把设计态端点收成 owner-only。但对话**只活在浏览器内存里**：`DesignerApp` 的 UI 消息（`messages`，`src/App.jsx`）与 LLM 历史（`historyRef`，OpenAI `ChatMessage[]`，`src/core/designerLoop`）刷新即丢。本节补上持久化：把一段设计对话随聊天写进后端 D1，登录态重载 / 换设备时按原顺序恢复、可继续往下聊。PR #48。
 >
-> **本节范围：** keying 决策、未登录态、新增 D1 表 `chat_sessions` 列契约、`GET/PUT /api/chat/session/:sessionId`（owner-only）、写入时机（批量、非每 token）、跨设备恢复、隔离 / 横向越权约束。
+> **本节范围：** keying 决策、未登录态、新增 D1 表 `chat_sessions` 列契约、`GET/PUT /api/chat/session/:sessionId`（owner-only）、写入时机（批量、非每 token）、跨设备恢复、隔离 / 横向越权约束。**§26.9（PR #65）补上多会话：** `GET /api/chat/sessions` 列出 owner 全部会话 + `DELETE /api/chat/session/:sessionId` 删一段会话（title / turnCount 运行期推导，不加列 / migration）。
 >
-> **不在本节：** 多会话列表 / 切换 UI（本期单 owner 单活跃会话即可，多会话留 follow-up）、历史裁剪 / 上下文窗口压缩、对话搜索、删除单条回合、协作 / 实时同步。
+> **不在本节：** 历史裁剪 / 上下文窗口压缩、对话搜索、删除单条回合、协作 / 实时同步。**多会话列表 / 切换的 UI 放置**（芯片 / 列表组件挂在哪）由设计另拍，本节只钉后端列表 / 删除端点 + 列表项契约（§26.9）。
 
 ### 26.1 端点职责与鉴权
 
 | 端点 | 谁调 | 鉴权 | 职责 |
 |---|---|---|---|
+| `GET /api/chat/sessions` | owner（设计器） | **owner-only**（§17） | 列出**当前 owner**全部会话摘要（`ChatSessionSummary[]`，按 `updated_at DESC`）；零会话 → `{ sessions: [] }`（§26.9）|
 | `GET /api/chat/session/:sessionId` | owner（设计器） | **owner-only**（§17） | 按 `(owner_id, sessionId)` 读回一段已持久化的设计对话；从未持久化 → `{ session: null }`（非 404）|
 | `PUT /api/chat/session/:sessionId` | owner（设计器） | **owner-only**（§17） | 按 `(owner_id, sessionId)` upsert（整段替换）该会话的 UI 回合 + LLM 历史；可附 `formSlug` 关联已发布表单 |
+| `DELETE /api/chat/session/:sessionId` | owner（设计器） | **owner-only**（§17） | 删 `(owner_id, sessionId)` 行；删到 → `200 { deleted: true }`，无匹配行（从未存在 / 属于别的 owner）→ **404** `{ error: "会话不存在" }`（§26.9）|
 
-> 两端点都 owner-only，挂 §17 的 `requireAuth` 中间件，`ownerId = c.get('session').sub`。设计对话本就 owner-only（§13 `POST /api/chat`），持久化沿用同一道门——陌生人读不到任何 owner 的对话。
+> 四端点都 owner-only，挂 §17 的 `requireAuth` 中间件，`ownerId = c.get('session').sub`。设计对话本就 owner-only（§13 `POST /api/chat`），持久化沿用同一道门——陌生人读不到任何 owner 的对话。注意路径区分：`/api/chat/sessions`（列表，复数、无 `:id`）vs `/api/chat/session/:sessionId`（单会话 GET/PUT/DELETE，单数 + `:id`）。
 
 ### 26.2 keying 决策（本节的 load-bearing 取舍）
 
@@ -1963,7 +1977,7 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 
 > **为什么不引入服务端「新建会话」握手拿 id：** 客户端生成 id 零往返、离线可用、未登录也能先持有 id（只是不写库）；服务端只在 `PUT` 落库时按 `(owner_id, sessionId)` upsert，天然幂等。比「先 POST 建会话拿 id 再写」更简单，且契合「id 必须跨刷新稳定」这一硬需求。
 >
-> **多会话留口（不做）：** 本期一个 owner 在一个浏览器只维护**一个**活跃 `designSessionId`（localStorage 单键）。「多份草稿对话并存 + 列表切换」需要 owner 侧会话列表 UI + 显式新建/切换，留 follow-up；后端 `(owner_id, sessionId)` 的多行能力已为此预留（D1 主键是复合键，不限一行）。
+> **多会话（PR #65 起部分落地）：** 后端 `(owner_id, sessionId)` 的多行能力一直预留（D1 主键是复合键，不限一行）。§26.9 补上「列出 / 删除 / 新建 / 切换」会话的后端契约：`GET /api/chat/sessions` 列表 + `DELETE /api/chat/session/:sessionId` 删除；localStorage 的活跃 `designSessionId` 仍是单键，「新建会话」= 换一个新 `designSessionId`、「切换」= 把活跃键指到某个已存在的 sessionId（前端编排）。**会话列表 / 切换的 UI 放置**由设计另拍。
 
 ### 26.3 API 契约
 
@@ -2057,7 +2071,51 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 
 ### 26.8 多租户数据隔离 + 横向越权（沿用 §17.9 纪律）
 
-- **所有读 / 写按 `(owner_id, sessionId)` 隔离：** `GET` / `PUT` 的数据层 `WHERE owner_id=? AND session_id=?`，`ownerId = c.get('session').sub`。owner 只能读 / 写自己名下的会话行。
-- **A 读不到 B 的对话：** 即便 A 拿到 B 的 sessionId（高熵随机，本就难猜），`GET /api/chat/session/:sessionId` 仍按 A 自己的 `owner_id` 查——查不到 B 那行，返回 `{ session: null }`（与「该 id 自己从没写过」同结果，**不暴露**「B 有这段对话」）。
-- **凭据不出网：** 会话转写不含凭据（§26.6）；响应 `{ session }` / `{ sessionId, updatedAt }` 也不含任何 owner 凭据。
-- **限流：** 两端点 owner-only（已被 §17 鉴权门挡在匿名之外），按 §25.1 **不限流**（owner 烧自己的 D1，刷到的也是自己）。
+- **所有读 / 写按 `(owner_id, sessionId)` 隔离：** `GET` / `PUT` / `DELETE` 的数据层 `WHERE owner_id=? AND session_id=?`，列表 `WHERE owner_id=?`，`ownerId = c.get('session').sub`。owner 只能读 / 写 / 删 / 列自己名下的会话行。
+- **A 读不到 B 的对话：** 即便 A 拿到 B 的 sessionId（高熵随机，本就难猜），`GET /api/chat/session/:sessionId` 仍按 A 自己的 `owner_id` 查——查不到 B 那行，返回 `{ session: null }`（与「该 id 自己从没写过」同结果，**不暴露**「B 有这段对话」）。删除同理：A 删 B 的 sessionId → A 名下无此行 → `404`，B 的行**不动**（§26.9）。
+- **凭据不出网：** 会话转写不含凭据（§26.6）；响应 `{ session }` / `{ sessionId, updatedAt }` / `{ sessions }` / `{ deleted }` 也不含任何 owner 凭据。
+- **限流：** 各端点 owner-only（已被 §17 鉴权门挡在匿名之外），按 §25.1 **不限流**（owner 烧自己的 D1，刷到的也是自己）。
+
+### 26.9 多会话：列表 + 删除（PR #65）
+
+> **本小节补上「多份对话并存」的后端契约。** keying 不变（§26.2，仍按客户端生成的 `designSessionId`，键 `(owner_id, sessionId)`）；§26.9 只新增**列出**与**删除**会话两个 owner-only 端点，让前端能渲染会话列表、切换、删除、新建。**不加 D1 migration**——列表项的 `title` / `turnCount` 是 `turns_json` 的**运行期推导**（0003 注释已说多会话列表是 follow-up，`idx_chat_sessions_owner` 索引已为此预留）。
+
+#### `GET /api/chat/sessions` — 列出当前 owner 全部会话（owner-only）
+
+响应体（`ListChatSessionsResult`，JSON）：
+
+```jsonc
+{
+  "sessions": [
+    {
+      "sessionId": "b3f1…-uuid",
+      "title": "帮我做一个活动报名表",   // 运行期从 turns_json 推（见下）
+      "turnCount": 3,                    // = role==="user" 的 turn 数（对话轮数）
+      "formSlug": "f8Kq2pXa",            // 已发布则为 slug；未发布为 null
+      "updatedAt": "2026-06-13T08:05:00.000Z"
+    }
+  ]
+}
+```
+
+- 命中：`200`，`{ sessions }`，按 `updated_at DESC`（最近在前）。仅 `WHERE owner_id = ?`（跨 owner 隔离，§26.8）——只含本 owner 名下的会话。
+- **owner 名下零会话：** `200`，`{ "sessions": [] }`——正常空态（首次进入 / 全删了），**非错误**。
+- **`title` 推导（运行期，不存列）：** `turns_json` 里**首条** `role === "user"` 的 turn 的 `text`，trim 后截断到 **40 字**（超出补单个 `…`）。无 user turn / 空 / 损坏 `turns_json` → `"新会话"`。
+- **`turnCount` 推导：** `turns_json` 里 `role === "user"` 的 turn 数（= 对话轮数 N 轮）。损坏 / 空 → `0`。
+- **`formSlug`：** 该会话行的 `form_slug`（已发布关联的 slug，未发布 `null`，§26.2）。
+- 缺 / 坏 / 过期 token：`401 { error }`，auth 中间件拦截（§17.6），不进入 handler。
+
+#### `DELETE /api/chat/session/:sessionId` — 删一段会话（owner-only）
+
+- **删到（有匹配行）：** `200`，`{ "deleted": true }`。数据层 `DELETE ... WHERE owner_id = ? AND session_id = ?` 删 `(owner_id, sessionId)` 行。
+- **无匹配行：** `404`，`{ "error": "会话不存在" }`。涵盖「该 owner 从未存过这个 sessionId」与「该 id 属于别的 owner」两种——后者是 owner 隔离的直接后果：A 删 B 的 sessionId → A 名下查不到此行 → `404`，**B 的行不动**（与 §26.8 GET 越权同纪律，不暴露 B 有这段对话）。
+- 缺 / 坏 / 过期 token：`401 { error }`。
+- **路径与读 / 写复用同一段：** `DELETE` 走 `/api/chat/session/:sessionId`（与 `GET`/`PUT` 同路径、按 method 区分），列表是另一条 `/api/chat/sessions`（复数、无 `:id`）。
+
+> **数据层契约（`workers/src/chatSessions.ts`）：** `listChatSessions(db, ownerId)` → `ChatSessionSummary[]`（按 updatedAt DESC，零会话回 `[]`）；`deleteChatSession(db, ownerId, sessionId)` → `boolean`（删到 `true`，无行 `false`，route 把 `false` 映射成 `404`）。`title` / `turnCount` 各抽成可单测纯函数 `deriveSessionTitle(turnsJson)` / `countUserTurns(turnsJson)`（损坏 / 空防御性回 `"新会话"` / `0`）。前端镜像在 `src/core/chatSessionClient.ts`（`listChatSessions()` / `deleteChatSession(sessionId)` + `ChatSessionSummary` / `ListChatSessionsResult`）。
+
+#### 新建 / 切换会话（前端编排，无新端点）
+
+- **新建会话：** 前端换一个新 `designSessionId`（`getOrCreateDesignSessionId` 之外 mint 一个新 id 并指向它），清空当前对话工作区，开始新一段——首次 `PUT` 时落新行。
+- **切换会话：** 前端把活跃 `designSessionId` 指到列表里某个已存在的 sessionId，再 `GET /api/chat/session/:sessionId` 载回该会话的两份转写、重渲染对话区 + re-seed `historyRef`（§26.6 恢复路径，复用既有 `loadChatSession`）。
+- 这两者都**不**需要新后端端点——多行能力靠 `(owner_id, sessionId)` 复合键天然支持（§26.2）。

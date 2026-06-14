@@ -60,10 +60,22 @@ import { streamDesignerChat } from "./core/designerChat";
 import { ApiError } from "./core/apiClient";
 import {
   getOrCreateDesignSessionId,
+  setActiveDesignSessionId,
+  newDesignSessionId,
   loadChatSession as loadChatSessionClient,
   saveChatTurns as saveChatTurnsClient,
+  listChatSessions as listChatSessionsClient,
+  deleteChatSession as deleteChatSessionClient,
   toPersistedTurns,
 } from "./core/chatSessionClient";
+import {
+  CHAT_MODELS,
+  DEFAULT_CHAT_MODEL,
+  CHAT_MODEL_STORAGE_KEY,
+  isValidChatModel,
+  chatModelPill,
+} from "./core/chatModels";
+import { SessionMenu } from "./SessionMenu.jsx";
 import {
   isLoggedIn as authIsLoggedIn,
   logout as authLogout,
@@ -227,6 +239,10 @@ function DesignerApp({
   // the load-on-mount / save-at-turn-end wiring is driven deterministically in tests.
   loadChatSession = loadChatSessionClient,
   saveChatTurns = saveChatTurnsClient,
+  // 多会话列表 + 删除 (§26.9, owner-only). Same injection pattern: default to the real client;
+  // injectable so the SessionMenu (list / new / switch / delete) wiring is driven by fakes.
+  listChatSessions = listChatSessionsClient,
+  deleteChatSession = deleteChatSessionClient,
   // 邮箱未验证 banner 的「重新发送」(§23.3 owner-only). Defaults to the real
   // core/auth.requestEmailVerification (POST with Bearer); injectable for tests.
   requestEmailVerification = authRequestEmailVerification,
@@ -297,6 +313,39 @@ function DesignerApp({
   const [resendState, setResendState] = useState("");
   // continuous-send buffer (SPEC §4.1): pending messages shown above the composer.
   const [queueItems, setQueueItems] = useState([]);
+  // 多会话列表 (§26.9): the owner's other design conversations, for the SessionMenu. Loaded on
+  // mount (logged in) and refreshed after new/switch/delete. best-effort — a load failure just
+  // leaves the prior list (the menu still offers 新会话).
+  const [sessions, setSessions] = useState([]);
+  // 对话级模型芯片 (§13.6): the per-conversation model the owner picked, persisted as a UI
+  // preference in localStorage (sanitized through isValidChatModel so a stale value can't be
+  // forwarded). Default = V4-Flash. Drives the composer pill + rides into the per-request `model`.
+  const [chatModel, setChatModelState] = useState(() => {
+    try {
+      const saved = localStorage.getItem(CHAT_MODEL_STORAGE_KEY);
+      if (isValidChatModel(saved)) return saved;
+    } catch {
+      /* storage unavailable — fall through to the default */
+    }
+    return DEFAULT_CHAT_MODEL;
+  });
+  // 模型菜单开合 + 锚定坐标 (相对 .cm-wrap),由 composer 芯片点击驱动 (handoff chat13).
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelMenuPos, setModelMenuPos] = useState({ left: 0, bottom: 0 });
+  // Always-current mirror of the picked model so the §4.1 queue consumer closure (captured on
+  // first render) reads the LATEST model when it constructs the chat call, not a stale one.
+  const chatModelRef = useRef(chatModel);
+  // Persist + sanitize on pick; keep the ref in sync.
+  const setChatModel = useCallback((value) => {
+    if (!isValidChatModel(value)) return;
+    chatModelRef.current = value;
+    setChatModelState(value);
+    try {
+      localStorage.setItem(CHAT_MODEL_STORAGE_KEY, value);
+    } catch {
+      /* storage unavailable — the in-memory state still drives this page */
+    }
+  }, []);
   // Canonical form model the agent tools mutate; React `meta`/`fields` mirror it.
   const modelRef = useRef(null);
   if (!modelRef.current) modelRef.current = createFormModel();
@@ -505,6 +554,25 @@ function DesignerApp({
     if (loggedIn) refreshMe();
   }, [loggedIn, refreshMe]);
 
+  // Apply a loaded persisted session onto the live workspace: rebuild the visible thread
+  // (`messages`) AND re-seed the loop's LLM history (`historyRef`, incl. the leading system
+  // prompt) so the owner resumes the same thread and the Agent keeps the prior context
+  // (§26.6). Empty/null → reset to the初始空态. Shared by the load-on-mount restore effect and
+  // the SessionMenu 切换 path (switchSession below).
+  const applyRestoredSession = (session) => {
+    if (!session) return;
+    if (Array.isArray(session.turns) && session.turns.length > 0) {
+      setMessagesTracked(session.turns.map((tn) => ({ ...tn })));
+    } else {
+      setMessagesTracked([]);
+    }
+    historyRef.current =
+      Array.isArray(session.history) && session.history.length > 0
+        ? session.history.map((h) => ({ ...h }))
+        : [{ role: "system", content: DESIGNER_SYSTEM }];
+    publishedSlugRef.current = session.formSlug || null;
+  };
+
   // 设计对话恢复 (§26 restore): when logged in, load this session's persisted conversation
   // ONCE and rebuild both transcripts — the visible thread (`messages`) and the loop's LLM
   // history (`historyRef`, incl. the leading system prompt) — so the owner resumes the same
@@ -525,15 +593,7 @@ function DesignerApp({
         // early-returns and setMessages never fires. StrictMode dev double-fires the
         // GET (intentional); production runs it once.
         restoredRef.current = true;
-        if (Array.isArray(session.turns) && session.turns.length > 0) {
-          setMessagesTracked(session.turns.map((tn) => ({ ...tn })));
-        }
-        if (Array.isArray(session.history) && session.history.length > 0) {
-          // Re-seed the loop's LLM history verbatim (incl. the system message) so the
-          // Agent continues with full context (§26.6 / 「Agent 记得之前的上下文」).
-          historyRef.current = session.history.map((h) => ({ ...h }));
-        }
-        if (session.formSlug) publishedSlugRef.current = session.formSlug;
+        applyRestoredSession(session);
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) needLogin("登录后恢复你的设计对话");
         // else: best-effort — leave the empty thread; the next save re-establishes the row.
@@ -544,6 +604,97 @@ function DesignerApp({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loggedIn]);
+
+  // 会话列表 (§26.9): pull the owner's other conversations for the SessionMenu. best-effort —
+  // a load failure (incl. transient) just keeps the prior list; a 401 routes into /signin.
+  const refreshSessions = useCallback(async () => {
+    if (!loggedIn) return;
+    try {
+      const { sessions: list } = await listChatSessions();
+      if (Array.isArray(list)) setSessions(list);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) needLogin("登录后管理你的设计对话");
+      // else: best-effort — keep the prior list.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loggedIn, listChatSessions]);
+
+  // Load the session list on mount (when logged in); refreshed imperatively after new/switch/delete.
+  useEffect(() => {
+    if (loggedIn) refreshSessions();
+  }, [loggedIn, refreshSessions]);
+
+  // ── 多会话 新建 / 切换 / 删除 (§26.9) ───────────────────────────────────────────
+  // Reset the live workspace to a clean, empty designer (mirrors doExit's cleanup, minus the
+  // edit-mode-only bits): empty thread, fresh LLM history, no published slug, cleared form model
+  // + preview. Used by 新会话 and by deleting the active session. `restoredRef` is set so the
+  // mount-restore effect never re-fires against the new id.
+  const resetWorkspace = () => {
+    restoredRef.current = true; // a fresh session has nothing to restore
+    editingFormRef.current = null;
+    setEditingForm(null);
+    historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
+    publishedSlugRef.current = null;
+    modelRef.current = createFormModel();
+    setMessagesTracked([]);
+    setMeta(null);
+    setFields([]);
+    setValuesState({});
+    setPublished(false);
+  };
+
+  // 新会话: mint + activate a brand-new design session id (so subsequent turn-end saves write a
+  // NEW row, never overwriting the prior conversation), clear the workspace, refresh the list.
+  const newChat = () => {
+    sessionIdRef.current = newDesignSessionId();
+    resetWorkspace();
+    refreshSessions();
+  };
+
+  // 切换: make `id` the active session, load + apply its transcript (reusing the same restore
+  // path as mount), and refresh the list so the menu highlight follows. A 401 routes into login;
+  // any other failure leaves the prior workspace (best-effort).
+  const switchSession = async (id) => {
+    if (!id || id === sessionIdRef.current) return;
+    setActiveDesignSessionId(id);
+    sessionIdRef.current = id;
+    restoredRef.current = true; // we restore explicitly here, not via the mount effect
+    try {
+      const { session } = await loadChatSession(id);
+      // Hit → rebuild that conversation. Miss ({ session: null }, e.g. a stale list row whose
+      // row vanished) → reset to an EMPTY workspace, NOT a no-op: sessionIdRef already moved to
+      // `id`, so leaving the prior conversation visible would let the next turn-end save write
+      // the OLD transcript under the new id. A fresh empty workspace is the safe state.
+      if (session) applyRestoredSession(session);
+      else resetWorkspace();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) needLogin("登录后切换你的设计对话");
+      // else: best-effort — leave the prior workspace.
+    }
+    refreshSessions();
+  };
+
+  // 删除: remove the session server-side; if it was the ACTIVE one, behave like 新会话 (open a
+  // fresh empty conversation). Refresh the list either way. A 404 (foreign / never-existed) is
+  // swallowed for the menu's purposes (the row just disappears on refresh); a 401 routes into login.
+  const removeSession = async (id) => {
+    if (!id) return;
+    try {
+      await deleteChatSession(id);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        needLogin("登录后管理你的设计对话");
+        return;
+      }
+      // 404 / other: best-effort — fall through to a list refresh (the row drops off).
+    }
+    if (id === sessionIdRef.current) {
+      // deleting the open conversation → start a fresh one (no orphaned empty workspace).
+      sessionIdRef.current = newDesignSessionId();
+      resetWorkspace();
+    }
+    refreshSessions();
+  };
 
   // Returning from /signin: if signed in and an intent was stashed, run it once.
   useEffect(() => {
@@ -583,6 +734,10 @@ function DesignerApp({
     try {
       res = await chat({
         messages: history,
+        // 对话级模型 (§13.6): forward the owner's picked model as the per-request `model`.
+        // Read the REF (kept current by setChatModel) so this queue-consumer closure — captured
+        // on first render — uses the LATEST pick, not the model at construction time.
+        model: chatModelRef.current,
         onText: (d) => {
           acc += d;
           patchMsg(mid, { text: acc });
@@ -931,20 +1086,78 @@ function DesignerApp({
           ),
         }}
         chat={
-          <ConversationThread
-            title="对话"
-            model="agentaily-2 · forms"
-            messages={messages}
-            draft={draft}
-            onDraftChange={setDraft}
-            controller={controller}
-            renderTurn={(m, i, ctx) => renderChatTurn(m, ctx, onSend)}
-            emptyTitle="描述你想要的表单"
-            hints={["做一个线下活动报名表", "收集一份客户满意度问卷", "招聘投递表单"]}
-            placeholder="描述你想要的表单，例如：做一个活动报名表…"
-            busyPlaceholder="可继续输入，会收进缓冲区一起处理…"
-            note="AGENTAILY 会出错 · 发布前请核对字段"
-          />
+          // 对话级模型芯片 (§13.6): ConversationThread does NOT forward onModelClick to its inner
+          // Composer (DS seam debt), so we wrap the thread in a div that intercepts clicks on the
+          // composer's internal model pill (.ax-composer__model) and opens an anchored popup of
+          // CHAT_MODELS (handoff chat13 prototype's approach). SessionMenu rides the header
+          // `actions` slot; the model `pill` reflects the current pick.
+          <div
+            className="cm-wrap"
+            onClick={(e) => {
+              const chip = e.target.closest && e.target.closest(".ax-composer__model");
+              if (!chip) return;
+              e.preventDefault();
+              const w = e.currentTarget.getBoundingClientRect();
+              const r = chip.getBoundingClientRect();
+              setModelMenuPos({
+                left: Math.round(r.left - w.left),
+                bottom: Math.round(w.bottom - r.top + 6),
+              });
+              setModelMenuOpen((o) => !o);
+            }}
+          >
+            <ConversationThread
+              title="对话"
+              model={chatModelPill(chatModel)}
+              actions={
+                <SessionMenu
+                  sessions={sessions}
+                  activeId={sessionIdRef.current}
+                  onNewChat={newChat}
+                  onSelect={switchSession}
+                  onDelete={removeSession}
+                />
+              }
+              messages={messages}
+              draft={draft}
+              onDraftChange={setDraft}
+              controller={controller}
+              renderTurn={(m, i, ctx) => renderChatTurn(m, ctx, onSend)}
+              emptyTitle="描述你想要的表单"
+              hints={["做一个线下活动报名表", "收集一份客户满意度问卷", "招聘投递表单"]}
+              placeholder="描述你想要的表单，例如：做一个活动报名表…"
+              busyPlaceholder="可继续输入，会收进缓冲区一起处理…"
+              note="AGENTAILY 会出错 · 发布前请核对字段"
+            />
+            {modelMenuOpen ? (
+              <React.Fragment>
+                <div className="cm-scrim" onClick={() => setModelMenuOpen(false)} />
+                <div
+                  className="cm-menu"
+                  style={{ left: modelMenuPos.left, bottom: modelMenuPos.bottom }}
+                >
+                  <div className="cm-menu__label ax-label">模型 · DeepSeek</div>
+                  {CHAT_MODELS.map((m) => (
+                    <button
+                      type="button"
+                      key={m.value}
+                      className={"cm-opt" + (chatModel === m.value ? " is-on" : "")}
+                      onClick={() => {
+                        setChatModel(m.value);
+                        setModelMenuOpen(false);
+                      }}
+                    >
+                      <span className="cm-opt__body">
+                        <span className="cm-opt__name">{m.label}</span>
+                        <span className="cm-opt__desc">{m.hint}</span>
+                      </span>
+                      {chatModel === m.value ? <Icon name="check" size={14} /> : null}
+                    </button>
+                  ))}
+                </div>
+              </React.Fragment>
+            ) : null}
+          </div>
         }
         preview={
           <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>

@@ -14,10 +14,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   DESIGN_SESSION_ID_KEY,
   CHAT_SESSION_PATH,
+  CHAT_SESSIONS_PATH,
   getOrCreateDesignSessionId,
   loadChatSession,
   saveChatTurns,
   toPersistedTurns,
+  listChatSessions,
+  deleteChatSession,
+  setActiveDesignSessionId,
+  newDesignSessionId,
 } from "../../src/core/chatSessionClient";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
 
@@ -292,5 +297,168 @@ describe("chatSessionClient · saveChatTurns", () => {
     await expect(saveChatTurns("b3f1aaaa-uuid", { turns: [], history: [] })).rejects.toBeInstanceOf(
       ApiError,
     );
+  });
+});
+
+// —— 多会话列表 + 删除 (SPEC §26.9, PR #65) ——————————————————————————————————
+// Realizes the unit-altitude slice of features/chat-multi-session.feature 列表/删除场景:
+//   * listChatSessions GET /api/chat/sessions — owner-only (Bearer), resolves { sessions }.
+//   * deleteChatSession DELETE /api/chat/session/:id — owner-only, 200 { deleted } /
+//     404 「会话不存在」 surfaces as an ApiError for the caller to handle.
+
+const SUMMARIES = [
+  {
+    sessionId: "ds-2",
+    title: "客户满意度问卷",
+    turnCount: 12,
+    formSlug: null,
+    updatedAt: "2026-06-13T10:00:00.000Z",
+  },
+  {
+    sessionId: "ds-1",
+    title: "活动报名表单",
+    turnCount: 18,
+    formSlug: "f8Kq2pXa",
+    updatedAt: "2026-06-13T08:00:00.000Z",
+  },
+];
+
+describe("chatSessionClient · listChatSessions", () => {
+  it("GETs /api/chat/sessions as the owner (Bearer) and resolves { sessions }", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse({ sessions: SUMMARIES }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await listChatSessions();
+
+    expect(out).toEqual({ sessions: SUMMARIES });
+    const [url, init] = fetchMock.mock.calls[0];
+    // The list endpoint is `/api/chat/sessions` (plural, no :id) — distinct from
+    // CHAT_SESSION_PATH (`/api/chat/session/:id`).
+    expect(url).toContain(CHAT_SESSIONS_PATH);
+    expect(url).not.toMatch(/\/session\/[^/]/); // not the per-session path
+    expect((init.method ?? "GET").toUpperCase()).toBe("GET");
+    // OWNER-ONLY: the Bearer token rides along (§17).
+    expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
+    expect(init.body).toBeUndefined();
+  });
+
+  it("resolves the empty state { sessions: [] } for an owner with no sessions (not an error)", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse({ sessions: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listChatSessions()).resolves.toEqual({ sessions: [] });
+  });
+
+  it("rejects with a 401 ApiError when the session expired (caller routes into /signin)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listChatSessions()).rejects.toMatchObject({ name: "ApiError", status: 401 });
+  });
+});
+
+describe("chatSessionClient · deleteChatSession", () => {
+  it("DELETEs /api/chat/session/:sessionId as the owner (Bearer) and resolves { deleted }", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse({ deleted: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await deleteChatSession("ds-1");
+
+    expect(out).toEqual({ deleted: true });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain(`${CHAT_SESSION_PATH}/ds-1`);
+    expect(init.method.toUpperCase()).toBe("DELETE");
+    // OWNER-ONLY: the Bearer token rides along (§17).
+    expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
+    expect(init.body).toBeUndefined();
+  });
+
+  it("rejects with a 404 ApiError 「会话不存在」 for a foreign / never-existing session (caller handles)", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "会话不存在" }, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(deleteChatSession("not-mine")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 404,
+    });
+    // The 404 is not swallowed — it surfaces as an ApiError carrying the backend message.
+    await expect(deleteChatSession("not-mine")).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("rejects with a 401 ApiError when the session expired (caller routes into /signin)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(deleteChatSession("ds-1")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 401,
+    });
+  });
+});
+
+// —— active-session-id helpers (多会话切换 / 新建, §26.2/§26.9) ———————————————————
+// setActiveDesignSessionId 把切换/新建后的当前会话 id 写进 localStorage + 内存镜像;
+// newDesignSessionId mint 一个全新 id、setActive、返回。这两个让 App 能在多段会话间切换/新建
+// (现有 getOrCreateDesignSessionId 只是单键 get-or-create)。
+
+describe("chatSessionClient · setActiveDesignSessionId / newDesignSessionId", () => {
+  it("setActive persists the id to localStorage AND makes getOrCreate return it (mirror in sync)", () => {
+    const store = installFakeLocalStorage();
+    // seed a different existing id so we prove the write actually replaced it.
+    store.setItem(DESIGN_SESSION_ID_KEY, "old-id");
+
+    setActiveDesignSessionId("switched-to-id");
+
+    expect(store.getItem(DESIGN_SESSION_ID_KEY)).toBe("switched-to-id");
+    // the in-memory mirror is updated too → getOrCreate now reads the new active id.
+    expect(getOrCreateDesignSessionId()).toBe("switched-to-id");
+  });
+
+  it("setActive coheres in-memory even when localStorage throws (mirrors memToken fallback)", () => {
+    const throwing = {
+      getItem() {
+        throw new Error("unavailable");
+      },
+      setItem() {
+        throw new Error("unavailable");
+      },
+      removeItem() {
+        throw new Error("unavailable");
+      },
+      clear() {
+        throw new Error("unavailable");
+      },
+    };
+    vi.stubGlobal("localStorage", throwing);
+
+    // does not throw even though every storage access throws.
+    expect(() => setActiveDesignSessionId("mem-only-id")).not.toThrow();
+    // the page still coheres on the new id via the in-memory mirror.
+    expect(getOrCreateDesignSessionId()).toBe("mem-only-id");
+  });
+
+  it("newDesignSessionId mints a fresh id, sets it active, and returns it", () => {
+    const store = installFakeLocalStorage();
+    store.setItem(DESIGN_SESSION_ID_KEY, "prior-id");
+
+    const fresh = newDesignSessionId();
+
+    expect(typeof fresh).toBe("string");
+    expect(fresh.length).toBeGreaterThan(0);
+    expect(fresh).not.toBe("prior-id"); // it's a NEW id, not the prior one
+    // it's now the active id (persisted + mirrored).
+    expect(store.getItem(DESIGN_SESSION_ID_KEY)).toBe(fresh);
+    expect(getOrCreateDesignSessionId()).toBe(fresh);
+  });
+
+  it("newDesignSessionId mints distinct ids across calls (each new chat is its own session)", () => {
+    installFakeLocalStorage();
+    const a = newDesignSessionId();
+    const b = newDesignSessionId();
+    expect(a).not.toBe(b);
   });
 });
