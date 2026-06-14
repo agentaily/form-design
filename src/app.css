@@ -1116,11 +1116,10 @@ body {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
-   对话级模型芯片下拉 (§13.6) — DS ConversationThread does NOT forward onModelClick
-   to its inner Composer, so the composer model pill (.ax-composer__model) is made
-   clickable by a wrapper <div onClick> that intercepts that internal class and opens
-   an anchored, upward popup listing CHAT_MODELS (handoff chat13 prototype's approach).
-   The popup is app-composed (DS Icon + DS tokens), anchored relative to .cm-wrap.
+   对话级模型芯片下拉 (§13.6) — DS 0.11.0 的 ConversationThread 透传 onModelClick,
+   App.jsx 直接拿官方回调开下面这个 app-composed 弹层 (DS Icon + DS tokens),不再
+   截内部类 .ax-composer__model。.cm-wrap 是定位容器;弹层锚在它的左下、向上展开
+   (composer 的 pill 行相对 .cm-wrap 底部偏移稳定:下方只有一行 note,故用固定偏移)。
    ───────────────────────────────────────────────────────────────────────── */
 .cm-wrap {
   position: relative;
@@ -1133,6 +1132,10 @@ body {
 }
 .cm-menu {
   position: absolute;
+  /* 锚在 composer 模型 pill 上方:left 对齐 pill 左缘(thread 横向 inset + row 左 padding),
+     bottom 让弹层底缘落在 pill 顶上方 ~6px(pill 行高 + 下方单行 note 的固定占位)。 */
+  left: 41px;
+  bottom: 81px;
   z-index: 60;
   width: 248px;
   background: var(--surface-panel);

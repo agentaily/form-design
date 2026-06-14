@@ -229,8 +229,9 @@ test.describe("Agentaily Forms · 多会话管理 + 对话级模型 (§26.9 / §
 
     await page.goto("/");
 
-    // 点 composer 上的模型 pill(.ax-composer__model 是 DS 内部类,模型芯片靠它定位 —— 实现就是
-    // 在 .cm-wrap 上拦截该类的点击;语义角色不可达,可接受用此内部类)。
+    // 点 composer 上的模型 pill(DS 0.11.0 起它是个真实 button,点它触发 DS 透传的 onModelClick
+    // 开下拉 —— App 不再截点击)。.ax-composer__model 仍是 DS 内部类,这里仅用它在测试里定位 pill
+    // (语义角色不可达,可接受用此内部类定位)。
     const chip = page.locator(".ax-composer__model");
     await expect(chip).toBeVisible();
     // 默认 pill 是 V4-Flash。
