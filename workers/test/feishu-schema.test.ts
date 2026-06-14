@@ -6,8 +6,12 @@ import {
   formatValueForBitable,
   listBitableColumns,
   preCreateBitableColumns,
+  createBitableApp,
+  createBitableTable,
   computeFieldRenames,
   FEISHU_BITABLE_FIELD_TYPE,
+  FEISHU_BITABLE_APPS_URL,
+  FEISHU_BITABLE_TABLES_URL,
   type FeishuFieldType,
 } from "../src/feishu-schema";
 import {
@@ -567,5 +571,107 @@ describe("computeFieldRenames (SPEC.md §16.8.7 按 field.id 配对 diff 算改�
       { fieldId: "f1", oldLabel: "电话", newLabel: "联系电话", type: TEXT },
       { fieldId: "f2", oldLabel: "邮件", newLabel: "电子邮箱", type: TEXT },
     ]);
+  });
+});
+
+// --- §16.9 发布即自动建表：建 app / 建数据表（fetch-bearing seams）-----------------
+
+const APPS_PATH = pathOf(FEISHU_BITABLE_APPS_URL);
+const NEW_APP_TOKEN = "bascnNEWappTokenFromCreate";
+const NEW_TABLE_ID = "tblNEWfromCreate";
+const TABLES_PATH = pathOf(FEISHU_BITABLE_TABLES_URL.replace("{app_token}", NEW_APP_TOKEN));
+
+const APP_CREATE_OK = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { app: { app_token: NEW_APP_TOKEN, name: "我的表单" } },
+});
+const TABLE_CREATE_OK = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { table_id: NEW_TABLE_ID },
+});
+
+describe("createBitableApp (SPEC.md §16.9 发布即建多维表格 app)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("成功时返回 data.app.app_token，并只在 Authorization 头带 token", async () => {
+    const { calls } = stubFetchByPath({ [APPS_PATH]: [{ status: 200, body: APP_CREATE_OK }] });
+    const appToken = await createBitableApp(TENANT_TOKEN, "我的表单");
+    expect(appToken).toBe(NEW_APP_TOKEN);
+    // POST /apps，body 带 name（仅展示，非凭据），token 只在 Authorization 头。
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].headers.get("authorization")).toBe(`Bearer ${TENANT_TOKEN}`);
+    expect((calls[0].body as { name?: string }).name).toBe("我的表单");
+  });
+
+  it("HTTP 200 但 code≠0 → 抛 BitableWriteError，message 只带 code、绝不含 token", async () => {
+    stubFetchByPath({
+      [APPS_PATH]: [{ status: 200, body: JSON.stringify({ code: 1254001, msg: "rejected" }) }],
+    });
+    const err = (await createBitableApp(TENANT_TOKEN, "x").catch((e: Error) => e)) as Error;
+    expect(err).toBeInstanceOf(BitableWriteError);
+    expect(err.message).toContain("1254001");
+    expect(err.message).not.toContain(TENANT_TOKEN);
+  });
+
+  it("非 2xx → 抛 BitableWriteError", async () => {
+    stubFetchByPath({ [APPS_PATH]: [{ status: 500, body: "oops" }] });
+    await expect(createBitableApp(TENANT_TOKEN, "x")).rejects.toBeInstanceOf(BitableWriteError);
+  });
+
+  it("响应缺 app_token → 抛 BitableWriteError（不返回空串）", async () => {
+    stubFetchByPath({
+      [APPS_PATH]: [{ status: 200, body: JSON.stringify({ code: 0, data: { app: {} } }) }],
+    });
+    await expect(createBitableApp(TENANT_TOKEN, "x")).rejects.toBeInstanceOf(BitableWriteError);
+  });
+
+  it("上游不可达（fetch 抛）→ 抛 BitableWriteError，message 不含 token", async () => {
+    // fetch 抛的错把 token 嵌进 message：createBitableApp 绝不能把它折进自己的错误（§15.7）。
+    vi.stubGlobal("fetch", async () => {
+      throw new Error(`ECONNREFUSED ${TENANT_TOKEN}`);
+    });
+    // 用 rejects 断言确保**真的抛了**（.catch 单独用会在意外 resolve 时空转通过）。
+    const err = (await createBitableApp(TENANT_TOKEN, "x").catch((e: Error) => e)) as Error;
+    expect(err).toBeInstanceOf(BitableWriteError);
+    expect(err.message).not.toContain(TENANT_TOKEN);
+    await expect(createBitableApp(TENANT_TOKEN, "x")).rejects.toBeInstanceOf(BitableWriteError);
+  });
+});
+
+describe("createBitableTable (SPEC.md §16.9 在 app 下建数据表)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("成功时返回 data.table_id，body 带 { table: { name } }，token 只在 Authorization 头", async () => {
+    const { calls } = stubFetchByPath({ [TABLES_PATH]: [{ status: 200, body: TABLE_CREATE_OK }] });
+    const tableId = await createBitableTable(TENANT_TOKEN, NEW_APP_TOKEN, "我的表单");
+    expect(tableId).toBe(NEW_TABLE_ID);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].headers.get("authorization")).toBe(`Bearer ${TENANT_TOKEN}`);
+    expect((calls[0].body as { table?: { name?: string } }).table?.name).toBe("我的表单");
+  });
+
+  it("HTTP 200 但 code≠0 → 抛 BitableWriteError，message 只带 code、绝不含 token", async () => {
+    stubFetchByPath({
+      [TABLES_PATH]: [{ status: 200, body: JSON.stringify({ code: 1254002, msg: "rejected" }) }],
+    });
+    const err = (await createBitableTable(TENANT_TOKEN, NEW_APP_TOKEN, "x").catch(
+      (e: Error) => e,
+    )) as Error;
+    expect(err).toBeInstanceOf(BitableWriteError);
+    expect(err.message).toContain("1254002");
+    expect(err.message).not.toContain(TENANT_TOKEN);
+  });
+
+  it("响应缺 table_id → 抛 BitableWriteError", async () => {
+    stubFetchByPath({
+      [TABLES_PATH]: [{ status: 200, body: JSON.stringify({ code: 0, data: {} }) }],
+    });
+    await expect(createBitableTable(TENANT_TOKEN, NEW_APP_TOKEN, "x")).rejects.toBeInstanceOf(
+      BitableWriteError,
+    );
   });
 });

@@ -477,12 +477,14 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
 |---|---|---|---|
 | DeepSeek | `apiKey`（必填） | **密钥** | AES-GCM 密文 + iv |
 | DeepSeek | `model`（可选，默认留空） | 非密 | 明文 |
-| 飞书多维表格 | `appId` | 非密 | 明文 |
-| 飞书多维表格 | `appSecret` | **密钥** | AES-GCM 密文 + iv |
-| 飞书多维表格 | `appToken`（多维表格 app token） | 非密 | 明文 |
-| 飞书多维表格 | `tableId` | 非密 | 明文 |
+| 飞书多维表格 | `appId`（账户级，必填） | 非密 | 明文 |
+| 飞书多维表格 | `appSecret`（账户级，必填） | **密钥** | AES-GCM 密文 + iv |
+| 飞书多维表格 | ~~`appToken`~~（多维表格 app token，**owner 已不再填**） | 非密 | 明文（仅向后兼容回显） |
+| 飞书多维表格 | ~~`tableId`~~（**owner 已不再填**） | 非密 | 明文（仅向后兼容回显） |
 
-> **为什么 DeepSeek key 必填、飞书整块可选：** 没有 DeepSeek key 连设计器都跑不起来；飞书是「答题落库」目的地，配置阶段可以先留空，发布前再补。本刀只校验 DeepSeek `apiKey` 必填；飞书字段要么整块给齐、要么整块留空（半填留给后续 feature 决定）。
+> **为什么 DeepSeek key 必填、飞书整块可选：** 没有 DeepSeek key 连设计器都跑不起来；飞书是「答题落库」目的地，配置阶段可以先留空，发布前再补。本刀只校验 DeepSeek `apiKey` 必填。
+>
+> **`appToken` / `tableId` 已不再由 owner 填（PR-3，§16.9）：** 飞书从「owner 单一对 app_token/table_id」升级为 **per-form 一张多维表格**——`appToken` / `tableId` 改由「**发布即自动建表**」（§16.9）按表单自动产出并写进 `forms` 行，owner 无需在集成设置里粘贴它们。账户级飞书凭据现在**只需 `appId` + `appSecret`**（缺其一仍视为半填 → `400`；二者齐全即可保存）。`appToken` / `tableId` 保留为**可选可空**字段，仅为向后兼容旧前端飞书卡（提供则存 + 回显，缺省 → `NULL`）；**对提交同步不再使用**（同步改读 per-form 表，§15.1 / §16.9）。前端飞书卡 link→link-less 的彻底改造在 **PR-4** 退场这两个字段，本期不动前端。
 
 ### 12.2 加密方案（AES-GCM + `CONFIG_KEY` + 每字段独立 iv）
 
@@ -737,7 +739,7 @@ Worker 内部流程：
 >
 > **不在本节：** 字段类型的精确映射（在 §16.8）、防刷 / 限流、公开填写页前端、历史回填（已确认不做）。
 >
-> **多租户（§16.5 / §17.9 第 5 条）：** 本端点**公开**、没有「当前登录 owner」。`formSlug`（§16 在请求体加入）通过 `formExists` 后，须用 `getFormOwner(db, slug)` **反查该 form 所属 owner 的 `owner_id`**——它既是 D1 提交行的**隔离键**（`submissions.owner_id`），也用于读**那个 owner**的飞书配置决定是否同步。陌生人匿名提交某 slug，落进这张表所属那个 owner 名下的 D1，并（若配了飞书）同步进那个 owner 的飞书租户，而非固定 / 任意 owner。
+> **多租户（§16.5 / §17.9 第 5 条）：** 本端点**公开**、没有「当前登录 owner」。`formSlug`（§16 在请求体加入）通过 `formExists` 后，须用 `getFormOwner(db, slug)` **反查该 form 所属 owner 的 `owner_id`**——它既是 D1 提交行的**隔离键**（`submissions.owner_id`），也用于读**那个 owner**的飞书账户级凭据决定能否同步。**同步目标表则按 slug 读 per-form 表**（`getFormFeishuTable(db, slug)`，§16.9）——每张已发布表单有它自己的一张飞书多维表格。陌生人匿名提交某 slug，落进这张表所属那个 owner 名下的 D1，并（若该 owner 配了飞书**且**这张表单已建好飞书表）同步进**那张 per-form 飞书表**，而非固定 / 任意 owner、也不再是 owner 单一对表。
 
 ### 15.1 端点职责
 
@@ -751,11 +753,14 @@ Worker 内部流程：
 2) ownerId = getFormOwner(env.DB, formSlug)          ← 按 slug 反查 form 所属 owner（隔离键，§16.5 / §17.9 第 5 条）
 3) insertSubmission(env.DB, {id, formSlug, ownerId,  ← **写 D1 主存（必成）**；id=crypto.randomUUID()，
    answers, createdAt})                                createdAt=ISO-8601。D1 写失败 → 500（提交未落库）
-4) getOwnerConfig(env.DB, key, ownerId)              ← 读**该 owner**配置（判断是否配了飞书）
-5) 若 owner.feishu !== null（配了飞书）             → ctx.waitUntil(syncSubmissionToFeishu(...))：后台
-   换 token → listBitableColumns → answersToTypedFields → writeRecordWithFieldEnsure（缺列自愈，§15.8）
-   → 成功 recordFeishuSync 回填 feishu_record_id / 失败 recordFeishuSyncError 记非敏感错误名（§15.7）
-   若 owner.feishu === null（未配飞书）             → 跳过同步（**不再 409**）
+4) getFormFeishuTable(env.DB, formSlug)              ← 读**该 form 行**的 per-form 飞书表定位（§16.9）；
+   （该 form 还没建飞书表，两列 NULL → null）          null = 不同步、回执留空（与「未配飞书」同语义）
+5) getOwnerConfig(env.DB, key, ownerId)              ← 读**该 owner**配置（判断是否配了飞书）
+6) 若 table !== null 且 owner.feishu !== null        → ctx.waitUntil(syncSubmissionToFeishu(...))：后台
+   （配了飞书 + 该 form 已建表）                        换 token → listBitableColumns（按 form 表）→
+   answersToTypedFields → writeRecordWithFieldEnsure（缺列自愈，§15.8）→ 成功 recordFeishuSync 回填
+   feishu_record_id / 失败 recordFeishuSyncError 记非敏感错误名（§15.7）
+   若 table === null（该 form 没建表）或 owner.feishu === null（未配飞书） → 跳过同步（**不再 409**）
 6) 200 { ok:true, id }                               ← 提交已落 D1 主存；id 是 submissions 主键
 ```
 
@@ -809,7 +814,7 @@ MVP 直转：把 `answers` 摊平成飞书新增记录 body 里的 `fields` 对�
 | 新建字段 | `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields` | `Authorization: Bearer <tenant_access_token>`，body `{ field_name, type: toBitableFieldType(field.type), property?: buildFieldProperty(field) }`（按字段 `type` 映射列类型，单选 / 多选带 `property.options`，§16.8.2） | 上游 `2xx` 且 body `code === 0` → 建成；`code === 1254014` `FieldNameDuplicated` 视为**已存在即成功**（幂等）；其它 `code≠0` → 建列失败。在 §15.8 自愈分支 + §16.8 发布 / 编辑预建分支调用 |
 
 - 飞书的约定是 HTTP `200` 也可能带非 0 业务错误码，所以每步都**必须看 body 的 `code`**，`code === 0` 才算成功（与 §14.2 一致，复用 `FEISHU_OK_CODE`）。
-- `{app_token}` / `{table_id}` 用 `getOwnerConfig` 解出的 `feishu.appToken` / `feishu.tableId` 填充。
+- `{app_token}` / `{table_id}` 用 **per-form 表定位** `getFormFeishuTable(db, formSlug)` 解出的 `appToken` / `tableId` 填充（§16.9，每表单一张飞书多维表格）——**不再**用 `owner_config` 的单一对（那两列对同步已弃用，仅回显）。该 form 还没建表（`null`）→ 整段同步跳过。
 - 稳态提交走「换 token + 列出字段 + 新增记录」三步（列出字段用于按列真实类型写值，§16.8.4 方案 a）；**新建字段**端点仍是反应式的——只在新增记录返回 `1254045`（列不存在）时由 §15.8 自愈触发，或由 §16.8 发布 / 编辑预建在后台 best-effort 调用，正常提交的 happy path 不建列。
 
 ### 15.6 错误响应（状态码 + `{ error }`）
@@ -1012,11 +1017,13 @@ CREATE TABLE IF NOT EXISTS forms (
 ### 16.8 发布即在飞书预建带类型的列（best-effort）
 
 > **解决什么：** §15.8 自愈让「提交不再因缺列而失败」，但列只在**首次提交**撞缺列时一列列懒建、且**一律文本列**（`type 1`）。结果 owner 发布后在飞书看不到完整结构，且 `number` / `date` / `select` 等字段全落成文本列。本节让**发布 / 编辑即按字段 `type` 把对应类型的列在飞书表里建好**，owner 发布完立刻看到**完整且类型正确**的表结构。
+>
+> **与 §16.9 的关系（PR-3）：** 本节定义「在一张飞书表上按字段类型建 / 改列」的逻辑；**这张表本身由 §16.9「发布即自动建表」per-form 产出**（每份表单一张飞书多维表格）。发布路径先走 §16.9 建表（建 app + 建数据表 + 回写定位），再复用本节逻辑在那张新表上预建列；编辑路径按 slug 读 per-form 表后跑本节的增量补列 / 改名。
 
 #### 16.8.1 建列时机
 
-- **发布（`POST /api/forms`）：** 落库成功后，在 `c.executionCtx.waitUntil(...)` 里**后台**对该 owner 的飞书表**预建全部列**（`preCreateBitableColumnsBestEffort(env, ownerId, input.fields)`）。
-- **编辑（`PATCH /api/forms/:slug` 改了 `fields`）：** 仅当请求体带了 `fields` 时，对该 owner 的飞书表后台跑**两步 best-effort**（同一个 `waitUntil`，**顺序见 §16.8.7**）：① **先同步改名**（把因 `label` 变更的现有列改成新名，`syncBitableColumnRenamesBestEffort`）→ ② 再对**更新后的完整 `fields`** 预建（`preCreateBitableColumnsBestEffort`）。预建内部「先列出现有列、只建缺的、跳过已存在的」，故传全集天然**增量**；改名先行后，被改名的列已是新名，预建看到它存在即跳过，**不会重复建**。
+- **发布（`POST /api/forms`，PR-3 起走 §16.9 自动建表）：** 落库成功后，在 `c.executionCtx.waitUntil(...)` 里**后台**先为该表单**自动建一张 per-form 飞书多维表格**、再对这张新表**预建全部列**——发布路径走 `ensureFeishuTableForFormBestEffort(env, ownerId, slug, title, input.fields)`（建 app + 建数据表 + 回写定位 + 预建列一条龙，§16.9）。预建本身仍是 §16.8.2–§16.8.3 的逻辑（按字段 `type` 建对应类型列），只是作用在这张新建的 per-form 表上。
+- **编辑（`PATCH /api/forms/:slug` 改了 `fields`）：** 仅当请求体带了 `fields` 时，对该表单的 **per-form 飞书表**（`getFormFeishuTable(slug)`；还没建表 → 直接跳过）后台跑**两步 best-effort**（同一个 `waitUntil`，**顺序见 §16.8.7**）：① **先同步改名**（把因 `label` 变更的现有列改成新名，`syncBitableColumnRenamesBestEffort`）→ ② 再对**更新后的完整 `fields`** 预建（`preCreateBitableColumnsBestEffort`）。预建内部「先列出现有列、只建缺的、跳过已存在的」，故传全集天然**增量**；改名先行后，被改名的列已是新名，预建看到它存在即跳过，**不会重复建**。
 - **改字段标签 → 同步飞书列改名（§16.8.7，本期新增）：** 编辑里把某字段的 `label` 改了（`id` 不变），系统**改名**飞书表里那一列（而非按新 label 新建一列、把旧列连同已收数据丢下）。**v1 只做改名**：删字段 / 改类型 / 排序不同步（见 §16.8.7 范围 + 留白）。
 
 #### 16.8.2 字段 `type` → 飞书 Bitable 列类型映射（单一真相源）
@@ -1116,6 +1123,63 @@ owner **未配飞书 / 飞书连不上 / token 换取失败 / 建列失败** →
 | 字段**排序**变 | **不同步** | 飞书列序与表单序解耦 |
 
 - **留白（follow-up）：** ① **删列同步**（删字段时归档 / 隐藏对应列，权衡数据保全）；② **改类型同步**（飞书有数据列不能改类型，需迁移列）；③ **排序同步**；④ **字段 `id` ↔ 飞书 `field_id` 持久映射**（D1 存一张映射表，比「靠旧 label 定位」更稳——能扛「owner 手动改过列名 / 同表多次改名链」等 label 漂移场景）。
+
+### 16.9 发布即自动建表（每表单一张飞书多维表格，best-effort）
+
+> **解决什么（PR-3 架构转向）：** 此前飞书是「owner 在集成设置里粘贴一对 `app_token` / `table_id`」——**全平台所有表单挤进同一张飞书多维表格**，owner 还得先手动建好那张表、复制定位回填配置。本节把它升级为 **per-form 一张飞书多维表格**：owner 只配**账户级**飞书凭据（`app_id` + `app_secret`，§12.1 已放宽），**发布一份表单时系统就替他在飞书里建好一张专属的多维表格**（建 app + 建数据表 + 预建带类型的列），并把这张表的定位写进该 form 行。owner 不再手动建表 / 粘 token，每份表单的提交各落各的表、互不混淆。
+
+#### 16.9.1 per-form 表定位落库（migration `0006_form_feishu_table.sql`）
+
+`forms` 表新增两列承载这张 per-form 飞书表的定位：
+
+```sql
+ALTER TABLE forms ADD COLUMN feishu_app_token TEXT;  -- per-form 多维表格 app token，明文，可空
+ALTER TABLE forms ADD COLUMN feishu_table_id  TEXT;  -- per-form 数据表 id，明文，可空（与 app_token 成对）
+```
+
+- 两列**均可空、且成对**：要么同时有值（这张表单已建好飞书表）、要么同时 `NULL`（还没建 / 建表失败）。`NULL` = 该表单还没有对应的飞书多维表格 → 提交不同步、编辑不预建 / 不改名。
+- **明文、绝不含凭据**：`app_token` / `table_id` 都非密；`app_secret` 等凭据仍只在 `owner_config` 加密落库（§12.2），绝不进 `forms` 表、绝不进公开投影（`PublicForm` 类型里根本没有这两个字段，§16.4）。
+- **干净起步零回填**（与 §15 / §18 一致，已与产品负责人确认）：只**新发布**的表单走自动建表，**不回填**任何旧表单——本迁移只加列、无数据搬迁；既有 `forms` 行两列为 `NULL`。
+- `owner_config` 的 `feishu_app_token` / `feishu_table_id` 列**保留但对同步不再使用**（仅向后兼容回显，§12.1）；**PR-4** 前端飞书卡 link-less 落地后清理。
+
+#### 16.9.2 建表时机与流程（`POST /api/forms` 成功后，`waitUntil` 后台）
+
+发布 `POST /api/forms` 落库成功、`201` 返回后，在 `c.executionCtx.waitUntil(...)` 里**后台 best-effort** 调用 `ensureFeishuTableForFormBestEffort(env, ownerId, slug, title, fields)`，按序：
+
+1. 该 form **已建过表**（`getFormFeishuTable(slug) !== null`）→ 直接 return（幂等，不重复建）。
+2. 读 + 解密**该 owner**的飞书账户级凭据（`getOwnerConfig`）；`owner.feishu === null`（未配飞书）→ 直接 return（静默跳过，不打任何上游）。
+3. `getFeishuTenantToken(appId, appSecret)` 换 `tenant_access_token`；失败 → 吞掉、return。
+4. `createBitableApp(token, title)` —— `POST https://open.feishu.cn/open-apis/bitable/v1/apps`，body `{ name }`；成功 `2xx` 且 `code === 0` → 取 `data.app.app_token`。
+5. `createBitableTable(token, app_token, title)` —— `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables`，body `{ table: { name } }`；成功 `2xx` 且 `code === 0` → 取 `data.table_id`。
+6. `setFormFeishuTable(slug, ownerId, app_token, table_id)` **回写该 form 行**（owner-only，带横向越权防护 `WHERE slug=? AND owner_id=?`）——**先回写定位**，使提交即便随后预建部分失败也能 best-effort 同步 + 缺列自愈（§15.8）。
+7. `preCreateBitableColumns(token, app_token, table_id, fields)` 对这张新表**预建全部带类型的列**（复用 §16.8 的字段 `type` → 列类型映射、单选 / 多选带 `property.options`）。
+
+> 新函数都在 `workers/src/feishu-schema.ts`：`createBitableApp` / `createBitableTable` / `ensureFeishuTableForFormBestEffort`（best-effort 外壳）；回写 `setFormFeishuTable` / 读取 `getFormFeishuTable` 在 `workers/src/forms.ts`。
+
+#### 16.9.3 best-effort 铁律（建表失败绝不挡发布）
+
+`ensureFeishuTableForFormBestEffort` 吞掉**整段链路的任何失败**——表单已建表 / owner 未配飞书 / 飞书连不上 / 换 token 失败 / 建 app 失败 / 建 table 失败 / 建列失败，**一律静默跳过**：
+
+- 发布仍 `201 { slug }`、表单照常 `published`——**无论**飞书有没有配、自动建表成没成。建表失败时这张 form 行的 `feishu_app_token` / `feishu_table_id` 保持 `NULL`（= 暂无飞书表，可观测、可后续补建）。
+- 只记一条**不含凭据**的日志（`err.name` 级别），与 §16.8.5 / §22.2 既有 best-effort 同纪律。**绝不**把 `app_secret` / `tenant_access_token` 写进日志（§15.7）；`token` 只进各上游请求的 `Authorization` 头。
+
+#### 16.9.4 下游改读 per-form 表（提交同步 / 编辑预建 / 改名）
+
+自动建表回写定位后，所有「按表单写飞书 / 改飞书表结构」的路径**改读这张 per-form 表**（`getFormFeishuTable(slug)`），不再用 `owner_config` 的单一对：
+
+- **提交同步**（§15.1，`syncSubmissionToFeishu`）：按 slug 取 per-form 表定位填 `{app_token}` / `{table_id}`；该 form 还没建表（`null`）→ 跳过同步（回执留空，**不算失败**——与「未配飞书」同语义）。
+- **编辑预建 / 改名**（§16.8.1 / §16.8.7，`preCreateBitableColumnsBestEffort` / `syncBitableColumnRenamesBestEffort`）：按 slug 取 per-form 表，针对**这张已建好的表**增量补列 / 改名；该 form 还没建表（`null`）→ 直接 return（编辑没有飞书表的表单不预建 / 不改名）。
+- **发布路径不再走编辑预建外壳**：发布要先建表，走 `ensureFeishuTableForFormBestEffort`（建表 + 回写 + 预建一条龙）；编辑外壳只服务**编辑**路径的增量补列（针对已建好的 per-form 表）。
+
+#### 16.9.5 飞书上游端点（自动建表新增两跳）
+
+| 步骤 | 上游端点 | 凭据用法 | 判定 |
+|---|---|---|---|
+| 建多维表格 app | `POST https://open.feishu.cn/open-apis/bitable/v1/apps` | `Authorization: Bearer <tenant_access_token>`，body `{ name }` | `2xx` 且 `code === 0` → 取 `data.app.app_token`；否则视为建 app 失败 |
+| 建数据表 | `POST https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables` | `Authorization: Bearer <tenant_access_token>`，body `{ table: { name } }` | `2xx` 且 `code === 0` → 取 `data.table_id`；否则视为建表失败 |
+
+- `name` 取表单标题（仅展示用，非凭据）。
+- 与 §15.5 既有几跳（换 token / 新增记录 / 列出字段 / 新建字段）是不同路由；建列复用 §16.8 的「新建字段」端点，作用在这张新建数据表上。
 
 ---
 

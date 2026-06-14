@@ -18,6 +18,7 @@ import {
   type ResendMock,
 } from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
+import { FEISHU_BITABLE_APPS_URL, FEISHU_BITABLE_TABLES_URL } from "../src/feishu-schema";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 import {
   REGISTER_RATE_LIMIT,
@@ -599,6 +600,19 @@ function pathKey(url: string): string {
 }
 const BITABLE_FIELDS_PATH = pathKey(BITABLE_FIELDS_URL);
 
+// §16.9 发布即自动建表端点 + OK 夹具：建 app 返回 OWNER_FEISHU_APP_TOKEN、建表返回
+// OWNER_FEISHU_TABLE_ID，使发布把 per-form 表落成既有 BITABLE_URL/BITABLE_FIELDS_URL 那对。
+const TABLES_URL = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", OWNER_FEISHU_APP_TOKEN);
+const APP_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { app: { app_token: OWNER_FEISHU_APP_TOKEN } },
+});
+const TABLE_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { table_id: OWNER_FEISHU_TABLE_ID },
+});
 const FEISHU_TOKEN_OK_BODY = JSON.stringify({
   code: 0,
   msg: "ok",
@@ -644,6 +658,20 @@ function installFeishuHappyMock(): FeishuMock {
     if (req.url === FEISHU_TENANT_TOKEN_URL) {
       tokenCalls.push({ url: req.url, method: req.method });
       return new Response(FEISHU_TOKEN_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    // §16.9 发布即自动建表：建 app / 建数据表恒 OK，让发布把 per-form 表落进 form 行（setup 里
+    // 发布后 settle + resetCalls 排掉这两跳的噪声），提交据此同步。
+    if (req.url === FEISHU_BITABLE_APPS_URL && req.method === "POST") {
+      return new Response(APP_CREATE_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (req.url === TABLES_URL && req.method === "POST") {
+      return new Response(TABLE_CREATE_OK_BODY, {
         status: 200,
         headers: { "content-type": "application/json" },
       });

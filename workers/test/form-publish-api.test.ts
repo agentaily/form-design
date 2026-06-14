@@ -11,6 +11,7 @@ import {
 } from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
+import { FEISHU_BITABLE_APPS_URL, FEISHU_BITABLE_TABLES_URL } from "../src/feishu-schema";
 
 // Auth split (SPEC.md §17.1): POST /api/forms (publish) and the POST /api/config
 // setup are owner-only → they carry `Authorization: Bearer <jwt>` from login().
@@ -80,6 +81,21 @@ function pathKey(url: string): string {
   return u.origin + u.pathname;
 }
 const BITABLE_FIELDS_PATH = pathKey(BITABLE_FIELDS_URL);
+
+// §16.9 发布即自动建表：建 app / 建数据表端点 + OK 夹具。刻意让 create-app 返回
+// OWNER_FEISHU_APP_TOKEN、create-table 返回 OWNER_FEISHU_TABLE_ID，故发布把 per-form 表落成既有
+// BITABLE_URL / BITABLE_FIELDS_URL 那对，提交同步命中既有 URL，无需另设夹具。
+const TABLES_URL = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", OWNER_FEISHU_APP_TOKEN);
+const APP_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { app: { app_token: OWNER_FEISHU_APP_TOKEN } },
+});
+const TABLE_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { table_id: OWNER_FEISHU_TABLE_ID },
+});
 
 const FEISHU_TOKEN_OK_BODY = JSON.stringify({
   code: 0,
@@ -204,6 +220,20 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
       return new Response(opts.token.body, {
         status: opts.token.status,
         headers: opts.token.headers ?? { "content-type": "application/json" },
+      });
+    }
+    // §16.9 发布即自动建表：建 app（POST /apps）/ 建数据表（POST /apps/{token}/tables）恒 OK，
+    // 让发布把 per-form 表落进 form 行；提交据此同步。两端点在发布后台 best-effort 调用。
+    if (req.url === FEISHU_BITABLE_APPS_URL && req.method === "POST") {
+      return new Response(APP_CREATE_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (req.url === TABLES_URL && req.method === "POST") {
+      return new Response(TABLE_CREATE_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
       });
     }
     if (req.url === BITABLE_URL) {

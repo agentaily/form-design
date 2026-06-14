@@ -31,6 +31,7 @@ import {
 } from "./submit";
 import {
   listBitableColumns,
+  ensureFeishuTableForFormBestEffort,
   preCreateBitableColumnsBestEffort,
   syncBitableColumnRenamesBestEffort,
 } from "./feishu-schema";
@@ -43,6 +44,7 @@ import {
   getFormStatus,
   getFormFields,
   getFormOwner,
+  getFormFeishuTable,
   listForms,
   updateForm,
   deleteForm,
@@ -244,48 +246,58 @@ async function sendResetEmail(env: Env, userId: string, to: string): Promise<voi
 // 提交响应、绝不让同步失败影响提交成功（与上面发信 best-effort 同一纪律）。
 
 /**
- * best-effort 同步一条**已落 D1**的提交到 form 所属 owner 的飞书多维表格（§15）。在 waitUntil
- * 后台跑——**整条链路（含读 + 解密 owner 配置在内）都是 best-effort**：提交早已落 D1 主存、
- * 200 已返回，这里任何环节出错都绝不影响那条已成功的提交。
+ * best-effort 同步一条**已落 D1**的提交到**该 form 的 per-form 飞书多维表格**（§15 + §16.9）。在
+ * waitUntil 后台跑——**整条链路（含读 form 行 + 读 / 解密 owner 配置在内）都是 best-effort**：提交
+ * 早已落 D1 主存、200 已返回，这里任何环节出错都绝不影响那条已成功的提交。
  *
- * 流程：读 + 解密 form 所属 owner 的配置（**未配飞书 → 直接返回、回执留空、不算失败**）→ 换
- * tenant_access_token → 列出目标表现有列真实类型（listBitableColumns）→ answersToTypedFields 按
- * 列类型格式化 → writeRecordWithFieldEnsure 写一条记录（缺列自愈建列、重试一次）。成功 →
- * recordFeishuSync 回填 `feishu_record_id` + `feishu_synced_at`；除「未配飞书」外的任意一步抛错 →
- * recordFeishuSyncError 只记**非敏感**错误名（绝不含 tenant_access_token / app_secret，§15.7）。
+ * 流程（§16.9 per-form）：读**该 form 行**的飞书表定位 `getFormFeishuTable(formSlug)`（**该 form 还
+ * 没建飞书表 → 直接返回、回执留空、不算失败**，与「未配飞书」同语义）→ 读 + 解密 form 所属 owner
+ * 的账户级凭据（换 token 用 app_id + app_secret；**未配飞书 → 返回、留空**）→ 换 tenant_access_token
+ * → 列出**该 form 表**现有列真实类型（listBitableColumns）→ answersToTypedFields 按列类型格式化 →
+ * writeRecordWithFieldEnsure 写一条记录（缺列自愈建列、重试一次）。成功 → recordFeishuSync 回填
+ * `feishu_record_id` + `feishu_synced_at`；除「无表 / 未配飞书」外的任意一步抛错 → recordFeishuSyncError
+ * 只记**非敏感**错误名（绝不含 tenant_access_token / app_secret，§15.7）。
  *
- * **读 config 也在 try 内（F1 修复）：** owner 配置的解密在密文损坏 / CONFIG_KEY 错配时会抛——
- * 它属于「飞书同步决策」、纯 best-effort，绝不能让它把已落库的提交回成 500。故它和后续同步一起
- * 被这个 try/catch 包住、在后台跑，失败只记 sync_error。所有异常都在内部吞掉（后台 promise 不该
- * 让 rejection 冒泡）；连回填 error 都失败也静默吞。
+ * **读 form 行 / config 也在 try 内（F1 修复延续）：** form 行读取与 owner 配置的解密在密文损坏 /
+ * CONFIG_KEY 错配时会抛——它们属于「飞书同步决策」、纯 best-effort，绝不能让它把已落库的提交回成
+ * 500。故都被这个 try/catch 包住、在后台跑，失败只记 sync_error。所有异常都在内部吞掉（后台 promise
+ * 不该让 rejection 冒泡）；连回填 error 都失败也静默吞。
  */
 async function syncSubmissionToFeishu(
   env: Env,
   opts: {
     submissionId: string;
+    formSlug: string;
     formOwnerId: string;
     answers: SubmitAnswer[];
     fieldDefs: Field[];
   },
 ): Promise<void> {
-  const { submissionId, formOwnerId, answers, fieldDefs } = opts;
+  const { submissionId, formSlug, formOwnerId, answers, fieldDefs } = opts;
   try {
-    // 读 + 解密 form 所属 owner 的配置（决定是否 / 用谁的凭据同步）。解密失败也在本 try 内吞，
-    // 绝不影响已落库的提交（F1 修复：原先此读在同步请求路径上，抛错会把 200 变 500）。
+    // 该 form 的 per-form 飞书表定位（§16.9）。还没建表（owner 发布时未配飞书 / 自动建表失败）→
+    // 不同步、回执留空（这不是失败，不记 sync_error——与「未配飞书」同语义；干净起步零回填）。
+    const table = await getFormFeishuTable(env.DB, formSlug);
+    if (table === null) {
+      return;
+    }
+    // 读 + 解密 form 所属 owner 的账户级凭据（换 token 用 app_id + app_secret）。解密失败也在本 try
+    // 内吞，绝不影响已落库的提交。未配飞书 → 不同步、回执留空（不记 sync_error）。
     const key = await importConfigKey(env.CONFIG_KEY);
     const owner = await getOwnerConfig(env.DB, key, formOwnerId);
-    // 未配飞书 → 不同步、回执留空（这不是失败，不记 sync_error）。
     if (owner.feishu === null) {
       return;
     }
     const feishu = owner.feishu;
     const token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
-    const columnTypes = await listBitableColumns(token, feishu.appToken, feishu.tableId);
+    // 列出 / 写记录都针对**该 form 的** per-form 表（table.appToken / table.tableId），不再用
+    // owner_config 的单一对。
+    const columnTypes = await listBitableColumns(token, table.appToken, table.tableId);
     const fields = answersToTypedFields(answers, columnTypes, fieldDefs);
     const { recordId } = await writeRecordWithFieldEnsure(
       token,
-      feishu.appToken,
-      feishu.tableId,
+      table.appToken,
+      table.tableId,
       fields,
       fieldDefs,
     );
@@ -845,6 +857,7 @@ app.post(
     c.executionCtx.waitUntil(
       syncSubmissionToFeishu(c.env, {
         submissionId,
+        formSlug: request.formSlug,
         formOwnerId,
         answers: request.answers,
         fieldDefs: fieldsDef,
@@ -879,11 +892,14 @@ app.post("/api/forms", async (c) => {
   const ownerId = c.get("session").sub;
   const { slug } = await saveForm(c.env.DB, ownerId, input);
 
-  // 3) best-effort 预建飞书列（§16.8）：发布即在该 owner 的飞书表里按字段 type 把**全部**列
-  //    建好（number→数字 / date→日期 / select→单选…），让 owner 发布后立刻看到完整且类型正确
-  //    的结构。在 waitUntil 后台跑、**绝不**阻塞 201：owner 未配飞书 / 飞书连不上 / token 换取
-  //    失败 / 建列失败一律静默跳过（只记 err.name，绝不记凭据，§16.8 best-effort 铁律）。
-  c.executionCtx.waitUntil(preCreateBitableColumnsBestEffort(c.env, ownerId, input.fields));
+  // 3) best-effort 发布即自动建表（§16.9）：若该 owner 配了账户级飞书（app_id + app_secret），
+  //    在后台建一个多维表格 app + 一张数据表 + 预建带类型的全部列，再把 app_token / table_id
+  //    回写进这张 form 行——此后提交同步 / 编辑预建都从 form 行读这张 per-form 表。waitUntil
+  //    后台跑、**绝不**阻塞 201：owner 未配飞书 / 飞书连不上 / 建 app / 建 table / 建列失败一律
+  //    静默跳过，表单照常 published（只记 err.name，绝不记凭据，§16.9 best-effort 铁律）。
+  c.executionCtx.waitUntil(
+    ensureFeishuTableForFormBestEffort(c.env, ownerId, slug, input.meta.title, input.fields),
+  );
 
   return c.json({ slug }, 201);
 });
@@ -944,8 +960,8 @@ app.patch("/api/forms/:slug", async (c) => {
     const newFields = updated.fields;
     c.executionCtx.waitUntil(
       (async () => {
-        await syncBitableColumnRenamesBestEffort(c.env, ownerId, oldFields ?? [], newFields);
-        await preCreateBitableColumnsBestEffort(c.env, ownerId, newFields);
+        await syncBitableColumnRenamesBestEffort(c.env, ownerId, slug, oldFields ?? [], newFields);
+        await preCreateBitableColumnsBestEffort(c.env, ownerId, slug, newFields);
       })(),
     );
   }

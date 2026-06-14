@@ -47,14 +47,22 @@ export interface DeepSeekInput {
   model?: string;
 }
 
-/** Feishu Bitable connection input. Optional as a whole block. */
+/**
+ * Feishu Bitable connection input. Optional as a whole block.
+ *
+ * **账户级凭据只需 `appId` + `appSecret`（§16.9）。** `appToken` / `tableId` 不再由 owner 填——
+ * 改由「发布即自动建表」per-form 产出并写进 form 行（见 SPEC §16.9 / feishu-schema.ts）。二者保留
+ * 为**可选**：提供则存（向后兼容旧前端飞书卡的分享链接回显），缺省 → NULL（不再要求）。PR-4
+ * 前端飞书卡 link-less 落地后，这两个字段从输入彻底退场。
+ */
 export interface FeishuInput {
   appId: string;
   /** Secret — encrypted at rest. */
   appSecret: string;
-  /** Bitable app token. */
-  appToken: string;
-  tableId: string;
+  /** @deprecated 不再由 owner 填，改由自动建表写进 form 行（§16.9）；提供则存、缺省 → NULL。 */
+  appToken?: string;
+  /** @deprecated 同 {@link appToken}。 */
+  tableId?: string;
 }
 
 /**
@@ -166,15 +174,18 @@ export async function saveConfig(
   let feishuAppToken: string | null = null;
   let feishuTableId: string | null = null;
   if (input.feishu) {
-    // Feishu is all-or-nothing (SPEC §12.1): reject a half-filled block rather
-    // than silently encrypting `undefined` into the secret column.
+    // 账户级飞书凭据只需 app_id + app_secret（§16.9，PR-3 解除旧 all-or-nothing）：缺其一仍
+    // 视为半填拒绝（appSecret 无 appId 无法 auth、appId 无 appSecret 换不到 token），但
+    // **app_token / table_id 不再必填**——它们改由「发布即自动建表」per-form 产出并写进 form 行。
+    // 这里二者保留为**可选**：提供则原样存（向后兼容旧前端飞书卡的分享链接回显），缺省 → NULL。
     const fe = input.feishu;
     const filled = (v: unknown) => typeof v === "string" && v.trim().length > 0;
-    if (!filled(fe.appId) || !filled(fe.appSecret) || !filled(fe.appToken) || !filled(fe.tableId)) {
-      throw new ConfigValidationError("feishu must be fully provided or omitted");
+    if (!filled(fe.appId) || !filled(fe.appSecret)) {
+      throw new ConfigValidationError("feishu requires app_id and app_secret");
     }
     feishuAppId = normalizePlain(fe.appId);
     feishuSecret = await encryptSecret(fe.appSecret, key);
+    // 可选、向后兼容：normalizePlain 把 undefined / 空串 → null（= 不再用于同步，仅回显）。
     feishuAppToken = normalizePlain(fe.appToken);
     feishuTableId = normalizePlain(fe.tableId);
   }

@@ -24,6 +24,7 @@
 // （SELF.fetch + mock open.feishu.cn）。实现体留 implementer，本文件只给类型 + 签名 + JSDoc 契约。
 
 import type { Field, FieldType } from "./forms";
+import { getFormFeishuTable, setFormFeishuTable } from "./forms";
 import {
   FEISHU_BITABLE_FIELDS_URL,
   FEISHU_FIELDS_LIST_PAGE_SIZE,
@@ -264,6 +265,182 @@ export function formatValueForBitable(
 }
 
 // ---------------------------------------------------------------------------
+// §16.9：发布即自动建表（每表单一张飞书多维表格）—— createBitableApp / createBitableTable
+// ---------------------------------------------------------------------------
+
+/**
+ * 建多维表格 **app**（一个 Bitable 文档）端点（§16.9）。`POST`，body `{ name }`；成功
+ * `2xx` 且 `code === 0` → `data.app.app_token`。与建列 / 列出（{@link FEISHU_BITABLE_FIELDS_URL}）、
+ * 提交写记录（{@link import("./submit").FEISHU_BITABLE_RECORDS_URL}）是不同路由。
+ */
+export const FEISHU_BITABLE_APPS_URL = "https://open.feishu.cn/open-apis/bitable/v1/apps";
+
+/**
+ * 在某 app 下建一张**数据表**端点模板（§16.9）。`POST`，body `{ table: { name } }`；成功
+ * `2xx` 且 `code === 0` → `data.table_id`。`{app_token}` 填 {@link createBitableApp} 拿到的 app token。
+ */
+export const FEISHU_BITABLE_TABLES_URL =
+  "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables";
+
+/**
+ * 建一个飞书多维表格 app，返回其 `app_token`（§16.9）。`POST` {@link FEISHU_BITABLE_APPS_URL}，
+ * body `{ name }`。成功要求 `2xx` 且 `code === 0`，取 `data.app.app_token`。失败（非 2xx /
+ * `code≠0` / 不可达 / 解析失败 / 缺 app_token）抛 {@link BitableWriteError}（message 只带非敏感
+ * code / HTTP 状态，**绝不**含 `tenant_access_token` / `app_secret`，§15.7）；对外由
+ * {@link ensureFeishuTableForFormBestEffort} 的 best-effort 外壳吞掉。
+ *
+ * @param token tenant_access_token；只进 `Authorization` 头（§15.7）。
+ * @param name 新建多维表格 app 的名字（取表单标题，仅展示用，非凭据）。
+ * @returns 新建 app 的 `app_token`。
+ * @throws {@link BitableWriteError} 建 app 失败。
+ */
+export async function createBitableApp(token: string, name: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(FEISHU_BITABLE_APPS_URL, {
+      method: "POST",
+      headers: {
+        // tenant_access_token 的唯一去处是 Authorization 头（§15.7）。
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name }),
+    });
+  } catch {
+    throw new BitableWriteError("飞书建多维表格 app 失败：上游不可达");
+  }
+  let body: { code?: number; data?: { app?: { app_token?: string } } };
+  try {
+    body = (await res.json()) as { code?: number; data?: { app?: { app_token?: string } } };
+  } catch {
+    throw new BitableWriteError(`飞书建多维表格 app 失败：上游返回 ${res.status}`);
+  }
+  const appToken = body.data?.app?.app_token;
+  if (
+    res.ok &&
+    body.code === FEISHU_OK_CODE &&
+    typeof appToken === "string" &&
+    appToken.length > 0
+  ) {
+    return appToken;
+  }
+  // 只暴露非敏感的上游 code 作排错线索。
+  throw new BitableWriteError(`飞书建多维表格 app 失败：code ${body.code}`);
+}
+
+/**
+ * 在某 app 下建一张数据表，返回其 `table_id`（§16.9）。`POST` {@link FEISHU_BITABLE_TABLES_URL}
+ * （`{app_token}` 填 {@link createBitableApp} 的产物），body `{ table: { name } }`。成功要求 `2xx`
+ * 且 `code === 0`，取 `data.table_id`。失败抛 {@link BitableWriteError}（message 只带非敏感
+ * code / 状态，绝不含凭据，§15.7）；对外由 best-effort 外壳吞掉。
+ *
+ * @param token tenant_access_token；只进 `Authorization` 头（§15.7）。
+ * @param appToken 目标多维表格 app token（{@link createBitableApp} 产出）。
+ * @param name 新建数据表的名字（取表单标题，仅展示用，非凭据）。
+ * @returns 新建数据表的 `table_id`。
+ * @throws {@link BitableWriteError} 建表失败。
+ */
+export async function createBitableTable(
+  token: string,
+  appToken: string,
+  name: string,
+): Promise<string> {
+  const url = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", appToken);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ table: { name } }),
+    });
+  } catch {
+    throw new BitableWriteError("飞书建数据表失败：上游不可达");
+  }
+  let body: { code?: number; data?: { table_id?: string } };
+  try {
+    body = (await res.json()) as { code?: number; data?: { table_id?: string } };
+  } catch {
+    throw new BitableWriteError(`飞书建数据表失败：上游返回 ${res.status}`);
+  }
+  const tableId = body.data?.table_id;
+  if (res.ok && body.code === FEISHU_OK_CODE && typeof tableId === "string" && tableId.length > 0) {
+    return tableId;
+  }
+  throw new BitableWriteError(`飞书建数据表失败：code ${body.code}`);
+}
+
+/**
+ * **发布即自动建表的 best-effort 外壳**（§16.9）——`POST /api/forms` 发布成功后在
+ * `c.executionCtx.waitUntil(...)` 里调用的就是它。若该 owner 配了账户级飞书（app_id + app_secret）
+ * 且这张表单**还没建过**飞书表，则建一个多维表格 app + 一张数据表 + 预建带类型的列，再把
+ * app_token / table_id **回写进该 form 行**（§16.9）。整段任何失败都**吞掉**、只记不含凭据的日志，
+ * **绝不**让发布响应（`201`）失败（best-effort 铁律，与 {@link preCreateBitableColumnsBestEffort} 同纪律）。
+ *
+ * 内部职责（§16.9 接线）：
+ * 1. 幂等：`getFormFeishuTable(slug)` 已有 → 直接 return（不重复建；干净起步零回填——只新发布走这条）。
+ * 2. 读 + 解密**该 owner** 的飞书账户级凭据（`getOwnerConfig`）；`owner.feishu === null`（未配飞书）→
+ *    直接 return（静默跳过，不打任何上游）。
+ * 3. `getFeishuTenantToken(appId, appSecret)`；换 token 失败 → 吞掉、return。
+ * 4. `createBitableApp(token, formTitle)` → app_token。
+ * 5. `createBitableTable(token, app_token, formTitle)` → table_id。
+ * 6. `setFormFeishuTable(slug, ownerId, app_token, table_id)` **回写 form 行**——先回写，使提交即便随后
+ *    预建部分失败也能 best-effort 同步 + 缺列自愈（§15.8）。
+ * 7. `preCreateBitableColumns(token, app_token, table_id, fields)` 预建全部带类型的列。
+ *
+ * 即：表单已建表 / owner 未配飞书 / 飞书连不上 / 换 token 失败 / 建 app / 建 table / 建列失败 ——
+ * 一律**静默跳过**，发布照常 `201`、表单照常 published（只是这张表单暂无飞书表 / 列不全，可观测）。
+ * 只记 `err.name`，**绝不**把 `app_secret` / `tenant_access_token` / 明文写进日志（§15.7）。
+ *
+ * @param env 提供 `DB` / `CONFIG_KEY` 的 Worker env（与 submit / 预建外壳同源读 owner 配置 + 写 form 行）。
+ * @param ownerId 发布这份表单的 owner 真实 user id（= 当前 session.sub）。
+ * @param slug 刚发布的表单 slug（自动建表针对它、回写它）。
+ * @param formTitle 表单标题（用作新建 app / 数据表的展示名，非凭据）。
+ * @param fields 该表单的字段定义（发布=全部，预建全部列）。
+ * @returns 总是 resolve（best-effort，永不 reject）。
+ */
+export async function ensureFeishuTableForFormBestEffort(
+  env: { DB: D1Database; CONFIG_KEY: string },
+  ownerId: string,
+  slug: string,
+  formTitle: string,
+  fields: Field[],
+): Promise<void> {
+  try {
+    // 1) 幂等：这张表单已建过飞书表 → 不重复建（干净起步零回填，只新发布走这条）。
+    const existing = await getFormFeishuTable(env.DB, slug);
+    if (existing !== null) {
+      return;
+    }
+    // 2) 读 + 解密该 owner 的飞书账户级凭据；未配飞书 → 静默 return（不打任何上游）。
+    const key = await importConfigKey(env.CONFIG_KEY);
+    const owner = await getOwnerConfig(env.DB, key, ownerId);
+    if (owner.feishu === null) {
+      return;
+    }
+    const feishu = owner.feishu;
+    // 3) 换 tenant_access_token（失败抛 FeishuTokenError，落入下方 catch 被吞）。
+    const token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
+    // 4) 建多维表格 app → app_token。 5) 在该 app 下建数据表 → table_id。
+    const appToken = await createBitableApp(token, formTitle);
+    const tableId = await createBitableTable(token, appToken, formTitle);
+    // 6) 回写 form 行——先回写定位，使提交即便随后预建部分失败也能 best-effort 同步 + 缺列自愈。
+    await setFormFeishuTable(env.DB, slug, ownerId, appToken, tableId);
+    // 7) 预建全部带类型的列（建列失败由本层 catch 吞，不影响已回写的表定位）。
+    await preCreateBitableColumns(token, appToken, tableId, fields);
+  } catch (err) {
+    // best-effort 铁律（§16.9）：任一步失败一律静默吞掉，绝不改变发布的状态码与响应体。只记
+    // err.name，绝不把 app_secret / tenant_access_token / 明文写进日志（§15.7）。
+    console.error(
+      "ensure feishu table for form best-effort failed",
+      err instanceof Error ? err.name : "unknown",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 发布即预建带类型的列（§16.8，best-effort）—— 实现留给 implementer
 // ---------------------------------------------------------------------------
 
@@ -329,43 +506,55 @@ export async function preCreateBitableColumns(
  * 失败都**吞掉**，只记一条**不含凭据**的日志（`err.name` 级别，绝不含 token / app_secret / 明文），
  * **绝不**让发布 / 编辑响应失败（§16.8 best-effort 铁律）。
  *
- * 内部职责（§16.8 接线）：
- * 1. 读 + 解密**该 owner**的飞书配置（`getOwnerConfig`）；`owner.feishu === null`（未配飞书）→ 直接
- *    return（静默跳过，不报错、不打上游）。
- * 2. `getFeishuTenantToken(appId, appSecret)`；换 token 失败（不可达 / code≠0）→ 吞掉（记 err.name）、return。
- * 3. `preCreateBitableColumns(token, appToken, tableId, fields)`；列出 / 建列失败 → 吞掉、return。
+ * 内部职责（§16.8 / §16.9 接线，per-form 表）：
+ * 1. `getFormFeishuTable(slug)` 取**该 form 的** per-form 飞书表定位；还没建表（`null`）→ 直接
+ *    return（编辑没有飞书表的表单不预建；干净起步零回填）。表是发布时由
+ *    {@link ensureFeishuTableForFormBestEffort} 建好并回写的。
+ * 2. 读 + 解密**该 owner**的飞书账户级凭据（`getOwnerConfig`，换 token 用 app_id + app_secret）；
+ *    `owner.feishu === null`（未配飞书）→ return（静默跳过，不打上游）。
+ * 3. `getFeishuTenantToken(appId, appSecret)`；换 token 失败（不可达 / code≠0）→ 吞掉（记 err.name）、return。
+ * 4. `preCreateBitableColumns(token, table.appToken, table.tableId, fields)`；列出 / 建列失败 → 吞掉、return。
  *
- * 即：owner 未配飞书 / 飞书连不上 / token 换取失败 / 建列失败 —— 一律**静默跳过**，发布照常 `201`、
- * 编辑照常 `200`。与 index.ts 既有 {@link import("./email")} 的 `sendVerifyEmail` best-effort 同纪律：
- * 只记 `err.name`，**绝不**把凭据 / 明文写进日志（§15.7）。
+ * 即：该 form 还没建飞书表 / owner 未配飞书 / 飞书连不上 / token 换取失败 / 建列失败 —— 一律
+ * **静默跳过**，编辑照常 `200`。与 index.ts 既有 {@link import("./email")} 的 `sendVerifyEmail`
+ * best-effort 同纪律：只记 `err.name`，**绝不**把凭据 / 明文写进日志（§15.7）。
  *
- * @param env 提供 `DB` / `CONFIG_KEY` 的 Worker env（与 submit / submissions 路由同源读取 owner 配置）。
- * @param ownerId 发布 / 编辑这份表单的 owner 真实 user id（发布 = 当前 session.sub；编辑 = 同）。
- * @param fields 要预建的字段（发布=全部；编辑=新增差集）。
+ * **发布路径不再走它**：发布要先建表，走 {@link ensureFeishuTableForFormBestEffort}（建表 + 回写 +
+ * 预建一条龙）；本外壳只服务**编辑**路径的增量补列（针对已建好的 per-form 表，§16.8）。
+ *
+ * @param env 提供 `DB` / `CONFIG_KEY` 的 Worker env（与 submit / 自动建表外壳同源读 owner 配置 + form 行）。
+ * @param ownerId 编辑这份表单的 owner 真实 user id（= 当前 session.sub）。
+ * @param slug 目标表单 slug（据它读 per-form 飞书表定位）。
+ * @param fields 要预建的字段（编辑=新增差集 / 全量，按现有列只建缺的）。
  * @returns 总是 resolve（best-effort，永不 reject）。
  */
 export async function preCreateBitableColumnsBestEffort(
   env: { DB: D1Database; CONFIG_KEY: string },
   ownerId: string,
+  slug: string,
   fields: Field[],
 ): Promise<void> {
   try {
-    // 1) 读 + 解密该 owner 的飞书配置；未配飞书 → 静默 return（不报错、不打上游）。
+    // 1) 该 form 的 per-form 飞书表定位；还没建表 → 静默 return（没有目标表，无从预建）。
+    const table = await getFormFeishuTable(env.DB, slug);
+    if (table === null) {
+      return;
+    }
+    // 2) 读 + 解密该 owner 的飞书账户级凭据（换 token 用 app_id + app_secret）；未配飞书 → return。
     const key = await importConfigKey(env.CONFIG_KEY);
     const owner = await getOwnerConfig(env.DB, key, ownerId);
     if (owner.feishu === null) {
       return;
     }
     const feishu = owner.feishu;
-    // 2) 换 tenant_access_token（失败抛 FeishuTokenError，落入下方 catch 被吞）。
+    // 3) 换 tenant_access_token（失败抛 FeishuTokenError，落入下方 catch 被吞）。
     const token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
-    // 3) 列出 + 按类型建缺列（任何失败落入 catch 被吞）。
-    await preCreateBitableColumns(token, feishu.appToken, feishu.tableId, fields);
+    // 4) 按该 form 表的 app_token/table_id 列出 + 按类型建缺列（任何失败落入 catch 被吞）。
+    await preCreateBitableColumns(token, table.appToken, table.tableId, fields);
   } catch (err) {
-    // best-effort 铁律（§16.8）：owner 未配飞书 / 飞书连不上 / token 换取失败 / 列出 / 建列
-    // 失败 —— 一律静默吞掉，绝不改变发布 / 编辑的状态码与响应体。与 index.ts 的
-    // sendVerifyEmail best-effort 同纪律：只记 err.name，绝不把 app_secret / tenant_access_token
-    // / 明文写进日志（§15.7）。
+    // best-effort 铁律（§16.8）：该 form 没飞书表 / owner 未配飞书 / 飞书连不上 / token 换取失败 /
+    // 列出 / 建列失败 —— 一律静默吞掉，绝不改变编辑的状态码与响应体。只记 err.name，绝不把
+    // app_secret / tenant_access_token / 明文写进日志（§15.7）。
     console.error(
       "preCreate feishu columns best-effort failed",
       err instanceof Error ? err.name : "unknown",
@@ -797,12 +986,15 @@ export async function renameBitableColumn(
  * 调用的就是它（顺序铁律见 §16.8.1 / §16.8.7）。把整段同步（读配置 → 换 token → 列出含 field_id →
  * 逐个改名）的**任何**失败都**吞掉**，只记一条**不含凭据 / 列值**的日志，**绝不**让编辑响应失败。
  *
- * 内部职责（§16.8.7 接线）：
+ * 内部职责（§16.8.7 / §16.9 接线，per-form 表）：
  * 1. `renames = computeFieldRenames(oldFields, newFields)`；空 → 直接 return（不打任何上游）。
- * 2. 读 + 解密**该 owner** 的飞书配置（`getOwnerConfig`）；`owner.feishu === null`（未配飞书）→ return。
- * 3. `getFeishuTenantToken(appId, appSecret)`；换 token 失败 → 吞掉、return。
- * 4. `listBitableColumnsDetailed(token, appToken, tableId)` 拿现有列「名 → { type, fieldId }」。
- * 5. **逐项**改名（冲突 / 边界逐项跳过，互不影响，§16.8.7）：
+ * 2. `getFormFeishuTable(slug)` 取**该 form 的** per-form 飞书表定位；还没建表（`null`）→ return
+ *    （没有目标表，无从改名）。
+ * 3. 读 + 解密**该 owner** 的飞书账户级凭据（`getOwnerConfig`，换 token 用 app_id + app_secret）；
+ *    `owner.feishu === null`（未配飞书）→ return。
+ * 4. `getFeishuTenantToken(appId, appSecret)`；换 token 失败 → 吞掉、return。
+ * 5. `listBitableColumnsDetailed(token, table.appToken, table.tableId)` 拿现有列「名 → { type, fieldId }」。
+ * 6. **逐项**改名（冲突 / 边界逐项跳过，互不影响，§16.8.7）：
  *    - 旧 label 在现有列里**找不到** → 跳过该项（从没建过 / 已被改过）。
  *    - 新 label 在现有列里**已存在另一个不同列**（撞名）→ **跳过 + 记日志（不含凭据）**，不强改。
  *    - 否则 `renameBitableColumn(...)` 用该列 `fieldId` + 列**现有类型**改名；单项失败 try/catch 吞掉、继续下一项。
@@ -814,8 +1006,9 @@ export async function renameBitableColumn(
  * 顺序铁律（§16.8.7）：本函数**先于**预建跑——改名把现有列改成新名后，随后的预建列出现有列、
  * 看到已改名的列存在即跳过，**不会按新 label 重复建一个列**。
  *
- * @param env 提供 `DB` / `CONFIG_KEY` 的 Worker env（与预建外壳同源读 owner 配置）。
+ * @param env 提供 `DB` / `CONFIG_KEY` 的 Worker env（与预建外壳同源读 owner 配置 + form 行）。
  * @param ownerId 编辑这份表单的 owner 真实 user id（= 当前 session.sub）。
+ * @param slug 目标表单 slug（据它读 per-form 飞书表定位）。
  * @param oldFields 编辑落库**前**的字段定义（旧 `schema_json`，调用方在 `updateForm` 前读取）。
  * @param newFields 编辑后的字段定义（`UpdatedForm.fields` / `UpdateFormInput.fields`）。
  * @returns 总是 resolve（best-effort，永不 reject）。
@@ -823,26 +1016,32 @@ export async function renameBitableColumn(
 export async function syncBitableColumnRenamesBestEffort(
   env: { DB: D1Database; CONFIG_KEY: string },
   ownerId: string,
+  slug: string,
   oldFields: Field[],
   newFields: Field[],
 ): Promise<void> {
   try {
-    // 1) 纯 diff 算改名计划——无改名 → 直接 return（不读配置、不打任何上游）。
+    // 1) 纯 diff 算改名计划——无改名 → 直接 return（不读配置 / form 行、不打任何上游）。
     const renames = computeFieldRenames(oldFields, newFields);
     if (renames.length === 0) {
       return;
     }
-    // 2) 读 + 解密该 owner 的飞书配置；未配飞书 → 静默 return。
+    // 2) 该 form 的 per-form 飞书表定位；还没建表 → 静默 return（无目标表，无从改名）。
+    const table = await getFormFeishuTable(env.DB, slug);
+    if (table === null) {
+      return;
+    }
+    // 3) 读 + 解密该 owner 的飞书账户级凭据（换 token 用 app_id + app_secret）；未配飞书 → return。
     const key = await importConfigKey(env.CONFIG_KEY);
     const owner = await getOwnerConfig(env.DB, key, ownerId);
     if (owner.feishu === null) {
       return;
     }
     const feishu = owner.feishu;
-    // 3) 换 tenant_access_token（失败抛 FeishuTokenError，落入下方 catch 被吞）。
+    // 4) 换 tenant_access_token（失败抛 FeishuTokenError，落入下方 catch 被吞）。
     const token = await getFeishuTenantToken(feishu.appId, feishu.appSecret);
-    // 4) 列出现有列「名 → { type, fieldId }」（失败抛 BitableWriteError，落入 catch 被吞）。
-    const existing = await listBitableColumnsDetailed(token, feishu.appToken, feishu.tableId);
+    // 5) 列出该 form 表现有列「名 → { type, fieldId }」（失败抛 BitableWriteError，落入 catch 被吞）。
+    const existing = await listBitableColumnsDetailed(token, table.appToken, table.tableId);
     // 5) 逐项改名——冲突 / 边界逐项跳过、互不影响、单项失败不外抛（§16.8.7）。
     for (const rename of renames) {
       const col = existing.get(rename.oldLabel);
@@ -860,8 +1059,8 @@ export async function syncBitableColumnRenamesBestEffort(
         // 用该列 fieldId + 列现有类型改名（只改名不改类型）。单项失败 try/catch 吞掉、继续下一项。
         await renameBitableColumn(
           token,
-          feishu.appToken,
-          feishu.tableId,
+          table.appToken,
+          table.tableId,
           col.fieldId,
           rename.newLabel,
           col.type,

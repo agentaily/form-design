@@ -7,6 +7,7 @@ import {
   resetSubmissions,
   login,
   authHeader,
+  testEnv,
 } from "./helpers";
 import {
   FEISHU_BITABLE_RECORDS_URL,
@@ -14,7 +15,11 @@ import {
   FEISHU_CODE_FIELD_NOT_FOUND,
   FEISHU_CODE_FIELD_DUPLICATED,
 } from "../src/submit";
-import { FEISHU_BITABLE_FIELD_TYPE } from "../src/feishu-schema";
+import {
+  FEISHU_BITABLE_FIELD_TYPE,
+  FEISHU_BITABLE_APPS_URL,
+  FEISHU_BITABLE_TABLES_URL,
+} from "../src/feishu-schema";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // Outer-loop acceptance specs realizing workers/features/feishu-typed-columns.feature
@@ -59,6 +64,22 @@ const FIELDS_URL = FEISHU_BITABLE_FIELDS_URL.replace("{app_token}", OWNER_FEISHU
   "{table_id}",
   OWNER_FEISHU_TABLE_ID,
 );
+// §16.9 自动建表：建数据表端点 = apps/{app_token}/tables（{app_token} 填自动建 app 返回的夹具）。
+const TABLES_URL = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", OWNER_FEISHU_APP_TOKEN);
+// 自动建表 mock 返回的 app_token / table_id 夹具——刻意等于上面 FIELDS_URL/RECORDS_URL 用的那对，
+// 故发布自动建表把 per-form 表落成 (OWNER_FEISHU_APP_TOKEN, OWNER_FEISHU_TABLE_ID)，后续列出/写记录
+// /建列都命中既有 URL，无需另设夹具（§16.9）。
+const APP_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { app: { app_token: OWNER_FEISHU_APP_TOKEN, name: "类型列测试表单" } },
+});
+const TABLE_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { table_id: OWNER_FEISHU_TABLE_ID },
+});
+const APP_CREATE_BAD_BODY = JSON.stringify({ code: 1254001, msg: "AppCreateRejected" });
 
 /** origin + pathname (query/hash stripped) — matches the GET-with-?page_size lister. */
 function pathKey(url: string): string {
@@ -118,6 +139,10 @@ interface UpstreamReply {
 interface FeishuMockOpts {
   /** Reply for the token exchange. Default OK. Set `null` to forbid (must NOT call). */
   token?: UpstreamReply | null;
+  /** Reply for create-bitable-app (POST /apps，§16.9). Default OK → app_token 夹具。 */
+  appCreate?: UpstreamReply;
+  /** Reply for create-table (POST /apps/{app_token}/tables，§16.9). Default OK → table_id 夹具。 */
+  tableCreate?: UpstreamReply;
   /** Sequenced replies for add-record (POST records). Default [OK]. */
   record?: UpstreamReply[];
   /** Sequenced replies for list-fields (GET fields). Default [empty list]. */
@@ -136,6 +161,8 @@ interface CapturedCall {
 
 interface FeishuMock {
   readonly tokenCalls: CapturedCall[];
+  readonly appCreateCalls: CapturedCall[];
+  readonly tableCreateCalls: CapturedCall[];
   readonly recordCalls: CapturedCall[];
   readonly fieldsListCalls: CapturedCall[];
   readonly fieldCreateCalls: CapturedCall[];
@@ -145,12 +172,19 @@ interface FeishuMock {
 
 function installFeishuMock(opts: FeishuMockOpts = {}): FeishuMock {
   const tokenCalls: CapturedCall[] = [];
+  const appCreateCalls: CapturedCall[] = [];
+  const tableCreateCalls: CapturedCall[] = [];
   const recordCalls: CapturedCall[] = [];
   const fieldsListCalls: CapturedCall[] = [];
   const fieldCreateCalls: CapturedCall[] = [];
 
   const tokenReply: UpstreamReply | null =
     opts.token === undefined ? { status: 200, body: FEISHU_TOKEN_OK_BODY } : opts.token;
+  const appCreateReply: UpstreamReply = opts.appCreate ?? { status: 200, body: APP_CREATE_OK_BODY };
+  const tableCreateReply: UpstreamReply = opts.tableCreate ?? {
+    status: 200,
+    body: TABLE_CREATE_OK_BODY,
+  };
   const recordReplies: UpstreamReply[] = opts.record ?? [{ status: 200, body: BITABLE_OK_BODY }];
   const fieldsListReplies: UpstreamReply[] = opts.fieldsList ?? [
     { status: 200, body: fieldsListBody([]) },
@@ -203,6 +237,16 @@ function installFeishuMock(opts: FeishuMockOpts = {}): FeishuMock {
       tokenCalls.push(captured);
       return reply(tokenReply);
     }
+    // §16.9 自动建表：建多维表格 app（POST /apps，精确匹配，不含 /apps/{token}/... 的更长路径）。
+    if (req.url === FEISHU_BITABLE_APPS_URL && req.method === "POST") {
+      appCreateCalls.push(captured);
+      return reply(appCreateReply);
+    }
+    // §16.9 自动建表：建数据表（POST /apps/{app_token}/tables，精确匹配，不含 .../tables/{id}/fields）。
+    if (req.url === TABLES_URL && req.method === "POST") {
+      tableCreateCalls.push(captured);
+      return reply(tableCreateReply);
+    }
     if (req.url === RECORDS_URL) {
       const r = seqReply(recordReplies, recordSeq++);
       recordCalls.push(captured);
@@ -227,11 +271,15 @@ function installFeishuMock(opts: FeishuMockOpts = {}): FeishuMock {
   globalThis.fetch = stub as typeof fetch;
   return {
     tokenCalls,
+    appCreateCalls,
+    tableCreateCalls,
     recordCalls,
     fieldsListCalls,
     fieldCreateCalls,
     resetCalls: () => {
       tokenCalls.length = 0;
+      appCreateCalls.length = 0;
+      tableCreateCalls.length = 0;
       recordCalls.length = 0;
       fieldsListCalls.length = 0;
       fieldCreateCalls.length = 0;
@@ -510,6 +558,102 @@ describe("发布预建带类型列 + 提交按类型写值 (workers/features/fei
     expect(file?.type).toBe(TEXT);
     // 文本列建列不带 property（仅单选 / 多选带 options）。
     expect(file?.property).toBeUndefined();
+  });
+
+  // ===========================================================================
+  // §16.9 发布即自动建表：建 app + 数据表并把定位回写进 form 行
+  // ===========================================================================
+
+  it("Scenario: 发布即在飞书自动建一个 app + 数据表并把定位回写进 form 行", async () => {
+    // Given owner 配了账户级飞书（app_id + app_secret）。
+    await configureOwner({ feishu: true });
+    mock = installFeishuMock({ fieldsList: [{ status: 200, body: fieldsListBody([]) }] });
+
+    // When owner 发布一份表单。
+    const slug = await publishFormAndGetSlug([{ id: "f_name", type: "text", label: "姓名" }]);
+    await waitForPreCreate(mock);
+
+    // Then 后台各建了一次 app 与一张数据表。
+    expect(mock.appCreateCalls).toHaveLength(1);
+    expect(mock.tableCreateCalls).toHaveLength(1);
+    // And 建 app 请求只在 Authorization 头带 token（§15.7）。
+    expect(mock.appCreateCalls[0].headers.get("authorization")).toBe(
+      `Bearer ${UPSTREAM_TENANT_TOKEN}`,
+    );
+    // And per-form 的 app_token / table_id 被回写进这张 form 行（§16.9）。
+    const row = await testEnv.DB.prepare(
+      "SELECT feishu_app_token, feishu_table_id FROM forms WHERE slug = ?",
+    )
+      .bind(slug)
+      .first<{ feishu_app_token: string | null; feishu_table_id: string | null }>();
+    expect(row?.feishu_app_token).toBe(OWNER_FEISHU_APP_TOKEN);
+    expect(row?.feishu_table_id).toBe(OWNER_FEISHU_TABLE_ID);
+  });
+
+  it("Scenario: owner 未配飞书时发布不建表且 form 行无飞书表", async () => {
+    // Given owner 只配了 DeepSeek（未配飞书）。
+    await configureOwner({ feishu: false });
+    mock = installFeishuMock({ token: null }); // 任何飞书调用都会 THROW
+
+    // When owner 发布表单。
+    const slug = await publishFormAndGetSlug([{ id: "f_name", type: "text", label: "姓名" }]);
+    await waitForPreCreate(mock, false);
+
+    // Then 完全不建表、不打飞书。
+    expect(mock.tokenCalls).toHaveLength(0);
+    expect(mock.appCreateCalls).toHaveLength(0);
+    expect(mock.tableCreateCalls).toHaveLength(0);
+    // And form 行的飞书表定位为 NULL（干净起步零回填）。
+    const row = await testEnv.DB.prepare(
+      "SELECT feishu_app_token, feishu_table_id FROM forms WHERE slug = ?",
+    )
+      .bind(slug)
+      .first<{ feishu_app_token: string | null; feishu_table_id: string | null }>();
+    expect(row?.feishu_app_token).toBeNull();
+    expect(row?.feishu_table_id).toBeNull();
+  });
+
+  it("Scenario: 建 app 失败时发布仍成功且 form 行无飞书表", async () => {
+    // Given owner 配了飞书但建 app 被飞书拒绝。
+    await configureOwner({ feishu: true });
+    mock = installFeishuMock({ appCreate: { status: 200, body: APP_CREATE_BAD_BODY } });
+    // 捕获 best-effort 失败日志，断言只记错误名、绝不漏 app_secret / tenant_access_token（§15.7）。
+    const errLogs: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => {
+      errLogs.push(args.map((a) => String(a)).join(" "));
+    };
+
+    try {
+      // When owner 发布表单。
+      const res = await publishForm([{ id: "f_name", type: "text", label: "姓名" }]);
+
+      // Then 发布照常成功（best-effort 不挡发布）。
+      expect(res.status).toBe(201);
+      const slug = ((await res.json()) as { slug?: string }).slug as string;
+      await waitForPreCreate(mock);
+
+      // And 探了 token + 试建了 app（被拒），但绝不进建表 / 建列。
+      expect(mock.appCreateCalls).toHaveLength(1);
+      expect(mock.tableCreateCalls).toHaveLength(0);
+      expect(mock.fieldCreateCalls).toHaveLength(0);
+      // And form 行没拿到飞书表定位（建表失败 → 两列保持 NULL）。
+      const row = await testEnv.DB.prepare(
+        "SELECT feishu_app_token, feishu_table_id FROM forms WHERE slug = ?",
+      )
+        .bind(slug)
+        .first<{ feishu_app_token: string | null; feishu_table_id: string | null }>();
+      expect(row?.feishu_app_token).toBeNull();
+      expect(row?.feishu_table_id).toBeNull();
+    } finally {
+      console.error = origError;
+    }
+
+    // And 日志只记错误名而绝不记录 app_secret / tenant_access_token / app_id（§15.7）。
+    const allLogs = errLogs.join("\n");
+    expect(allLogs).not.toContain(OWNER_FEISHU_APP_SECRET);
+    expect(allLogs).not.toContain(UPSTREAM_TENANT_TOKEN);
+    expect(allLogs).not.toContain(OWNER_FEISHU_APP_ID);
   });
 
   // ===========================================================================

@@ -6,10 +6,12 @@ import {
   resetForms,
   resetSubmissions,
   testEnv,
+  waitForFormFeishuTable,
   login,
   authHeader,
 } from "./helpers";
 import { FEISHU_BITABLE_RECORDS_URL, FEISHU_BITABLE_FIELDS_URL } from "../src/submit";
+import { FEISHU_BITABLE_APPS_URL, FEISHU_BITABLE_TABLES_URL } from "../src/feishu-schema";
 import { FEISHU_TENANT_TOKEN_URL } from "../src/feishu";
 
 // POST /api/submit stays PUBLIC (SPEC.md §17.1) — answerers send NO token; postSubmit
@@ -59,6 +61,21 @@ function pathKey(url: string): string {
   return u.origin + u.pathname;
 }
 const BITABLE_FIELDS_PATH = pathKey(BITABLE_FIELDS_URL);
+
+// §16.9 发布即自动建表：建 app / 建数据表端点 + OK 夹具。刻意让 create-app 返回
+// OWNER_FEISHU_APP_TOKEN、create-table 返回 OWNER_FEISHU_TABLE_ID，故发布把 per-form 表落成既有
+// BITABLE_URL / BITABLE_FIELDS_URL 那对，提交同步命中既有 URL，无需另设夹具。
+const TABLES_URL = FEISHU_BITABLE_TABLES_URL.replace("{app_token}", OWNER_FEISHU_APP_TOKEN);
+const APP_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { app: { app_token: OWNER_FEISHU_APP_TOKEN } },
+});
+const TABLE_CREATE_OK_BODY = JSON.stringify({
+  code: 0,
+  msg: "success",
+  data: { table_id: OWNER_FEISHU_TABLE_ID },
+});
 
 // list-columns OK body: table already has 姓名(text) + 兴趣(multi-select), so the
 // steady-state listBitableColumns finds every submitted label — no self-heal.
@@ -159,6 +176,20 @@ function installFeishuMock(opts: FeishuMockOpts): FeishuMock {
       return new Response(opts.token.body, {
         status: opts.token.status,
         headers: opts.token.headers ?? { "content-type": "application/json" },
+      });
+    }
+    // §16.9 发布即自动建表：建 app（POST /apps）/ 建数据表（POST /apps/{token}/tables）恒 OK，
+    // 让发布把 per-form 表落进 form 行；提交据此同步。两端点在发布后台 best-effort 调用。
+    if (req.url === FEISHU_BITABLE_APPS_URL && req.method === "POST") {
+      return new Response(APP_CREATE_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (req.url === TABLES_URL && req.method === "POST") {
+      return new Response(TABLE_CREATE_OK_BODY, {
+        status: 200,
+        headers: { "content-type": "application/json" },
       });
     }
     if (req.url === BITABLE_URL) {
@@ -353,11 +384,15 @@ async function publishFormAndGetSlug(): Promise<string> {
   return json.slug;
 }
 
-/** Publish + drain the publish-background pre-create + reset captures, so the per-stage
- *  counts reflect the submit's own background sync alone. */
+/** Publish + drain the publish-background auto-create + reset captures, so the per-stage
+ *  counts reflect the submit's own background sync alone. Gates deterministically on the
+ *  per-form Feishu table writeback (§16.9) — NOT a fixed sleep — so the subsequent submit
+ *  reliably reads a non-null `getFormFeishuTable(slug)` even under CI load. Callers here
+ *  always have Feishu configured (the table WILL be written). */
 async function publishWithMockDrained(installed: FeishuMock): Promise<string> {
   const slug = await publishFormAndGetSlug();
   await drainBackgroundPreCreate(installed);
+  await waitForFormFeishuTable(slug);
   installed.resetCalls();
   return slug;
 }
@@ -524,13 +559,21 @@ describe("submit POST /api/submit (workers/features/submit.feature)", () => {
 
   it("Scenario: 同步换 token 失败时提交仍成功并记同步错误且不泄漏 app secret", async () => {
     await configureOwner({ feishu: true });
-    // token exchange returns a non-zero business code (HTTP 200!). record-write reply
-    // OMITTED + list-fields forbidden: reaching them after a failed token would THROW.
+    // §16.9：per-form 表在发布时建好（用全 OK 的 mock），故先发布把表建妥再换「换 token 失败」的
+    // mock 测**提交同步**那一跳的 token 失败——否则 token 失败发生在发布自动建表、表根本没建成，
+    // 提交会因 form 无飞书表而干净跳过（不记 sync_error），就测不到「同步换 token 失败记错误」。
+    const okMock = installFeishuMock({
+      token: { status: 200, body: FEISHU_TOKEN_OK_BODY },
+      record: { status: 200, body: BITABLE_OK_BODY },
+    });
+    const slug = await publishWithMockDrained(okMock);
+    okMock.restore();
+    // 提交同步用的 mock：token exchange returns a non-zero business code (HTTP 200!). record-write
+    // reply OMITTED + list-fields forbidden: reaching them after a failed token would THROW.
     mock = installFeishuMock({
       token: { status: 200, body: FEISHU_TOKEN_BAD_BODY },
       fieldsList: null,
     });
-    const slug = await publishWithMockDrained(mock);
 
     const res = await postSubmit(makeSubmission(slug));
     const raw = await res.clone().text();
