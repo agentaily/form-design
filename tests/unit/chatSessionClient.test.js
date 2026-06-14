@@ -23,6 +23,9 @@ import {
   deleteChatSession,
   setActiveDesignSessionId,
   newDesignSessionId,
+  WORKSPACE_SNAPSHOT_ID,
+  buildWorkspaceSnapshotTurn,
+  splitWorkspaceSnapshot,
 } from "../../src/core/chatSessionClient";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
 
@@ -460,5 +463,103 @@ describe("chatSessionClient · setActiveDesignSessionId / newDesignSessionId", (
     const a = newDesignSessionId();
     const b = newDesignSessionId();
     expect(a).not.toBe(b);
+  });
+});
+
+// 工作区快照 (PR #76)：§26 只持久化【对话】(turns + history)，不存表单预览模型，所以刷新后右侧
+// 工作区会丢。这两个纯函数让 App 把表单模型 (meta + fields) 作为一条合成 turn 搭进 §26 既有的
+// 不透明 turns_json 里（无 D1 迁移）：buildWorkspaceSnapshotTurn 造快照 turn，splitWorkspaceSnapshot
+// 在恢复时把它从对话 turns 里摘出来重建预览。合成 turn 是 role:"assistant"（不影响后端按 user 回合
+// 推的 title/turnCount），恢复时被滤掉、绝不渲染成气泡。
+describe("chatSessionClient · workspace snapshot (PR #76)", () => {
+  it("exposes a stable sentinel id for the synthetic snapshot turn", () => {
+    expect(typeof WORKSPACE_SNAPSHOT_ID).toBe("string");
+    expect(WORKSPACE_SNAPSHOT_ID.length).toBeGreaterThan(0);
+  });
+
+  it("builds an assistant-role snapshot turn carrying the form model (meta + fields)", () => {
+    const meta = { title: "活动报名" };
+    const fields = [{ id: "fld_5", type: "text", label: "姓名", required: true }];
+    const turn = buildWorkspaceSnapshotTurn(meta, fields);
+    expect(turn).toMatchObject({
+      id: WORKSPACE_SNAPSHOT_ID,
+      role: "assistant", // never counted as a user turn → no title/turnCount pollution
+      kind: "workspace",
+      meta,
+    });
+    expect(turn.fields).toEqual(fields);
+  });
+
+  it("strips the transient _new flag so the snapshot is stable JSON", () => {
+    const turn = buildWorkspaceSnapshotTurn(null, [
+      { id: "fld_1", type: "text", label: "x", _new: true },
+    ]);
+    expect(turn.fields[0]).not.toHaveProperty("_new");
+  });
+
+  it("returns null for an empty model (nothing to restore → no snapshot turn written)", () => {
+    expect(buildWorkspaceSnapshotTurn(null, [])).toBeNull();
+    expect(buildWorkspaceSnapshotTurn(null, undefined)).toBeNull();
+  });
+
+  it("builds a snapshot when only meta is set (a titled-but-fieldless draft)", () => {
+    const turn = buildWorkspaceSnapshotTurn({ title: "草稿" }, []);
+    expect(turn).not.toBeNull();
+    expect(turn.meta).toEqual({ title: "草稿" });
+    expect(turn.fields).toEqual([]);
+  });
+
+  it("splits the snapshot out of a turns array, returning the real turns + the workspace", () => {
+    const real = [
+      { id: "m1", role: "user", text: "做个报名表" },
+      { id: "m2", role: "assistant", kind: "text", text: "好的" },
+    ];
+    const snap = buildWorkspaceSnapshotTurn({ title: "报名" }, [
+      { id: "fld_3", type: "text", label: "姓名" },
+    ]);
+    const { turns, workspace } = splitWorkspaceSnapshot([...real, snap]);
+    expect(turns).toEqual(real); // snapshot removed → only the real conversation renders
+    expect(workspace).toEqual({
+      meta: { title: "报名" },
+      fields: [{ id: "fld_3", type: "text", label: "姓名" }],
+    });
+  });
+
+  it("returns workspace:null when there is no snapshot turn (a conversation-only session)", () => {
+    const real = [{ id: "m1", role: "user", text: "hi" }];
+    const { turns, workspace } = splitWorkspaceSnapshot(real);
+    expect(turns).toEqual(real);
+    expect(workspace).toBeNull();
+  });
+
+  it("tolerates an empty / null turns array (first-visit empty state, no throw)", () => {
+    expect(splitWorkspaceSnapshot([])).toEqual({ turns: [], workspace: null });
+    expect(splitWorkspaceSnapshot(null)).toEqual({ turns: [], workspace: null });
+    expect(splitWorkspaceSnapshot(undefined)).toEqual({ turns: [], workspace: null });
+  });
+
+  it("tolerates a corrupt (null / non-object) row inside a populated array (no throw)", () => {
+    // "one bad row must not break restore" — a corrupt entry alongside real turns must not throw
+    // and must not be mistaken for the snapshot; the real conversation turn survives.
+    const real = { id: "m1", role: "user", text: "hi" };
+    expect(() => splitWorkspaceSnapshot([null, real, 42, "x"])).not.toThrow();
+    const { turns, workspace } = splitWorkspaceSnapshot([null, real]);
+    expect(workspace).toBeNull();
+    expect(turns).toContainEqual(real);
+  });
+
+  it("round-trips: split(build(...)) recovers the same model the snapshot captured", () => {
+    const meta = { kicker: "REG", title: "报名", desc: "来" };
+    const fields = [
+      { id: "fld_5", type: "text", label: "姓名", required: true },
+      { id: "fld_7", type: "radio", label: "票种", options: ["A", "B"] },
+    ];
+    const snap = buildWorkspaceSnapshotTurn(meta, fields);
+    const { turns, workspace } = splitWorkspaceSnapshot([
+      { id: "m1", role: "user", text: "..." },
+      snap,
+    ]);
+    expect(turns).toHaveLength(1);
+    expect(workspace).toEqual({ meta, fields });
   });
 });

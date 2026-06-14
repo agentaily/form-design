@@ -18,12 +18,16 @@ import {
   matchResetPassword,
   matchVerifyEmail,
   matchSettings,
+  settingsPath,
+  readSessionId,
+  withSessionId,
   currentPathname,
   currentSearch,
   PUBLIC_FORM_PREFIX,
   RESET_PASSWORD_PATH,
   VERIFY_EMAIL_PATH,
   SETTINGS_PATH,
+  SESSION_PARAM,
 } from "../../src/core/router";
 
 describe("router · PUBLIC_FORM_PREFIX", () => {
@@ -134,27 +138,91 @@ describe("router · matchVerifyEmail — recognises /verify-email?status=", () =
   });
 });
 
-describe("router · matchSettings — recognises /settings (SPEC §12 + §14)", () => {
+describe("router · matchSettings — recognises /settings/:tab (SPEC §12 + §14, tab per PR #76)", () => {
   it("exposes the contract-fixed settings path", () => {
     expect(SETTINGS_PATH).toBe("/settings");
   });
 
-  it("matches /settings, returning an empty param object (config comes from the backend)", () => {
-    // Like /signin, the page reads nothing off the URL — it fetches the masked config
-    // from getConfig() — so a bare match object is enough to switch App onto the page.
-    expect(matchSettings("/settings")).toEqual({});
+  it("matches bare /settings, defaulting to the 集成 tab", () => {
+    // 裸 /settings 退化为默认 tab（集成），与 App 的默认 section 一致。
+    expect(matchSettings("/settings")).toEqual({ section: "integrations" });
   });
 
-  it("tolerates a single trailing slash", () => {
-    expect(matchSettings("/settings/")).toEqual({});
+  it("parses the active tab out of /settings/:tab", () => {
+    expect(matchSettings("/settings/account")).toEqual({ section: "account" });
+    expect(matchSettings("/settings/integrations")).toEqual({ section: "integrations" });
+  });
+
+  it("tolerates a single trailing slash on bare /settings and on /settings/:tab", () => {
+    expect(matchSettings("/settings/")).toEqual({ section: "integrations" });
+    expect(matchSettings("/settings/account/")).toEqual({ section: "account" });
+  });
+
+  it("returns null for an unknown tab segment or a deeper path (degrade to the designer)", () => {
+    // 未知 tab 段或更深路径不是设置路由 → null（退化到设计器，不半开浮层）。
+    expect(matchSettings("/settings/extra")).toBeNull();
+    expect(matchSettings("/settings/account/extra")).toBeNull();
   });
 
   it("returns null for any other path (the designer / public / other routes)", () => {
     expect(matchSettings("/")).toBeNull();
     expect(matchSettings("/setting")).toBeNull();
-    expect(matchSettings("/settings/extra")).toBeNull();
     expect(matchSettings("/signin")).toBeNull();
     expect(matchSettings("/f/abc")).toBeNull();
+  });
+});
+
+describe("router · settingsPath — build /settings/:tab for a tab (PR #76)", () => {
+  it("builds the path for each tab", () => {
+    expect(settingsPath("account")).toBe("/settings/account");
+    expect(settingsPath("integrations")).toBe("/settings/integrations");
+  });
+
+  it("round-trips through matchSettings", () => {
+    expect(matchSettings(settingsPath("account"))).toEqual({ section: "account" });
+    expect(matchSettings(settingsPath("integrations"))).toEqual({ section: "integrations" });
+  });
+});
+
+describe("router · readSessionId / withSessionId — design session in ?s= (PR #76, §26.2)", () => {
+  it("exposes the contract-fixed session query param", () => {
+    expect(SESSION_PARAM).toBe("s");
+  });
+
+  it("reads the session id off ?s=<id>", () => {
+    expect(readSessionId("?s=ds-abc123")).toBe("ds-abc123");
+  });
+
+  it("URL-decodes the session id and preserves other params", () => {
+    expect(readSessionId("?foo=1&s=a%20b&bar=2")).toBe("a b");
+  });
+
+  it("returns '' when ?s= is absent, blank, or the search is empty", () => {
+    expect(readSessionId("")).toBe("");
+    expect(readSessionId("?foo=bar")).toBe("");
+    expect(readSessionId("?s=")).toBe("");
+    expect(readSessionId("?s=%20%20")).toBe(""); // whitespace-only → blank
+  });
+
+  it("sets ?s=<id> while preserving every other query param", () => {
+    expect(withSessionId("?foo=1&bar=2", "ds-new")).toBe("?foo=1&bar=2&s=ds-new");
+  });
+
+  it("replaces an existing ?s= value in place", () => {
+    expect(withSessionId("?s=old&foo=1", "new")).toBe("?s=new&foo=1");
+  });
+
+  it("adds ?s= to an empty search", () => {
+    expect(withSessionId("", "ds-x")).toBe("?s=ds-x");
+  });
+
+  it("removes the param (and may yield '') when the id is blank", () => {
+    expect(withSessionId("?s=old&foo=1", "")).toBe("?foo=1");
+    expect(withSessionId("?s=old", "")).toBe("");
+  });
+
+  it("round-trips: readSessionId(withSessionId(search, id)) === id", () => {
+    expect(readSessionId(withSessionId("?foo=1", "ds-rt"))).toBe("ds-rt");
   });
 });
 

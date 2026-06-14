@@ -40,10 +40,13 @@ import {
   matchResetPassword,
   matchVerifyEmail,
   matchSignIn,
+  matchSettings,
+  settingsPath,
+  readSessionId,
+  withSessionId,
   currentPathname,
   currentSearch,
   SIGNIN_PATH,
-  SETTINGS_PATH,
 } from "./core/router";
 import { MessageQueue } from "./core/queue";
 import {
@@ -71,6 +74,8 @@ import {
   listChatSessions as listChatSessionsClient,
   deleteChatSession as deleteChatSessionClient,
   toPersistedTurns,
+  buildWorkspaceSnapshotTurn,
+  splitWorkspaceSnapshot,
 } from "./core/chatSessionClient";
 import {
   CHAT_MODELS,
@@ -221,10 +226,11 @@ export default function App({
   if (verifyRoute) {
     return <VerifyEmailPage status={verifyRoute.status} onBackToApp={onBackToApp} />;
   }
-  // /settings now falls through here: DesignerApp opens the settings overlay when the path is
-  // /settings (deep-link) and reflects it via history on open/close. `pathname` is threaded so
-  // the overlay's initial open state matches the URL.
-  return <DesignerApp pathname={pathname} {...rest} />;
+  // /settings (and /settings/:tab) fall through here: DesignerApp opens the settings overlay when
+  // the path is a settings route (deep-link) and reflects it via history on open/close/switch.
+  // `pathname` + `search` are threaded so the overlay's initial tab AND the active design session
+  // (?s=<id>) both match the URL on mount (PR #76).
+  return <DesignerApp pathname={pathname} search={search} {...rest} />;
 }
 
 function DesignerApp({
@@ -267,9 +273,12 @@ function DesignerApp({
   saveConfig,
   testConnection,
   updateProfile = authUpdateProfile,
-  // Initial path (from App's route split). When it is /settings the overlay opens on mount
-  // (deep-link); otherwise the overlay starts closed.
+  // Initial path (from App's route split). When it is a /settings/:tab route the overlay opens
+  // on mount (deep-link) on that tab; otherwise the overlay starts closed.
   pathname = currentPathname(),
+  // Initial query string (from App's route split). Carries the active design session id
+  // (?s=<id>, PR #76) restored on mount; defaults to the live location for production.
+  search = currentSearch(),
   // navigation seam for the standalone /signin redirect (full nav by default; injectable
   // so tests assert the target without a real reload).
   navigate = (url) => {
@@ -311,11 +320,16 @@ function DesignerApp({
   // 「我的表单」 management panel (§21).
   const [formsOpen, setFormsOpen] = useState(false);
   // 设置浮层 (§12 + §14 + §17) — a floating SettingsSheet over the designer (NOT a route page).
-  // Opening reflects a /settings URL via history WITHOUT unmounting the designer; a deep-link to
-  // /settings starts it open. `settingsSection` is the active tab (账户 / 集成), kept in state
-  // (not the URL). The designer stays mounted underneath, so closing restores the prior state.
-  const [settingsOpen, setSettingsOpen] = useState(() => pathname === SETTINGS_PATH);
-  const [settingsSection, setSettingsSection] = useState("integrations");
+  // Opening reflects a /settings/:tab URL via history WITHOUT unmounting the designer; a deep-link
+  // to /settings/account|integrations starts it open ON THAT TAB (PR #76). `settingsSection` is the
+  // active tab (账户 / 集成), now ALSO reflected in the URL (path segment), so a refresh / deep-link
+  // / Back-Forward lands on the right tab. The designer stays mounted underneath, so closing
+  // restores the prior page (incl. the active session ?s=).
+  const initialSettings = matchSettings(pathname);
+  const [settingsOpen, setSettingsOpen] = useState(() => !!initialSettings);
+  const [settingsSection, setSettingsSection] = useState(
+    () => initialSettings?.section ?? "integrations",
+  );
   // owner session (SPEC §17): logged-in unlocks the owner-only /api/chat proxy. `loggedIn`
   // is the token-presence bit (read on mount); `userEmail` is filled from GET /api/auth/me.
   const [loggedIn, setLoggedIn] = useState(() => authIsLoggedIn());
@@ -373,15 +387,34 @@ function DesignerApp({
   const historyRef = useRef(null);
   if (!historyRef.current) historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
 
-  // 设计对话持久化 (§26). The stable, client-minted, localStorage-backed design session id
-  // (keyed (owner_id, sessionId)); minted once on mount and reused across reloads / publish.
+  // 设计对话持久化 (§26) + 会话进 URL (PR #76). The stable, client-minted design session id
+  // (keyed (owner_id, sessionId)). Resolution order on first mount:
+  //   1. the URL's ?s=<id> (a refresh / deep-link / shared link names the conversation) — make it
+  //      active (localStorage + mirror) so a subsequent reload without touching the URL still resumes.
+  //   2. else getOrCreate (the localStorage-backed default, minted on first ever entry).
+  // A blank/invalid ?s= falls through to getOrCreate (degrade, never throw). Mirrors the existing
+  // in-render storage write of getOrCreateDesignSessionId (idempotent, runs once via the ref guard).
   const sessionIdRef = useRef(null);
-  if (!sessionIdRef.current) sessionIdRef.current = getOrCreateDesignSessionId();
+  if (!sessionIdRef.current) {
+    const fromUrl = readSessionId(search);
+    if (fromUrl) {
+      setActiveDesignSessionId(fromUrl);
+      sessionIdRef.current = fromUrl;
+    } else {
+      sessionIdRef.current = getOrCreateDesignSessionId();
+    }
+  }
   // The published form's slug once this session's form is published (§26.2): carried on every
   // subsequent turn-end save so the session row gets associated; null before publish.
   const publishedSlugRef = useRef(null);
   // Guard so the load-on-mount restore runs exactly once per logged-in mount (§26 restore).
   const restoredRef = useRef(false);
+  // Monotonic load-sequence token (PR #76): every async session load (mount restore + switch +
+  // popstate) bumps this and captures its own number; after the await it applies its result ONLY if
+  // it is still the latest load. Without it, two overlapping loads that resolve out of order let a
+  // STALE result win — rendering (and then persisting via persistTurn) one session's transcript +
+  // workspace under another session's id (a 不串会话 violation). See the out-of-order test.
+  const loadSeqRef = useRef(0);
   // Always-current mirror of `messages` so the turn-end save reads the latest thread
   // without a stale closure (and without abusing a setState updater as a getter).
   const messagesRef = useRef([]);
@@ -464,42 +497,106 @@ function DesignerApp({
     navigate(SIGNIN_PATH + "?" + qs.toString());
   };
 
-  // ── 设置浮层 open/close (路由反映, 不卸载设计器, §12/§14/§17) ─────────────────────
-  // Track whether WE pushed the /settings history entry, so closing can step back to the prior
-  // page (history.back) rather than stranding the owner. A deep-link (no push) closes to "/".
-  const settingsPushedRef = useRef(false);
-  const openSettings = useCallback((sectionId) => {
-    setSettingsSection(sectionId === "account" ? "account" : "integrations");
-    setSettingsOpen(true);
-    // Reflect /settings in the URL without navigating away (the designer stays mounted). Guard
-    // the push so re-opening / a deep-link doesn't stack duplicate history entries.
-    if (typeof window !== "undefined" && window.history && currentPathname() !== SETTINGS_PATH) {
-      window.history.pushState({ settings: true }, "", SETTINGS_PATH);
-      settingsPushedRef.current = true;
+  // ── 会话进 URL (?s=<id>, PR #76) ────────────────────────────────────────────────
+  // Reflect the active design-session id in the URL, PRESERVING the rest of the query and the
+  // current path (so opening settings over a session keeps ?s=). pushState by default (so Back
+  // returns to the prior conversation); replaceState for the mount-time normalization (not a nav).
+  const reflectSessionUrl = useCallback((id, { replace = false } = {}) => {
+    if (typeof window === "undefined" || !window.history) return;
+    const target = currentPathname() + withSessionId(currentSearch(), id);
+    try {
+      if (replace) window.history.replaceState(window.history.state, "", target);
+      else window.history.pushState({}, "", target);
+    } catch {
+      /* history unavailable — sessionIdRef still drives this page */
     }
   }, []);
+
+  // On first mount, normalize the URL to carry the resolved session id if it isn't already there,
+  // so a fresh "/" load (or a localStorage-resumed session) becomes shareable/bookmarkable. A
+  // deep-link that already names this session (?s= matches) is left untouched. replaceState — a
+  // normalization, not a navigation. The path (e.g. /settings/:tab) is preserved by reflectSessionUrl.
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.history) return;
+    if (readSessionId(currentSearch()) !== sessionIdRef.current) {
+      reflectSessionUrl(sessionIdRef.current, { replace: true });
+    }
+    // run once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── 设置浮层 open/close/switch (路由反映 /settings/:tab, 不卸载设计器, §12/§14/§17 + PR #76) ──
+  // Track whether WE pushed the /settings history entry, so closing can step back to the prior
+  // page (history.back) rather than stranding the owner. A deep-link (no push) closes to "/" + ?s=.
+  const settingsPushedRef = useRef(false);
+  // Reflect the active settings tab in the URL (/settings/:tab), PRESERVING ?s=. Entering settings
+  // from a non-settings page pushes a new entry (so close can step back); switching tabs while
+  // already in settings replaces in place (a tab toggle isn't a navigation).
+  const reflectSettingsUrl = useCallback((section) => {
+    if (typeof window === "undefined" || !window.history) return;
+    const target = settingsPath(section) + currentSearch(); // currentSearch keeps ?s=
+    try {
+      if (!matchSettings(currentPathname())) {
+        window.history.pushState({ settings: true }, "", target);
+        settingsPushedRef.current = true;
+      } else {
+        window.history.replaceState({ settings: true }, "", target);
+      }
+    } catch {
+      /* history unavailable — the overlay still opens; just not URL-reflected */
+    }
+  }, []);
+  const openSettings = useCallback(
+    (sectionId) => {
+      const section = sectionId === "account" ? "account" : "integrations";
+      setSettingsSection(section);
+      setSettingsOpen(true);
+      reflectSettingsUrl(section);
+    },
+    [reflectSettingsUrl],
+  );
+  // Switch tab while the overlay is open (DS SettingsSheet onNavigate) → update state + URL in place.
+  const navigateSettings = useCallback(
+    (sectionId) => {
+      const section = sectionId === "account" ? "account" : "integrations";
+      setSettingsSection(section);
+      reflectSettingsUrl(section);
+    },
+    [reflectSettingsUrl],
+  );
   const closeSettings = useCallback(() => {
     setSettingsOpen(false);
     if (typeof window === "undefined" || !window.history) return;
     if (settingsPushedRef.current) {
       settingsPushedRef.current = false;
-      window.history.back(); // restore the pre-overlay URL (the designer never unmounted)
-    } else if (currentPathname() === SETTINGS_PATH) {
-      // Deep-linked straight to /settings (no prior entry to pop) → normalize to the designer.
-      window.history.pushState({}, "", "/");
+      window.history.back(); // restore the pre-overlay URL (the designer never unmounted; ?s= returns)
+    } else if (matchSettings(currentPathname())) {
+      // Deep-linked straight to /settings/:tab (no prior entry to pop) → normalize to the designer,
+      // preserving the active session in the URL.
+      window.history.pushState({}, "", "/" + currentSearch());
     }
   }, []);
-  // Keep the overlay in sync with the URL so the browser Back/Forward buttons toggle it (Back
-  // while open → closes + restores the designer). popstate just re-reads the path.
+  // Keep the overlay AND the active session in sync with the URL for Back/Forward (PR #76): the
+  // overlay follows /settings/:tab (Back while open → closes + restores the designer); the active
+  // conversation follows ?s= (Back/Forward between conversations switches + reloads that one — and
+  // never crosses transcripts, since switchSession loads + applies the target session's own turns).
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onPop = () => {
-      const open = currentPathname() === SETTINGS_PATH;
-      setSettingsOpen(open);
-      if (!open) settingsPushedRef.current = false;
+      const route = matchSettings(currentPathname());
+      setSettingsOpen(!!route);
+      if (route) setSettingsSection(route.section);
+      else settingsPushedRef.current = false;
+      const urlSession = readSessionId(currentSearch());
+      if (urlSession && urlSession !== sessionIdRef.current) {
+        // The URL already changed (this IS the popstate) → switch without re-pushing.
+        switchSession(urlSession, { fromPopstate: true });
+      }
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
+    // switchSession is the first-render closure (stable seams/refs), mirroring the queue consumer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // A 401 mid-action means the owner session lapsed — drop it and route into login.
@@ -522,7 +619,9 @@ function DesignerApp({
     setSettingsOpen(false);
     settingsPushedRef.current = false;
     setLoggedIn(false);
-    goSignIn({ return: SETTINGS_PATH, ...(reason ? { reason } : {}) });
+    // Return to the SAME settings tab after login (the stashed intent reopens it; the path makes
+    // the post-login landing deterministic regardless of the current location).
+    goSignIn({ return: settingsPath(settingsSection), ...(reason ? { reason } : {}) });
   };
   // Run a resolved intent now (signed-in). publish/share/forms stay in-app overlays; 集成设置 /
   // 账户 open the floating settings overlay on the matching tab (§12/§14/§17).
@@ -560,6 +659,14 @@ function DesignerApp({
     setResendState("");
     setCooldown(0);
     closeSettings();
+    // Drop the prior owner's in-memory workspace + conversation, and re-arm mount-restore (PR #76):
+    // without this, a DIFFERENT owner logging in on the same tab would keep seeing the prior owner's
+    // thread/form (the [loggedIn] restore effect is restoredRef-guarded, so it wouldn't re-run). Bump
+    // loadSeqRef so any in-flight load can't apply after logout. `resetWorkspace` clears the live
+    // model/thread; resetting restoredRef lets the next login restore the new owner's session.
+    loadSeqRef.current++;
+    resetWorkspace();
+    restoredRef.current = false;
   };
 
   // Pull the AUTHORITATIVE 验证状态 + 账户邮箱 from GET /api/auth/me (§23.6). getCurrentUser
@@ -594,8 +701,11 @@ function DesignerApp({
   // the SessionMenu 切换 path (switchSession below).
   const applyRestoredSession = (session) => {
     if (!session) return;
-    if (Array.isArray(session.turns) && session.turns.length > 0) {
-      setMessagesTracked(session.turns.map((tn) => ({ ...tn })));
+    // §26 持久化的 turns 里可能搭着一条工作区快照合成 turn (PR #76):把它摘出来重建右侧预览模型,
+    // 其余才是要渲染的真实对话回合 (合成 turn 绝不渲染成气泡)。
+    const { turns: realTurns, workspace } = splitWorkspaceSnapshot(session.turns);
+    if (realTurns.length > 0) {
+      setMessagesTracked(realTurns.map((tn) => ({ ...tn })));
     } else {
       setMessagesTracked([]);
     }
@@ -604,6 +714,16 @@ function DesignerApp({
         ? session.history.map((h) => ({ ...h }))
         : [{ role: "system", content: DESIGNER_SYSTEM }];
     publishedSlugRef.current = session.formSlug || null;
+    // 恢复工作区表单模型 (PR #76):有快照 → 重建 meta/fields + 预览 (并推进 uid 计数器越过载入的
+    // 字段 id,后续新增不撞号);无快照 → 复位为空模型 (切到一段没有工作区的会话时绝不残留上一段的表单)。
+    if (workspace && (workspace.meta || workspace.fields.length > 0)) {
+      modelRef.current.meta = workspace.meta ? { ...workspace.meta } : null;
+      modelRef.current.fields = workspace.fields.map((f) => ({ ...f }));
+      reserveUidsFrom(workspace.fields.map((f) => f.id).filter(Boolean));
+    } else {
+      modelRef.current = createFormModel();
+    }
+    syncModel();
   };
 
   // 设计对话恢复 (§26 restore): when logged in, load this session's persisted conversation
@@ -616,10 +736,16 @@ function DesignerApp({
   useEffect(() => {
     if (!loggedIn || restoredRef.current) return;
     let cancelled = false;
+    const myLoad = ++loadSeqRef.current;
+    const id = sessionIdRef.current;
     (async () => {
       try {
-        const { session } = await loadChatSession(sessionIdRef.current);
-        if (cancelled || !session) return;
+        const { session } = await loadChatSession(id);
+        // Bail if unmounted, SUPERSEDED by a newer load (loadSeqRef moved), or the active session
+        // changed out from under us (a switch landed during the await) — never apply a stale load
+        // (PR #76 不串会话).
+        if (cancelled || loadSeqRef.current !== myLoad || sessionIdRef.current !== id || !session)
+          return;
         // StrictMode-safe: only mark as restored once the async result actually
         // applies (success + not cancelled). Marking eagerly in the effect body would
         // let StrictMode's cancelled first run "consume" the flag, so the second run
@@ -628,6 +754,7 @@ function DesignerApp({
         restoredRef.current = true;
         applyRestoredSession(session);
       } catch (e) {
+        if (cancelled || loadSeqRef.current !== myLoad) return; // superseded → ignore the stale error too
         if (e instanceof ApiError && e.status === 401)
           needLogin(L("登录后恢复你的设计对话", "Sign in to restore your design conversation"));
         // else: best-effort — leave the empty thread; the next save re-establishes the row.
@@ -679,23 +806,33 @@ function DesignerApp({
   };
 
   // 新会话: mint + activate a brand-new design session id (so subsequent turn-end saves write a
-  // NEW row, never overwriting the prior conversation), clear the workspace, refresh the list.
+  // NEW row, never overwriting the prior conversation), clear the workspace, reflect it in the URL
+  // (pushState → Back returns to the prior conversation), refresh the list.
   const newChat = () => {
     sessionIdRef.current = newDesignSessionId();
     resetWorkspace();
+    reflectSessionUrl(sessionIdRef.current);
     refreshSessions();
   };
 
   // 切换: make `id` the active session, load + apply its transcript (reusing the same restore
-  // path as mount), and refresh the list so the menu highlight follows. A 401 routes into login;
-  // any other failure leaves the prior workspace (best-effort).
-  const switchSession = async (id) => {
+  // path as mount), reflect it in the URL, and refresh the list so the menu highlight follows. A
+  // 401 routes into login; any other failure leaves the prior workspace (best-effort).
+  // `fromPopstate`: when the switch is DRIVEN by Back/Forward the URL already names `id`, so we
+  // must NOT re-push (that would clobber the history entry we just navigated to).
+  const switchSession = async (id, { fromPopstate = false } = {}) => {
     if (!id || id === sessionIdRef.current) return;
     setActiveDesignSessionId(id);
     sessionIdRef.current = id;
     restoredRef.current = true; // we restore explicitly here, not via the mount effect
+    const myLoad = ++loadSeqRef.current; // claim the latest-load slot (PR #76 不串会话)
+    if (!fromPopstate) reflectSessionUrl(id);
     try {
       const { session } = await loadChatSession(id);
+      // Bail if a NEWER switch/restore superseded this one while we awaited — applying a stale load
+      // here would render (and then persist via persistTurn) this session's transcript+workspace
+      // under whatever session is now active, crossing conversations (the exact 不串会话 race).
+      if (loadSeqRef.current !== myLoad) return;
       // Hit → rebuild that conversation. Miss ({ session: null }, e.g. a stale list row whose
       // row vanished) → reset to an EMPTY workspace, NOT a no-op: sessionIdRef already moved to
       // `id`, so leaving the prior conversation visible would let the next turn-end save write
@@ -703,6 +840,7 @@ function DesignerApp({
       if (session) applyRestoredSession(session);
       else resetWorkspace();
     } catch (e) {
+      if (loadSeqRef.current !== myLoad) return; // superseded → ignore the stale error too
       if (e instanceof ApiError && e.status === 401)
         needLogin(L("登录后切换你的设计对话", "Sign in to switch your design conversation"));
       // else: best-effort — leave the prior workspace.
@@ -725,9 +863,12 @@ function DesignerApp({
       // 404 / other: best-effort — fall through to a list refresh (the row drops off).
     }
     if (id === sessionIdRef.current) {
-      // deleting the open conversation → start a fresh one (no orphaned empty workspace).
+      // deleting the open conversation → start a fresh one (no orphaned empty workspace). Reflect
+      // the fresh id in the URL via replaceState (the deleted session shouldn't linger as a
+      // forward-navigable entry pointing at a now-gone conversation).
       sessionIdRef.current = newDesignSessionId();
       resetWorkspace();
+      reflectSessionUrl(sessionIdRef.current, { replace: true });
     }
     refreshSessions();
   };
@@ -871,8 +1012,12 @@ function DesignerApp({
     // form's own design-session row with a foreign transcript. Read the REF, not `editingForm` —
     // this closure is the first-render one captured by the queue consumer (state would be stale).
     if (editingFormRef.current) return;
+    // 工作区快照 (PR #76):把当前表单预览模型 (meta + fields) 作为一条合成 turn 搭进 §26 既有的
+    // 不透明 turns_json，使刷新/跨设备恢复时右侧工作区也能重建 (不止对话)。空模型 → 不写快照。
+    const baseTurns = toPersistedTurns(messagesRef.current);
+    const snapshot = buildWorkspaceSnapshotTurn(modelRef.current.meta, modelRef.current.fields);
     const input = {
-      turns: toPersistedTurns(messagesRef.current),
+      turns: snapshot ? [...baseTurns, snapshot] : baseTurns,
       history: historyRef.current,
       ...(publishedSlugRef.current ? { formSlug: publishedSlugRef.current } : {}),
     };
@@ -1527,7 +1672,7 @@ function DesignerApp({
         <SettingsOverlay
           open
           section={settingsSection}
-          onNavigate={setSettingsSection}
+          onNavigate={navigateSettings}
           onClose={closeSettings}
           user={{ email: userEmail || "", displayName: userDisplayName }}
           onLogout={doLogout}

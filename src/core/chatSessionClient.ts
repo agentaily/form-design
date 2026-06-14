@@ -30,6 +30,7 @@
 
 import { apiFetch } from "./apiClient";
 import type { ChatMessage } from "./designerLoop";
+import type { FormMeta, UiField } from "./designerTools";
 
 /** localStorage key holding the client-minted stable design-session id (SPEC §26.2). */
 export const DESIGN_SESSION_ID_KEY = "agentaily_forms_design_session";
@@ -296,6 +297,86 @@ export function toPersistedTurns(messages: readonly LiveChatMessage[]): Persiste
     // `streaming` and any live handles are intentionally excluded (§26.6).
     return turn;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Workspace snapshot (PR #76) — restore the FORM PREVIEW MODEL on refresh, not just the chat
+// ---------------------------------------------------------------------------
+//
+// §26 persists only the CONVERSATION (turns + history); the form preview model (meta + fields)
+// the right pane renders is NOT stored, so a refresh resumes the chat but the workspace comes back
+// EMPTY. The model can't be faithfully replayed from the persisted tool turns either — uid()s for
+// field ids interleave with message ids, so a fresh replay reassigns ids and breaks the
+// update/remove/reorder references. So we ride a single SNAPSHOT of the model inside the OPAQUE
+// turns_json blob (the backend stores it verbatim — no D1 migration, "接 #48"): one synthetic turn
+// carrying { meta, fields }. It is role:"assistant" so the server-derived list title/turnCount
+// (which count role:"user" turns, §26.9) are unaffected, and it is filtered out of the visible
+// thread on restore via {@link splitWorkspaceSnapshot} (never rendered as a chat bubble).
+
+/** Sentinel id of the synthetic workspace-snapshot turn (PR #76). Stable + unlikely to collide. */
+export const WORKSPACE_SNAPSHOT_ID = "__agentaily_workspace_snapshot__";
+
+/** The form preview model captured for restore (PR #76): meta + fields, no transient flags. */
+export interface WorkspaceSnapshot {
+  meta: FormMeta | null;
+  fields: UiField[];
+}
+
+/**
+ * The synthetic turn that rides {@link WorkspaceSnapshot} inside turns_json (PR #76). role
+ * "assistant" + a sentinel id so it is invisible to the server title/turnCount projection and is
+ * stripped from the visible thread on restore.
+ */
+export interface WorkspaceSnapshotTurn extends WorkspaceSnapshot {
+  id: typeof WORKSPACE_SNAPSHOT_ID;
+  role: "assistant";
+  kind: "workspace";
+}
+
+/**
+ * Build the snapshot turn from the live form model (PR #76), stripping the transient `_new` flag so
+ * the persisted JSON is stable. Returns `null` for an empty model (no meta AND no fields) — there is
+ * nothing to restore, so no snapshot turn is written. Pure.
+ */
+export function buildWorkspaceSnapshotTurn(
+  meta: FormMeta | null | undefined,
+  fields: readonly UiField[] | null | undefined,
+): WorkspaceSnapshotTurn | null {
+  const cleanFields = (fields ?? []).map(({ _new, ...rest }) => rest as UiField);
+  if (!meta && cleanFields.length === 0) return null;
+  return {
+    id: WORKSPACE_SNAPSHOT_ID,
+    role: "assistant",
+    kind: "workspace",
+    meta: meta ?? null,
+    fields: cleanFields,
+  };
+}
+
+/**
+ * Split a persisted turns array (PR #76) into the REAL conversation turns (snapshot removed) and the
+ * extracted {@link WorkspaceSnapshot} (null when absent). Used on restore so the snapshot rebuilds
+ * the form preview model while the conversation renders without the synthetic turn. Pure; tolerant
+ * of empty/null/corrupt input (never throws — one bad row must not break restore).
+ */
+export function splitWorkspaceSnapshot(turns: readonly unknown[] | null | undefined): {
+  turns: PersistedTurn[];
+  workspace: WorkspaceSnapshot | null;
+} {
+  const real: PersistedTurn[] = [];
+  let workspace: WorkspaceSnapshot | null = null;
+  for (const t of turns ?? []) {
+    if (t && typeof t === "object" && (t as { id?: unknown }).id === WORKSPACE_SNAPSHOT_ID) {
+      const w = t as Partial<WorkspaceSnapshotTurn>;
+      workspace = {
+        meta: (w.meta as FormMeta) ?? null,
+        fields: Array.isArray(w.fields) ? (w.fields as UiField[]) : [],
+      };
+      continue;
+    }
+    real.push(t as PersistedTurn);
+  }
+  return { turns: real, workspace };
 }
 
 /**

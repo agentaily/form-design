@@ -4,9 +4,10 @@
 // "integrations"> (echo, save, backend errors, per-block test, 401 → onNeedLogin). This file
 // pins the two App-level seams that contract leaves to App:
 //   1. The AccountControl avatar menu「集成设置」OPENS the floating overlay over the designer
-//      (NOT a route navigation / unmount), reflecting a /settings URL via history.
+//      (NOT a route navigation / unmount), reflecting a /settings/:tab URL via history (the active
+//      tab is now in the path, PR #76).
 //   2. A deep-link to /settings opens the overlay; a config 401 on it routes the owner into
-//      /signin (carrying return=/settings) without surfacing the raw 401 or unmounting the
+//      /signin (carrying return=/settings…) without surfacing the raw 401 or unmounting the
 //      designer.
 // We render the real <App/> with a held token (logged-in session) + injected config seams (so
 // the integration tab's fetch is deterministic, no backend).
@@ -48,7 +49,7 @@ function baseStubs() {
 }
 
 describe("App wiring: 集成设置 opens the floating overlay over the designer (DS 0.8.0)", () => {
-  it("opens the settings overlay from the account menu and reflects a /settings URL (no unmount)", async () => {
+  it("opens the settings overlay from the account menu and reflects a /settings/:tab URL (no unmount)", async () => {
     const navigate = vi.fn();
     setToken("owner-jwt");
     render(<App {...baseStubs()} navigate={navigate} />);
@@ -62,7 +63,8 @@ describe("App wiring: 集成设置 opens the floating overlay over the designer 
     // away, and the URL now reflects /settings (history.pushState, designer still mounted).
     await waitFor(() => expect(screen.getByRole("button", { name: "保存" })).toBeInTheDocument());
     expect(navigate).not.toHaveBeenCalled();
-    expect(window.location.pathname).toBe("/settings");
+    // 集成设置 opens the 集成 tab → the URL reflects /settings/integrations (tab in the path, PR #76).
+    expect(window.location.pathname).toBe("/settings/integrations");
     // The designer underneath stays mounted (its 发布 action is still present).
     expect(screen.getByRole("button", { name: /发布/ })).toBeInTheDocument();
   });
@@ -77,7 +79,7 @@ describe("App wiring: the route-reflected overlay closes back to the designer (D
     fireEvent.click(document.querySelector(".am-acct"));
     fireEvent.click(screen.getByRole("menuitem", { name: /集成设置/ }));
     await waitFor(() => expect(screen.getByRole("button", { name: "保存" })).toBeInTheDocument());
-    expect(window.location.pathname).toBe("/settings");
+    expect(window.location.pathname).toBe("/settings/integrations");
 
     // Esc closes the floating sheet (PanelSheet wires Esc → onClose → closeSettings).
     fireEvent.keyDown(document, { key: "Escape" });
