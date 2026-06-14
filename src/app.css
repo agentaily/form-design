@@ -792,8 +792,15 @@ body {
 }
 
 /* ── 公开填写页 (答题者侧, 第 6 步) ───────────────────────────────────────────── */
+/* 这是挂在 #root(height:100vh) 下、body{overflow:hidden} 之内的【裸全屏页】(公开填写 +
+   找回密码/邮箱验证落地页都复用本壳)。设计器是固定单屏靠内部分栏滚动,但这些裸页字段一多就得
+   能整页滚到底(提交/同意条款按钮要够得着)——所以本页壳【自己】是纵向滚动容器:占满视口高
+   (100dvh,带 100vh 回退) + overflow-y:auto。注意:设计器内的「预览」用的是另一套 .pv-* 壳,
+   不复用 .pf-page,故此改动不影响编辑器预览。 */
 .pf-page {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
   display: flex;
   justify-content: center;
   padding: 48px 20px 72px;

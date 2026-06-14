@@ -2,7 +2,7 @@
 // post-publish surface is NO LONGER here: since N-_ayo8x 发布 is a direct action in App
 // (POST /api/forms → ShareDialog), so the old in-panel <PublishFeedback> overlay is gone.
 // The panel shell + primitives are
-// @agentaily/design-system (PanelSheet/PageSection/DropdownMenu/Dialog/Button/Badge/
+// @agentaily/design-system (PanelSheet/PageSection/Dialog/Button/Badge/
 // Alert/AlertDialog/Spinner/Empty) — never hand-rolled chrome. The per-form CARD is
 // app-level layout (.mf-card, design N-_ayo8x) — its border/bg/radius live in app.css and
 // it consumes DS Badge/Button/Icon inside (mirrors the handoff's plain .mf-card section,
@@ -19,19 +19,19 @@
 //     (已发布 / 已关闭), createdAt, the public fill link (publicFormUrl(slug)), and a
 //     "查看全部提交" affordance that swaps the panel's content to that form's 提交数据
 //     (SubmissionsContent, in-panel — not a new Dialog; PR-6/chat13). Per-card actions
-//     (bottom row):
-//       • 复制链接 — copy the public fill link.
-//       • 编辑 — PR-7 placeholder (载回设计器编辑 is a later root): disabled until then.
-//       • `⋯` overflow menu (DropdownMenu):
-//           – 关闭收集 / 重新发布 → updateForm(slug, { status }) published↔closed →
-//             reflect the returned status on the card's Badge.
-//           – 删除 → a confirmation step (AlertDialog) → on confirm deleteForm(slug)
-//             → drop the card; on cancel → no request, card stays.
+//     are a FLAT foot row (design N-_ayo8x, no `⋯` overflow menu):
+//       • 复制链接 — copy the ABSOLUTE public fill link (origin + /f/:slug) + an inline
+//         「已复制链接」✓ feedback (2s, share-dialog pattern).
+//       • 编辑 / 继续编辑 — 载回设计器编辑 (getFormForEdit → onEditForm).
+//       • 关闭收集 / 重新发布 → updateForm(slug, { status }) published↔closed → reflect the
+//         returned status on the card's Badge.
+//       • 删除 → a confirmation step (AlertDialog, keeps 取消) → on confirm deleteForm(slug)
+//         → drop the card; on cancel → no request, card stays.
 //     Empty list → an empty state ("还没有发布过表单"), no error. A 401 from any call →
 //     onNeedLogin() (App closes this + pops login, mirroring settings.jsx §17 flow),
 //     NOT an inline error.
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   PanelSheet,
   PageSection,
@@ -42,7 +42,6 @@ import {
   AlertDialog,
   Spinner,
   Empty,
-  DropdownMenu,
 } from "@agentaily/design-system";
 import { Icon } from "./chat.jsx";
 import { SubmissionsContent } from "./submissions-view.jsx";
@@ -88,7 +87,19 @@ function formatCreatedAt(iso) {
   return `${y}-${m}-${day}`;
 }
 
-// Copy a public link to the clipboard (no-op when unavailable, e.g. SSR/sandbox).
+// Absolutize a possibly-relative public link (/f/:slug) into the shareable URL we hand to
+// the clipboard: an already-absolute http(s) link stays as-is, otherwise prefix the current
+// origin so the copied link opens directly (https://…/f/:slug, NOT a bare path). Same rule as
+// share-dialog.jsx's toAbsolute; the link DISPLAYED on the card stays the short canonical path.
+function toAbsolute(link) {
+  const u = link || "";
+  if (/^https?:\/\//i.test(u)) return u;
+  const origin = typeof window !== "undefined" && window.location ? window.location.origin : "";
+  return origin + u;
+}
+
+// Copy a public link to the clipboard (no-op when unavailable, e.g. SSR/sandbox). Callers pass
+// the absolute URL (see toAbsolute) so what lands on the clipboard is directly openable.
 async function copyLink(link) {
   try {
     await navigator.clipboard?.writeText(link);
@@ -143,6 +154,12 @@ export function FormsPanel({
   // 两态都住在面板层，因为面包屑（PanelSheet 顶栏）要跟随 列表 → 提交数据 → 记录号 加级回退。
   const [viewing, setViewing] = useState(null);
   const [detail, setDetail] = useState(null);
+  // The slug whose 复制链接 just fired, so its button shows an inline 「已复制链接」✓ feedback
+  // (2s reset, mirroring share-dialog) instead of silently swallowing the clipboard write.
+  const [copiedSlug, setCopiedSlug] = useState(null);
+  const copiedTimer = useRef(null);
+  // Clear the pending feedback-reset timer on unmount (no setState after unmount).
+  useEffect(() => () => copiedTimer.current && clearTimeout(copiedTimer.current), []);
 
   const handleError = useCallback(
     (e) => {
@@ -245,18 +262,30 @@ export function FormsPanel({
     }
   };
 
+  // 复制公开填写链接 — copy the ABSOLUTE url (origin + /f/:slug) so the pasted link opens
+  // directly, and flip this card's button to 「已复制链接」✓ for 2s (share-dialog feedback
+  // pattern) so the click isn't a silent no-op.
+  const handleCopy = (form) => {
+    copyLink(toAbsolute(publicFormUrl(form.slug)));
+    setCopiedSlug(form.slug);
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopiedSlug(null), 2000);
+  };
+
   // One form = one .mf-card (design N-_ayo8x layout). The card chrome is app-level layout
   // (border/bg/radius via .mf-card, matching the handoff's plain section) consuming DS
   // Badge/Button/Icon inside — not a DS Card wrapper. data-slug stays on the card so
   // row-scoped tests resolve a single card by slug ([class*='card'] / [data-slug]).
-  // Lifecycle actions (关闭收集 / 重新发布 / 删除) stay in a `⋯` DropdownMenu (PR-5 收敛 +
-  // the form-publish-mgmt test contract); 复制链接 + 编辑 are direct foot buttons.
+  // Foot = a FLAT row of direct buttons matching design N-_ayo8x: 复制链接 · 编辑/继续编辑 ·
+  // 关闭收集/重新发布 · 删除 — NO `⋯` overflow menu (the earlier DropdownMenu was a deviation
+  // to protect the form-publish-mgmt test contract; that test now asserts the flat buttons).
+  // 删除 still routes through the AlertDialog confirm (DS, keeps the 取消 affordance) rather than
+  // the prototype's inline two-click — we align the layout, not weaken the destructive confirm.
   // Recent-submission ROWS are omitted: the list endpoint's FormSummary carries no recent
   // rows and only an OPTIONAL submissionCount, so fabricating them would mean an N+1 fetch
   // per card (see PR notes). The 累计 count rides the description when present; 「查看全部提交」
   // stays the affordance into the full submissions view.
   const FormCardItem = (form) => {
-    const link = publicFormUrl(form.slug);
     const published = form.status === "published";
     const count = typeof form.submissionCount === "number" ? form.submissionCount : null;
     return (
@@ -327,13 +356,14 @@ export function FormsPanel({
         </div>
 
         <div className="mf-foot">
+          {/* 复制链接 — 复制完整可访问 URL(origin + /f/:slug);点后翻成「已复制链接」✓ 反馈 2s。 */}
           <Button
             variant="ghost"
             size="sm"
-            icon={<Icon name="copy" size={14} />}
-            onClick={() => copyLink(link)}
+            icon={<Icon name={copiedSlug === form.slug ? "check" : "copy"} size={14} />}
+            onClick={() => handleCopy(form)}
           >
-            {L("复制链接", "Copy link")}
+            {copiedSlug === form.slug ? L("已复制链接", "Link copied") : L("复制链接", "Copy link")}
           </Button>
           <span className="mf-foot__sp" />
           {/* 编辑/继续编辑 (PR-7「载回设计器编辑」): 拉取这份表单的 meta+fields → 交给 App
@@ -351,29 +381,25 @@ export function FormsPanel({
                 ? L("继续编辑", "Edit")
                 : L("编辑", "Edit")}
           </Button>
-          <DropdownMenu
-            align="end"
-            trigger={
-              <Button variant="ghost" size="sm" aria-label={L("更多操作", "More actions")}>
-                ⋯
-              </Button>
-            }
-            items={[
-              {
-                label: published ? L("关闭收集", "Close") : L("重新发布", "Republish"),
-                icon: <Icon name={published ? "power" : "refresh"} size={15} />,
-                disabled: !!busy[form.slug],
-                onSelect: () => onToggle(form),
-              },
-              { type: "separator" },
-              {
-                label: L("删除", "Delete"),
-                icon: <Icon name="trash" size={15} />,
-                danger: true,
-                onSelect: () => setPendingDelete(form),
-              },
-            ]}
-          />
+          {/* 关闭收集 / 重新发布 — 直接按钮(扁平,design N-_ayo8x):published↔closed。 */}
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<Icon name={published ? "power" : "refresh"} size={14} />}
+            disabled={!!busy[form.slug]}
+            onClick={() => onToggle(form)}
+          >
+            {published ? L("关闭收集", "Close") : L("重新发布", "Republish")}
+          </Button>
+          {/* 删除 — 直接 danger 按钮;点击打开 AlertDialog 确认(保留 取消)。 */}
+          <Button
+            variant="danger"
+            size="sm"
+            icon={<Icon name="trash" size={14} />}
+            onClick={() => setPendingDelete(form)}
+          >
+            {L("删除", "Delete")}
+          </Button>
         </div>
       </section>
     );
