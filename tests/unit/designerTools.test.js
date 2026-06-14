@@ -9,10 +9,30 @@ import {
   setFormMeta,
   getFormSchema,
   applyDesignerTool,
+  reserveUidsFrom,
   __resetUid,
 } from "../../src/core/designerTools";
 
 beforeEach(() => __resetUid());
+
+describe("designerTools · reserveUidsFrom (载回编辑防 id 撞)", () => {
+  it("advances the counter past loaded ids so a new field never collides", () => {
+    // A form loaded back for editing keeps its original ids (fld_3, fld_5).
+    reserveUidsFrom(["fld_3", "fld_5"]);
+    const m = createFormModel();
+    // The next added field gets an id strictly greater than every loaded one (fld_6).
+    const out = addField(m, { type: "text", label: "新字段" });
+    expect(out.id).toBe("fld_6");
+    expect(["fld_3", "fld_5"]).not.toContain(out.id);
+  });
+
+  it("ignores ids without a base36 suffix and never lowers the counter", () => {
+    addField(createFormModel(), { type: "text", label: "x" }); // counter → 1
+    reserveUidsFrom(["weird", "no-suffix", "fld_1"]); // max seen (1) not above counter
+    const out = addField(createFormModel(), { type: "text", label: "y" });
+    expect(out.id).toBe("fld_2"); // counter advanced normally, never reset
+  });
+});
 
 describe("designerTools · addField", () => {
   it("appends a field and returns its public shape (no _new flag)", () => {

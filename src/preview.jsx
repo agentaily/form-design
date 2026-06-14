@@ -227,7 +227,10 @@ export function FormPreview({ meta, fields, values, setValue, style, building })
           <h2 className="pv-hero__title">{meta.title}</h2>
           <p className="pv-hero__desc">{meta.desc}</p>
           <div className="pv-hero__meta">
-            {meta.meta.map((m, i) => (
+            {/* meta.meta (要点标签) is optional on FormMeta — a form loaded back for editing
+                (PR-7) carries only title+desc (tags weren't stored at publish), and the agent
+                may set meta without tags. Guard so a tag-less meta renders instead of crashing. */}
+            {(meta.meta || []).map((m, i) => (
               <span key={i} className="pv-hero__tag">
                 {m}
               </span>

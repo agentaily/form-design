@@ -16,6 +16,8 @@ import {
   Tabs,
   SchemaDisplay,
   Alert,
+  AlertDialog,
+  HoverCard,
   DesignerShell,
   ConversationThread,
   AccountControl,
@@ -42,7 +44,17 @@ import {
   SETTINGS_PATH,
 } from "./core/router";
 import { MessageQueue } from "./core/queue";
-import { createFormModel, applyDesignerTool, uid, DESIGNER_SYSTEM } from "./core/designerTools";
+import {
+  createFormModel,
+  applyDesignerTool,
+  reserveUidsFrom,
+  uid,
+  DESIGNER_SYSTEM,
+} from "./core/designerTools";
+import {
+  updateFormDefinition as defaultUpdateFormDefinition,
+  getFormForEdit as defaultGetFormForEdit,
+} from "./core/formsClient";
 import { runDesignerTurn } from "./core/designerLoop";
 import { streamDesignerChat } from "./core/designerChat";
 import { ApiError } from "./core/apiClient";
@@ -84,6 +96,24 @@ function useUiState(defaults) {
   const [state, setState] = useState(defaults);
   const set = useCallback((key, value) => setState((s) => ({ ...s, [key]: value })), []);
   return [state, set];
+}
+
+// A stable content signature of the live form (meta + fields), used to tell whether an
+// in-progress edit has unsaved changes (PR-7 dirty 保护). Transient/identity bits that
+// don't represent user-visible content are excluded: field `id` (preserved on load but
+// not "content"), the `_new` entrance-animation flag, and undefined-vs-default noise are
+// normalized so a freshly-loaded form compares equal to itself (clean = not dirty).
+function editSig(meta, fields) {
+  return JSON.stringify({
+    meta: meta || null,
+    fields: (fields || []).map((f) => ({
+      type: f.type,
+      label: f.label,
+      placeholder: f.placeholder || "",
+      required: !!f.required,
+      options: f.options || null,
+    })),
+  });
 }
 
 // build a SchemaDisplay-shaped object from the live fields
@@ -185,6 +215,11 @@ function DesignerApp({
   listForms,
   updateForm,
   deleteForm,
+  // 载回设计器编辑 (PR-7): FormsPanel pulls a form's full meta+fields via getFormForEdit,
+  // App writes edits back via updateFormDefinition (PATCH meta+fields). Default to the real
+  // formsClient; injectable so the edit/load/写回-401 flow is driven deterministically.
+  getFormForEdit = defaultGetFormForEdit,
+  updateFormDefinition = defaultUpdateFormDefinition,
   publicFormUrl,
   // 数据后台「看提交」(§18). Defaults to the real submissionsClient; injectable for tests.
   listSubmissions,
@@ -228,6 +263,17 @@ function DesignerApp({
   const [markupOn, setMarkupOn] = useState(false);
   // Header LIVE/DRAFT badge: flips to LIVE only when a publish actually succeeds.
   const [published, setPublished] = useState(false);
+  // 表单编辑入口 (PR-7). When the owner picks 继续编辑/编辑 on a 我的表单 card, that form's
+  // EditableForm ({ slug, meta, fields, status }) is loaded back into the designer and held
+  // here as the active edit target (null = not editing — the normal new-form designer).
+  const [editingForm, setEditingForm] = useState(null);
+  // Content signature captured at load (and re-captured after each 更新). editDirty compares
+  // the live form against it to gate the 更新 button + the 放弃 confirmation on exit.
+  const [editBaseline, setEditBaseline] = useState("");
+  // "放弃本次编辑" confirmation (DS AlertDialog) — shown when exiting with unsaved changes.
+  const [discardOpen, setDiscardOpen] = useState(false);
+  // Transient "已更新" feedback on the 更新 button right after a successful write-back.
+  const [updateDone, setUpdateDone] = useState(false);
   // Publish feedback (§16) + 「我的表单」 management panel (§21).
   const [publishOpen, setPublishOpen] = useState(false);
   const [formsOpen, setFormsOpen] = useState(false);
@@ -270,6 +316,11 @@ function DesignerApp({
   // Always-current mirror of `messages` so the turn-end save reads the latest thread
   // without a stale closure (and without abusing a setState updater as a getter).
   const messagesRef = useRef([]);
+  // Always-current mirror of `editingForm` (PR-7). The §4.1 queue consumer closure captures
+  // the FIRST render's runTurn → persistTurn, so a state read there is stale; persistTurn must
+  // check this ref to skip §26 persistence while editing (an edit conversation is ephemeral and
+  // must NOT overwrite the form's design session — kept in sync by loadFormForEdit / doExit).
+  const editingFormRef = useRef(null);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", t.theme === "light" ? "light" : "dark");
@@ -613,6 +664,11 @@ function DesignerApp({
   // /signin (§26.4 失败不阻断 + 401 例外).
   const persistTurn = () => {
     if (!loggedIn) return; // 未登录不持久化 (§26.5)
+    // 编辑态不写 §26 设计会话 (PR-7): an edit conversation is ephemeral (the form definition is
+    // saved server-side via 更新/PATCH, not the design session). Persisting it would overwrite the
+    // form's own design-session row with a foreign transcript. Read the REF, not `editingForm` —
+    // this closure is the first-render one captured by the queue consumer (state would be stale).
+    if (editingFormRef.current) return;
     const input = {
       turns: toPersistedTurns(messagesRef.current),
       history: historyRef.current,
@@ -676,7 +732,103 @@ function DesignerApp({
     reset: () => {},
   };
 
+  // ── 表单编辑入口 (PR-7) ─────────────────────────────────────────────────────────
+  // Load a stored form's full definition (from FormsPanel → getFormForEdit) back into the
+  // designer for editing. The canonical model is replaced (so the agent's tool calls mutate
+  // THIS form), the React mirror is synced, and the edit baseline is captured for dirty
+  // detection. reserveUidsFrom advances the session id counter past the loaded field ids —
+  // those ids are kept verbatim (the write-back round-trips them so the backend matches a
+  // changed label as a rename, not a delete+add), so a freshly added field must not collide
+  // with them. A status-aware 载入 note seeds the thread (closed forms aren't "online").
+  const loadFormForEdit = (form) => {
+    if (!form) return;
+    setFormsOpen(false);
+    const loadedMeta = form.meta ? { ...form.meta } : null;
+    const loadedFields = (form.fields || []).map((f) => ({ ...f }));
+    reserveUidsFrom(loadedFields.map((f) => f.id));
+    // replace the canonical model so subsequent agent edits operate on the loaded form
+    modelRef.current.meta = loadedMeta ? { ...loadedMeta } : null;
+    modelRef.current.fields = loadedFields.map((f) => ({ ...f }));
+    // Start the edit on a CLEAN agent context: reset the LLM history to just the system prompt
+    // so the prior (new-form) conversation can't bleed into edits of a different form, and mark
+    // the editing ref so turn-end §26 persistence is skipped (an edit conversation is ephemeral
+    // and must not overwrite this or any form's design session). The visible thread is reseeded
+    // below; the agent reads the loaded fields via get_form_schema, so history needs no fields.
+    editingFormRef.current = { slug: form.slug, status: form.status, meta: loadedMeta };
+    historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
+    setMeta(loadedMeta);
+    setFields(loadedFields);
+    setValuesState({});
+    setEditingForm({ slug: form.slug, status: form.status, meta: loadedMeta });
+    setPublished(form.status === "published");
+    setUpdateDone(false);
+    setDiscardOpen(false);
+    setEditBaseline(editSig(loadedMeta, loadedFields));
+    setTab("preview");
+    const title = loadedMeta?.title || "这份表单";
+    const note =
+      form.status === "closed"
+        ? `已载入《${title}》的当前版本，共 ${loadedFields.length} 个字段。这份表单当前已关闭、未在收集；直接告诉我要改什么，改好点「更新」保存，需要时再「重新发布」让访问者看到新版本。不想保留这次改动就点「退出」。`
+        : `已载入《${title}》的当前版本，共 ${loadedFields.length} 个字段。直接告诉我要改什么，或在右侧预览里「指向修改」。改好后点「更新」即可对新访问者生效；不想保留这次改动就点「退出」。`;
+    setMessagesTracked([{ id: uid("msg"), role: "assistant", kind: "text", text: note }]);
+  };
+
+  // Write the edited form back via PATCH /api/forms/:slug (整块替换 meta+fields, §21.3).
+  // On success re-baseline (so 更新 disables again until the next change) + flash 已更新.
+  // A 401 means the session lapsed → route into login. Other failures surface in the thread.
+  const updateLiveForm = async () => {
+    if (!editingForm || !editDirty || building) return;
+    try {
+      await updateFormDefinition(editingForm.slug, modelRef.current.meta, modelRef.current.fields);
+      // Re-baseline from the SAME source we wrote back (the canonical model), not the React
+      // mirror — so dirty detection can't diverge if the model was mutated without a synchronous
+      // state flush before 更新. The button re-disables until the next real change.
+      setEditBaseline(editSig(modelRef.current.meta, modelRef.current.fields));
+      setUpdateDone(true);
+      setTimeout(() => setUpdateDone(false), 2200);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        needLogin("登录后保存你的表单改动");
+        return;
+      }
+      pushMsg({ role: "assistant", kind: "error", text: errorMessage(e) });
+    }
+  };
+
+  // Leave edit mode and reset to a clean draft designer (the stored form is safe in 我的表单).
+  // Mirror loadFormForEdit's ref hygiene: clear the editing ref (re-enables §26 persistence) and
+  // reset the LLM history + published-slug association so the next new-form session starts clean
+  // and doesn't carry the edited form's context/slug.
+  const doExit = () => {
+    editingFormRef.current = null;
+    historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
+    publishedSlugRef.current = null;
+    setEditingForm(null);
+    setUpdateDone(false);
+    setDiscardOpen(false);
+    setEditBaseline("");
+    modelRef.current = createFormModel();
+    setMeta(null);
+    setFields([]);
+    setValuesState({});
+    setPublished(false);
+    setMessagesTracked([]);
+  };
+
+  // 退出: with unsaved changes confirm first (放弃本次编辑); otherwise leave directly.
+  const exitEditing = () => {
+    if (editDirty) {
+      setDiscardOpen(true);
+      return;
+    }
+    doExit();
+  };
+
   const fieldCount = fields.length;
+  // dirty = an active edit whose live content diverged from the loaded/last-saved baseline.
+  const editDirty = !!editingForm && editSig(meta, fields) !== editBaseline;
+  // Editing a CLOSED form: its display must NOT claim the online/收集中 context (chat13).
+  const editingClosed = !!editingForm && editingForm.status === "closed";
 
   return (
     <React.Fragment>
@@ -690,11 +842,19 @@ function DesignerApp({
         title={
           <React.Fragment>
             <span style={{ fontSize: "var(--text-md)", color: "var(--text-muted)" }}>
-              活动报名 · 未命名表单
+              {/* 编辑态用实时 meta.title(改名后立即跟随预览),非载入时的快照。 */}
+              {editingForm ? meta?.title || "未命名表单" : "活动报名 · 未命名表单"}
             </span>
-            <Badge variant={published ? "ok" : "neutral"} dot>
-              {published ? "LIVE" : "DRAFT"}
-            </Badge>
+            {editingForm ? (
+              // 编辑态徽章随真实状态自洽 (chat13): 已发布→LIVE，已关闭→已关闭（绝不把关闭表单当在线展示）。
+              <Badge variant={editingForm.status === "published" ? "ok" : "neutral"} dot>
+                {editingForm.status === "published" ? "LIVE" : "已关闭"}
+              </Badge>
+            ) : (
+              <Badge variant={published ? "ok" : "neutral"} dot>
+                {published ? "LIVE" : "DRAFT"}
+              </Badge>
+            )}
           </React.Fragment>
         }
         actions={
@@ -712,14 +872,26 @@ function DesignerApp({
             >
               分享
             </Button>
-            <Button
-              variant="primary"
-              icon={<Icon name="spark" size={14} />}
-              disabled={building || fieldCount === 0}
-              onClick={() => guard("publish", "登录后即可发布表单")}
-            >
-              发布
-            </Button>
+            {editingForm ? (
+              // 编辑态: 主按钮由「发布」变「更新」→ PATCH 写回 meta+fields。无改动时灰着。
+              <Button
+                variant="primary"
+                icon={<Icon name={updateDone ? "check" : "save"} size={14} />}
+                disabled={building || fieldCount === 0 || !editDirty}
+                onClick={updateLiveForm}
+              >
+                {updateDone ? "已更新" : "更新"}
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                icon={<Icon name="spark" size={14} />}
+                disabled={building || fieldCount === 0}
+                onClick={() => guard("publish", "登录后即可发布表单")}
+              >
+                发布
+              </Button>
+            )}
           </React.Fragment>
         }
         account={
@@ -776,6 +948,49 @@ function DesignerApp({
         }
         preview={
           <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+            {/* 编辑态状态横幅 (PR-7, chat13): 低调发丝线条 — ■ EDITING mono 标签 + 状态点 + 一行
+                文案 + 「详情」HoverCard + 「退出」。与下方「预览 / Schema」工具栏等高（共用 --bar-h）。
+                文案/详情随表单真实状态自洽：已发布走「线上仍在收集」，已关闭走「未在收集」。 */}
+            {editingForm ? (
+              <div className="d-editbar" data-testid="edit-banner">
+                <span className="ax-label d-editbar__tag">EDITING</span>
+                <span className="d-editbar__txt">
+                  {editingClosed
+                    ? "正在编辑已关闭的表单 · 表单未在收集，改动点「更新」保存"
+                    : "正在编辑已发布表单 · 改动点「更新」后才对访问者生效"}
+                </span>
+                <HoverCard
+                  side="bottom"
+                  className="d-editbar__more"
+                  trigger={<span className="d-editbar__moretxt">详情</span>}
+                >
+                  <div className="d-editbar__pop">
+                    {editingClosed ? (
+                      <React.Fragment>
+                        <p>编辑已关闭的表单时</p>
+                        <ul>
+                          <li>表单当前已关闭，不接收新提交</li>
+                          <li>改动在「更新」后保存</li>
+                          <li>重新发布后，访问者看到的是新版本</li>
+                        </ul>
+                      </React.Fragment>
+                    ) : (
+                      <React.Fragment>
+                        <p>编辑线上表单时</p>
+                        <ul>
+                          <li>历史提交保留不变</li>
+                          <li>新增字段对旧提交显示「—」</li>
+                          <li>编辑期间表单仍在收集</li>
+                        </ul>
+                      </React.Fragment>
+                    )}
+                  </div>
+                </HoverCard>
+                <button type="button" className="d-editbar__exit" onClick={exitEditing}>
+                  退出
+                </button>
+              </div>
+            ) : null}
             <div className="ax-dshell__panebar">
               <div className="d-pvhead__tabs">
                 <Tabs
@@ -917,8 +1132,23 @@ function DesignerApp({
         listForms={listForms}
         updateForm={updateForm}
         deleteForm={deleteForm}
+        getFormForEdit={getFormForEdit}
+        onEditForm={loadFormForEdit}
         publicFormUrl={publicFormUrl}
         listSubmissions={listSubmissions}
+      />
+
+      {/* 放弃保护 (PR-7): 编辑态有未保存改动时退出 → 二次确认。继续编辑→留在编辑态；放弃改动→
+          doExit 清回干净草稿（线上版本不受影响，已安全存在「我的表单」里）。 */}
+      <AlertDialog
+        open={discardOpen}
+        tone="warn"
+        title="放弃本次编辑？"
+        description={`你对《${meta?.title || editingForm?.meta?.title || "这份表单"}》的改动还没「更新」，退出后不会保存；已发布的版本保持不变。`}
+        cancelLabel="继续编辑"
+        confirmLabel="放弃改动"
+        onCancel={() => setDiscardOpen(false)}
+        onConfirm={doExit}
       />
 
       {/* Publish feedback (§16): opened by 发布/分享, publishes the live model and shows the

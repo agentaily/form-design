@@ -71,6 +71,57 @@ const FIELD_TYPE_MAP: Record<UiFieldType, WireFieldType> = {
   consent: "checkbox",
 };
 
+/**
+ * §3.2 backend FieldType → designer UI type, for loading a stored form back into the
+ * designer (PR-7 编辑). The publish mapping above is MANY-to-one (tel/email/textarea →
+ * text; checks/consent → checkbox), so this reverse is INHERENTLY LOSSY: a stored
+ * `text` lands back as plain `text` (the tel/email/textarea affordance can't be
+ * recovered) and a stored `checkbox` lands back as multi-choice `checks` (never the
+ * single-box `consent`). That loss lives in the existing wire contract (the DB only
+ * stores §3.2 types), NOT here — fixing it would need backend schema enrichment, which
+ * is out of PR-7 scope. `number`/`date`/`file`/`group` aren't producible by the
+ * designer (it never emits them); they degrade to free-text `text` as a best effort so
+ * the loaded model always carries a valid {@link UiFieldType} the designer can render.
+ */
+const WIRE_TO_UI_FIELD_TYPE: Record<WireFieldType, UiFieldType> = {
+  text: "text",
+  number: "text",
+  date: "text",
+  file: "text",
+  group: "text",
+  select: "select",
+  checkbox: "checks",
+  radio: "radio",
+};
+
+/** Map the §16.2 wire meta ({ title, description? }) back to the designer FormMeta
+ *  ({ title, desc }). `kicker`/`meta[]` were dropped at publish time (the wire meta
+ *  never carried them), so they can't round-trip — title + desc are what's stored. */
+function toUiMeta(wireMeta: { title?: string; description?: string } | null | undefined): FormMeta {
+  const meta: FormMeta = { title: wireMeta?.title ?? "" };
+  if (wireMeta?.description) meta.desc = wireMeta.description;
+  return meta;
+}
+
+/** Map stored §16.2 wire fields back to the designer's UiField[] for editing. Field
+ *  `id` is PRESERVED verbatim (never re-minted) so a later {@link updateFormDefinition}
+ *  carries the SAME ids the backend stored — that id match is how the backend tells a
+ *  changed label apart as a rename (飞书列改名, §16.8) rather than a delete-old +
+ *  add-new (which would orphan the column and isolate its data). `options:{label,value}[]`
+ *  collapses back to `options:string[]` (the label, which MVP also used as the value). */
+function toUiFields(wireFields: WireField[] | null | undefined): UiField[] {
+  return (wireFields ?? []).map((wf) => {
+    const f: UiField = {
+      id: wf.id,
+      type: WIRE_TO_UI_FIELD_TYPE[wf.type] ?? "text",
+      label: wf.label,
+    };
+    if (wf.required) f.required = true;
+    if (wf.options) f.options = wf.options.map((o) => o.label);
+    return f;
+  });
+}
+
 /** A single wire field (SPEC §16.2, aligned to §3.2 Field). Choice options are objects. */
 interface WireField {
   id: string;
@@ -229,6 +280,70 @@ export function updateForm(slug: string, patch: UpdateFormInput): Promise<Update
     method: "PATCH",
     auth: true,
     body: patch,
+  });
+}
+
+/**
+ * A stored form loaded back into the designer for editing (PR-7 编辑入口). The designer
+ * shape: FormMeta (UI keys) + UiField[] (UI types, `options: string[]`, ids preserved) +
+ * the owner-private `status` so the edit banner / 顶栏徽章 can branch published vs closed.
+ */
+export interface EditableForm {
+  slug: string;
+  meta: FormMeta;
+  fields: UiField[];
+  status: FormStatus;
+}
+
+/**
+ * Load a form's full definition (meta + fields) back into the designer for editing
+ * (SPEC §21.3, owner-only §17). The owner's "我的表单" list (listForms) omits `fields`,
+ * and there is NO owner-side `GET /api/forms/:slug` (that path is the PUBLIC, no-status
+ * projection). So we read the form back through the EMPTY-BODY no-op PATCH, which the
+ * backend documents as a 200 that returns the FULL owner view — `{ slug, meta, fields,
+ * status, createdAt }` — without changing any row (empty `input` → no UPDATE, just a
+ * read-back; §21.3). This keeps the whole edit lifecycle on the owner-authed path
+ * (load → edit → 更新 all via PATCH with Bearer) AND owner-scoped (a cross-owner slug is
+ * a 404, never another owner's form), unlike the public projection. The wire view is
+ * mapped back to the designer shape via {@link toUiMeta} / {@link toUiFields} (lossy by
+ * the existing wire contract — see {@link WIRE_TO_UI_FIELD_TYPE}); ids are preserved so a
+ * later {@link updateFormDefinition} round-trips them for rename detection. A 404 (unknown
+ * slug / cross-owner) or 401 (session expired) surfaces as an ApiError for the caller.
+ */
+export async function getFormForEdit(slug: string): Promise<EditableForm> {
+  const view = await apiFetch<UpdateFormResult>(`${FORMS_PATH}/${slug}`, {
+    method: "PATCH",
+    auth: true,
+    body: {}, // empty patch → no-op read-back of the full owner view (§21.3)
+  });
+  return {
+    slug: view.slug ?? slug,
+    meta: toUiMeta(view.meta as { title?: string; description?: string } | undefined),
+    fields: toUiFields(view.fields as unknown as WireField[] | undefined),
+    status: view.status ?? "published",
+  };
+}
+
+/**
+ * Write an edited form's definition back (SPEC §21.3, owner-only §17). Takes the live
+ * designer model (FormMeta + UiField[]) and maps it to the §16.2 wire shape internally —
+ * the SAME mapping publishForm uses (meta.desc → description, UI field type → §3.2
+ * FieldType, `options:string[]` → `{label,value}[]`), with each field's `id` PRESERVED so
+ * the backend can match changed labels as renames (飞书列改名, §16.8) instead of
+ * delete-old + add-new. PATCHes `{ meta, fields }` (整块替换, §21.3) and resolves the
+ * {@link UpdateFormResult} echo. A 400 (missing title / bad fields), 404 (unknown slug),
+ * or 401 (session expired) surfaces as an ApiError for the caller to route.
+ */
+export function updateFormDefinition(
+  slug: string,
+  meta: FormMeta | null,
+  fields: UiField[],
+): Promise<UpdateFormResult> {
+  const wire = toPublishInput(meta, fields);
+  return apiFetch<UpdateFormResult>(`${FORMS_PATH}/${slug}`, {
+    method: "PATCH",
+    auth: true,
+    body: { meta: wire.meta, fields: wire.fields },
   });
 }
 
