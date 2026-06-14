@@ -7,9 +7,12 @@
 // (§13.6), which the backend validates against its whitelist (workers/src/chat.ts
 // `DEEPSEEK_MODELS`) and otherwise backstops with the owner's saved model / default.
 //
-// MODEL NAMES (manager from-parent-1/2, 2026-06): DeepSeek now ships exactly two 型号 —
-// `DeepSeek-V4-Flash`(通用·快,默认)and `DeepSeek-V4-Pro`(更强·深度推理). The old
-// `deepseek-chat`/`deepseek-reasoner` ids are retired; these `value`s are what go upstream.
+// MODEL NAMES (2026-06): DeepSeek ships exactly two 型号 — V4-Flash(通用·快,默认)and
+// V4-Pro(更强·深度推理). Their DISPLAY names are `DeepSeek-V4-Flash` / `DeepSeek-V4-Pro`
+// (kept on `label`/`pill`), but the **API model id is case-sensitive lowercase**
+// `deepseek-v4-flash` / `deepseek-v4-pro` — that lowercase id is the `value` sent upstream
+// as `POST /api/chat`'s `model`. Sending the camelCase display name 400s (see deepseek-api
+// skill). The old `deepseek-chat`/`deepseek-reasoner` ids are retired.
 //
 // DISTINCT FROM 集成设置 CREDENTIALS (§12): this is NOT the owner's saved DeepSeek model
 // on owner_config — that is the persisted credential/default. This selector is a transient,
@@ -37,13 +40,15 @@ export interface ChatModelOption {
  */
 export const CHAT_MODELS: ChatModelOption[] = [
   {
-    value: "DeepSeek-V4-Flash",
+    // `value` is the lowercase DeepSeek API id (case-sensitive — the OpenAI-compatible
+    // endpoint 400s on a camelCase display name); `label`/`pill` keep the display casing.
+    value: "deepseek-v4-flash",
     label: "DeepSeek-V4-Flash",
     hint: "通用 · 快",
     pill: "DeepSeek · V4-Flash",
   },
   {
-    value: "DeepSeek-V4-Pro",
+    value: "deepseek-v4-pro",
     label: "DeepSeek-V4-Pro",
     hint: "更强 · 深度推理",
     pill: "DeepSeek · V4-Pro",
@@ -51,7 +56,7 @@ export const CHAT_MODELS: ChatModelOption[] = [
 ];
 
 /** Default chat model when the owner has not picked one (mirrors backend default, §13.6). */
-export const DEFAULT_CHAT_MODEL = "DeepSeek-V4-Flash";
+export const DEFAULT_CHAT_MODEL = "deepseek-v4-flash";
 
 /** localStorage key holding the owner's last-picked conversation model (a UI preference). */
 export const CHAT_MODEL_STORAGE_KEY = "agentaily_forms_chat_model";

@@ -14,6 +14,7 @@ import {
   DEEPSEEK_BASE_URL,
   DEFAULT_DEEPSEEK_MODEL,
   DeepSeekNotConfiguredError,
+  normalizeDeepSeekModel,
   parseChatRequest,
   type ChatRequest,
 } from "./chat";
@@ -715,8 +716,10 @@ app.post("/api/chat", async (c) => {
       },
       body: JSON.stringify({
         // §13.6 优先级：per-request model（对话级模型芯片，已 parseChatRequest 白名单校验）→
-        // owner 保存的 model → 全局默认。带上 model 时它已 ∈ DEEPSEEK_MODELS（否则 parse 阶段已 400）。
-        model: request.model || deepseek.model || DEFAULT_DEEPSEEK_MODEL,
+        // owner 保存的 model → 全局默认。归一化兜底：owner 保存的 model 可能是旧的驼峰显示名脏数据
+        // （`"DeepSeek-V4-Flash"`，老用户存过），未归一化直接发上游会 400 —— normalizeDeepSeekModel
+        // 把它映射成合法小写 id，老用户不用手动重存配置。per-request / 默认已是合法值，归一化对其幂等。
+        model: normalizeDeepSeekModel(request.model || deepseek.model || DEFAULT_DEEPSEEK_MODEL),
         messages: request.messages,
         ...(request.tools !== undefined ? { tools: request.tools } : {}),
         stream: true,

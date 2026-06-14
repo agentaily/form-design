@@ -200,9 +200,10 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
     // And owner 在该对话里发送一条消息。
     fireEvent.click(screen.getByText("做一个线下活动报名表"));
 
-    // Then 发往对话代理的请求带上 model 参数 "DeepSeek-V4-Pro"。
+    // Then 发往对话代理的请求带上 model 参数 = V4-Pro 的小写 API id（显示名是 DeepSeek-V4-Pro，
+    // 但发上游的 wire 值是 deepseek-v4-pro —— 选的是 label，发的是 value）。
     await waitFor(() => expect(chat).toHaveBeenCalled());
-    expect(chat.mock.calls[0][0].model).toBe("DeepSeek-V4-Pro");
+    expect(chat.mock.calls[0][0].model).toBe("deepseek-v4-pro");
   });
 
   it("Scenario: 未显式切换型号时对话仍带上默认型号 V4-Flash(默认显示在芯片上)", async () => {
@@ -229,7 +230,7 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
     fireEvent.click(screen.getByText("做一个线下活动报名表"));
     await waitFor(() => expect(chat).toHaveBeenCalled());
     // 默认仍选中 V4-Flash → 仍带 model(per-request 显式发送默认值是允许的,白名单兜底)。
-    // 关键断言:发送时 model 是当前芯片选中的默认值,不是 undefined/未知。
-    expect(chat.mock.calls[0][0].model).toBe("DeepSeek-V4-Flash");
+    // 关键断言:发送时 model 是当前芯片选中默认值的小写 wire id,不是 undefined/未知/驼峰显示名。
+    expect(chat.mock.calls[0][0].model).toBe("deepseek-v4-flash");
   });
 });

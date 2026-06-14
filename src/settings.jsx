@@ -90,8 +90,20 @@ const IDLE = { status: "idle", result: undefined };
  * @param {{ email?: string, displayName?: string|null }} [props.user]  current owner snapshot
  * @param {object} props.form         a Form.useForm() bag (owns the displayName field)
  * @param {() => void} props.onLogout  退出登录
+ * @param {boolean} [props.verified]   邮箱验证状态 (§23.6); false → 渲染未验证内联卡 .acct-verify
+ * @param {() => void} [props.onResend] 重新发送验证邮件 (接 App 的 resendVerification)
+ * @param {number} [props.cooldown]    重新发送冷却剩余秒数 (>0 时按钮禁用并显示「重新发送 · {n}s」)
+ * @param {boolean} [props.resending]  正在发送中 (按钮禁用并显示「发送中…」)
  */
-function AccountSection({ user, form, onLogout }) {
+function AccountSection({
+  user,
+  form,
+  onLogout,
+  verified = true,
+  onResend,
+  cooldown = 0,
+  resending = false,
+}) {
   const u = user || {};
   const ident = u.displayName || u.email || L("未登录", "Not signed in");
   // Register the field WITH a maxLength rule so a too-long name is caught before submit
@@ -170,6 +182,35 @@ function AccountSection({ user, form, onLogout }) {
           />
         </Field>
       </div>
+
+      {/* 邮箱未验证内联卡 (§23.6 新设计 .acct-verify) — 仅未验证时显示;与顶部 .vb 条共用 App 的
+          重发逻辑(冷却同步)。消费 DS Button + Icon。 */}
+      {!verified ? (
+        <div className="acct-verify">
+          <Icon name="mail" size={16} />
+          <div className="acct-verify__txt">
+            <div className="acct-verify__h">{L("邮箱还未验证", "Email not verified yet")}</div>
+            <p className="acct-verify__p">
+              {L(
+                "验证后才能接收表单提醒与重要账户通知。验证邮件已发送至上方邮箱，请点击其中的链接完成验证。",
+                "Verify to receive form notifications and important account alerts. A verification email has been sent to the address above — click the link inside to finish.",
+              )}
+            </p>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={cooldown > 0 || resending}
+            onClick={onResend}
+          >
+            {resending
+              ? L("发送中…", "Sending…")
+              : cooldown > 0
+                ? L("重新发送 · ", "Resend · ") + cooldown + "s"
+                : L("重新发送", "Resend")}
+          </Button>
+        </div>
+      ) : null}
     </PageSection>
   );
 }
@@ -322,6 +363,12 @@ export function SettingsOverlay({
   saveConfig = defaultSaveConfig,
   testConnections = defaultTestConnections,
   updateProfile = defaultUpdateProfile,
+  // 邮箱验证状态 (§23.6) — 账户 tab 的 acct-verify 内联卡用。emailVerified 默认 true(无卡),
+  // 与 App 的乐观默认一致;onResendVerification / resendCooldown / resending 接 App 的重发逻辑。
+  emailVerified = true,
+  onResendVerification = () => {},
+  resendCooldown = 0,
+  resending = false,
 } = {}) {
   // ── 集成 tab state ────────────────────────────────────────────────────────────
   // The masked echo of the stored config; null until the first getConfig resolves.
@@ -329,7 +376,8 @@ export function SettingsOverlay({
   // Controlled card fields. Secret editables (apiKey / secret) start empty so the masked
   // affordance shows; a non-empty value is the new plaintext to overwrite with.
   const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState("DeepSeek-V4-Flash");
+  // Lowercase API id (case-sensitive — camelCase 400s); see core/chatModels + chat.ts.
+  const [model, setModel] = useState("deepseek-v4-flash");
   const [appId, setAppId] = useState("");
   const [secret, setSecret] = useState("");
   // loading reflects the integration fetch; only meaningful once the 集成 tab is shown.
@@ -365,7 +413,7 @@ export function SettingsOverlay({
   // reset to empty (so the masked affordance shows).
   const echo = useCallback((cfg) => {
     setConfig(cfg);
-    setModel(cfg?.deepseek?.model || "DeepSeek-V4-Flash");
+    setModel(cfg?.deepseek?.model || "deepseek-v4-flash");
     setAppId(cfg?.feishu?.appId ?? "");
     setApiKey("");
     setSecret("");
@@ -563,7 +611,15 @@ export function SettingsOverlay({
       footer={footer}
     >
       {section === "account" ? (
-        <AccountSection user={user} form={accountForm} onLogout={onLogout} />
+        <AccountSection
+          user={user}
+          form={accountForm}
+          onLogout={onLogout}
+          verified={emailVerified}
+          onResend={onResendVerification}
+          cooldown={resendCooldown}
+          resending={resending}
+        />
       ) : (
         <PageSection
           eyebrow={L("集成 · INTEGRATIONS", "Integrations · INTEGRATIONS")}

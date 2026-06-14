@@ -314,8 +314,11 @@ function DesignerApp({
   // 邮箱验证状态 (§23.6). AUTHORITATIVE bit from GET /api/auth/me — fetched on mount (when
   // logged in). Defaults to `true` (no banner) so a failed/null `me` never flashes a banner.
   const [emailVerified, setEmailVerified] = useState(true);
-  // 重新发送 反馈: "" | "sending" | "sent".
+  // 重新发送 反馈: "" | "sending"（"sent" 终态已由下面的冷却倒计时取代,见新顶部 .vb 设计 §23.6）。
   const [resendState, setResendState] = useState("");
+  // 重新发送冷却秒数 (§23.6 新设计 .vb / .acct-verify): 一次成功重发后置 30,逐秒 -1,期间按钮禁用并
+  // 显示「重新发送 · {n}s」,防连点。0 表示可再次发送。
+  const [cooldown, setCooldown] = useState(0);
   // continuous-send buffer (SPEC §4.1): pending messages shown above the composer.
   const [queueItems, setQueueItems] = useState([]);
   // 多会话列表 (§26.9): the owner's other design conversations, for the SessionMenu. Loaded on
@@ -540,6 +543,7 @@ function DesignerApp({
     // logging out drops the session — hide the banner (no owner to verify) + close settings.
     setEmailVerified(true);
     setResendState("");
+    setCooldown(0);
     closeSettings();
   };
 
@@ -727,14 +731,23 @@ function DesignerApp({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loggedIn]);
 
+  // 重新发送冷却倒计时 (§23.6 新设计 .vb / .acct-verify): cooldown>0 时每秒 -1 直到 0。
+  useEffect(() => {
+    if (cooldown <= 0) return undefined;
+    const t = setTimeout(() => setCooldown((n) => (n > 0 ? n - 1 : 0)), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
   // 重新发送验证邮件 (§23.3, owner-only). Always succeeds when authenticated; on resolve we
-  // show ONE neutral「已重新发送」. A 401 means the session lapsed — route into login.
+  // start a 30s 冷却 (the new 顶部 .vb / acct-verify design surfaces 「重新发送 · {n}s」 instead of
+  // a terminal「已重新发送」). A 401 means the session lapsed — route into login.
   const resendVerification = async () => {
-    if (resendState === "sending") return;
+    if (resendState === "sending" || cooldown > 0) return;
     setResendState("sending");
     try {
       await requestEmailVerification();
-      setResendState("sent");
+      setResendState("");
+      setCooldown(30);
       refreshMe();
     } catch (e) {
       setResendState("");
@@ -1013,380 +1026,387 @@ function DesignerApp({
 
   return (
     <React.Fragment>
-      <DesignerShell
-        brand={<BrandMark size={18} wordmark cursor={false} />}
-        crumb="forms"
-        split={t.split / 100}
-        onSplitChange={(f) => setTweak("split", Math.round(f * 100))}
-        minSplit={0.32}
-        maxSplit={0.64}
-        title={
-          <React.Fragment>
-            <span style={{ fontSize: "var(--text-md)", color: "var(--text-muted)" }}>
-              {/* 编辑态用实时 meta.title(改名后立即跟随预览),非载入时的快照。 */}
-              {editingForm
-                ? meta?.title || L("未命名表单", "Untitled form")
-                : L("活动报名 · 未命名表单", "Event sign-up · Untitled form")}
+      <div className="app-stack">
+        {/* 邮箱未验证条 (§23.6) — 新设计:贴 app 最顶的「内联条」(不是底部浮层),把下面的设计器往下推。
+            登录且 AUTHORITATIVE 验证位为 false 时显示:脉冲「待验证」点 + 「验证邮件已发送至 <email>…」+
+            带冷却的「重新发送」。消费 DS Button,i18n 走 L()。见 DESIGN.md 的 .vb。 */}
+        {loggedIn && !emailVerified ? (
+          <div className="vb" data-testid="verify-banner">
+            <span className="vb__tag">
+              <span className="vb__dot" />
+              {L("待验证", "UNVERIFIED")}
             </span>
-            {editingForm ? (
-              // 编辑态徽章随真实状态自洽 (chat13): 已发布→LIVE，已关闭→已关闭（绝不把关闭表单当在线展示）。
-              <Badge variant={editingForm.status === "published" ? "ok" : "neutral"} dot>
-                {editingForm.status === "published" ? "LIVE" : L("已关闭", "CLOSED")}
-              </Badge>
-            ) : (
-              <Badge variant={published ? "ok" : "neutral"} dot>
-                {published ? "LIVE" : "DRAFT"}
-              </Badge>
-            )}
-          </React.Fragment>
-        }
-        actions={
-          <React.Fragment>
-            <IconButton
-              label={L("切换主题", "Toggle theme")}
-              onClick={() => setTweak("theme", t.theme === "dark" ? "light" : "dark")}
-            >
-              <Icon name={t.theme === "dark" ? "sun" : "moon"} size={15} />
-            </IconButton>
-            <Button
-              variant="secondary"
-              icon={<Icon name="share" size={14} />}
-              onClick={() =>
-                guard(
-                  "share",
-                  L(
-                    "登录后即可分享表单并收集回复",
-                    "Sign in to share your form and collect responses",
-                  ),
-                )
-              }
-            >
-              {L("分享", "Share")}
-            </Button>
-            {editingForm ? (
-              // 编辑态: 主按钮由「发布」变「更新」→ PATCH 写回 meta+fields。无改动时灰着。
+            <span className="vb__txt">
+              {L("验证邮件已发送至 ", "A verification email was sent to ")}
+              <strong className="vb__email">{userEmail}</strong>
+              {L("，点击邮件中的链接以完成验证。", " — click the link inside to finish verifying.")}
+            </span>
+            <span className="vb__actions">
               <Button
-                variant="primary"
-                icon={<Icon name={updateDone ? "check" : "save"} size={14} />}
-                disabled={building || fieldCount === 0 || !editDirty}
-                onClick={updateLiveForm}
+                size="sm"
+                variant="secondary"
+                disabled={resendState === "sending" || cooldown > 0}
+                onClick={resendVerification}
               >
-                {updateDone ? L("已更新", "Updated") : L("更新", "Update")}
+                {resendState === "sending"
+                  ? L("发送中…", "Sending…")
+                  : cooldown > 0
+                    ? L("重新发送 · ", "Resend · ") + cooldown + "s"
+                    : L("重新发送", "Resend")}
               </Button>
-            ) : (
-              <Button
-                variant="primary"
-                icon={<Icon name="spark" size={14} />}
-                disabled={building || fieldCount === 0}
-                onClick={() =>
-                  guard("publish", L("登录后即可发布表单", "Sign in to publish your form"))
-                }
-              >
-                {L("发布", "Publish")}
-              </Button>
-            )}
-          </React.Fragment>
-        }
-        account={
-          <AccountControl
-            user={loggedIn ? { email: userEmail || "", name: userDisplayName || undefined } : null}
-            onLogin={() => goSignIn({})}
-            onLogout={doLogout}
-            // The email row opens the 账户 tab (§17 个人资料); menu items below it match the
-            // design handoff order: 集成设置 (plug) above 我的表单 (folder), with a separator.
-            onProfile={() =>
-              guard("account", L("登录后管理你的账户", "Sign in to manage your account"))
-            }
-            items={[
-              {
-                label: L("集成设置", "Integrations"),
-                icon: <Icon name="plug" size={15} />,
-                onSelect: () =>
-                  guard("settings", L("登录后配置集成", "Sign in to configure integrations")),
-              },
-              { type: "separator" },
-              {
-                label: L("我的表单", "My forms"),
-                icon: <Icon name="folder" size={15} />,
-                onSelect: () =>
-                  guard(
-                    "forms",
-                    L("登录后查看你发布的表单", "Sign in to view the forms you've published"),
-                  ),
-              },
-            ]}
-          />
-        }
-        mobileLabels={{
-          chat: (
-            <React.Fragment>
-              <Icon name="message" size={15} /> {L("对话", "Chat")}
-            </React.Fragment>
-          ),
-          preview: (
-            <React.Fragment>
-              <Icon name="eye" size={15} /> {L("预览", "Preview")}{" "}
-              {fieldCount ? <span className="ax-dshell__mcount">{fieldCount}</span> : null}
-            </React.Fragment>
-          ),
-        }}
-        chat={
-          // 对话级模型芯片 (§13.6): DS 0.11.0 的 ConversationThread 透传 onModelClick 给内部
-          // Composer 的模型 pill,直接拿官方回调开锚定弹层 —— 不再用 wrapper 截内部类
-          // `.ax-composer__model`。.cm-wrap 仍是弹层的定位容器 (position: relative);弹层锚定
-          // 走纯 CSS (.cm-menu 左下,见 app.css)。SessionMenu 骑在 header `actions` 槽;模型
-          // `pill` 反映当前选择。
-          <div className="cm-wrap">
-            <ConversationThread
-              title={L("对话", "Chat")}
-              model={chatModelPill(chatModel)}
-              onModelClick={() => setModelMenuOpen((o) => !o)}
-              actions={
-                <SessionMenu
-                  sessions={sessions}
-                  activeId={sessionIdRef.current}
-                  onNewChat={newChat}
-                  onSelect={switchSession}
-                  onDelete={removeSession}
-                />
-              }
-              messages={messages}
-              draft={draft}
-              onDraftChange={setDraft}
-              controller={controller}
-              renderTurn={(m, i, ctx) => renderChatTurn(m, ctx, onSend)}
-              emptyTitle={L("描述你想要的表单", "Describe the form you want")}
-              hints={[
-                L("做一个线下活动报名表", "Build an in-person event sign-up form"),
-                L("收集一份客户满意度问卷", "Collect a customer satisfaction survey"),
-                L("招聘投递表单", "A job application form"),
-              ]}
-              placeholder={L(
-                "描述你想要的表单，例如：做一个活动报名表…",
-                "Describe the form you want, e.g. build an event sign-up…",
-              )}
-              busyPlaceholder={L(
-                "可继续输入，会收进缓冲区一起处理…",
-                "Keep typing — it'll buffer and process together…",
-              )}
-              note={L(
-                "AGENTAILY 会出错 · 发布前请核对字段",
-                "AGENTAILY can make mistakes · review fields before publishing",
-              )}
-            />
-            {modelMenuOpen ? (
-              <React.Fragment>
-                <div className="cm-scrim" onClick={() => setModelMenuOpen(false)} />
-                <div className="cm-menu">
-                  <div className="cm-menu__label ax-label">
-                    {L("模型 · DeepSeek", "Model · DeepSeek")}
-                  </div>
-                  {CHAT_MODELS.map((m) => (
-                    <button
-                      type="button"
-                      key={m.value}
-                      className={"cm-opt" + (chatModel === m.value ? " is-on" : "")}
-                      onClick={() => {
-                        setChatModel(m.value);
-                        setModelMenuOpen(false);
-                      }}
-                    >
-                      <span className="cm-opt__body">
-                        <span className="cm-opt__name">{m.label}</span>
-                        <span className="cm-opt__desc">{m.hint}</span>
-                      </span>
-                      {chatModel === m.value ? <Icon name="check" size={14} /> : null}
-                    </button>
-                  ))}
-                </div>
-              </React.Fragment>
-            ) : null}
+            </span>
           </div>
-        }
-        preview={
-          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            {/* 编辑态状态横幅 (PR-7, chat13): 低调发丝线条 — ■ EDITING mono 标签 + 状态点 + 一行
+        ) : null}
+        <div className="app-stack__main">
+          <DesignerShell
+            brand={<BrandMark size={18} wordmark cursor={false} />}
+            crumb="forms"
+            split={t.split / 100}
+            onSplitChange={(f) => setTweak("split", Math.round(f * 100))}
+            minSplit={0.32}
+            maxSplit={0.64}
+            title={
+              <React.Fragment>
+                <span style={{ fontSize: "var(--text-md)", color: "var(--text-muted)" }}>
+                  {/* 编辑态用实时 meta.title(改名后立即跟随预览),非载入时的快照。 */}
+                  {editingForm
+                    ? meta?.title || L("未命名表单", "Untitled form")
+                    : L("活动报名 · 未命名表单", "Event sign-up · Untitled form")}
+                </span>
+                {editingForm ? (
+                  // 编辑态徽章随真实状态自洽 (chat13): 已发布→LIVE，已关闭→已关闭（绝不把关闭表单当在线展示）。
+                  <Badge variant={editingForm.status === "published" ? "ok" : "neutral"} dot>
+                    {editingForm.status === "published" ? "LIVE" : L("已关闭", "CLOSED")}
+                  </Badge>
+                ) : (
+                  <Badge variant={published ? "ok" : "neutral"} dot>
+                    {published ? "LIVE" : "DRAFT"}
+                  </Badge>
+                )}
+              </React.Fragment>
+            }
+            actions={
+              <React.Fragment>
+                <IconButton
+                  label={L("切换主题", "Toggle theme")}
+                  onClick={() => setTweak("theme", t.theme === "dark" ? "light" : "dark")}
+                >
+                  <Icon name={t.theme === "dark" ? "sun" : "moon"} size={15} />
+                </IconButton>
+                <Button
+                  variant="secondary"
+                  icon={<Icon name="share" size={14} />}
+                  onClick={() =>
+                    guard(
+                      "share",
+                      L(
+                        "登录后即可分享表单并收集回复",
+                        "Sign in to share your form and collect responses",
+                      ),
+                    )
+                  }
+                >
+                  {L("分享", "Share")}
+                </Button>
+                {editingForm ? (
+                  // 编辑态: 主按钮由「发布」变「更新」→ PATCH 写回 meta+fields。无改动时灰着。
+                  <Button
+                    variant="primary"
+                    icon={<Icon name={updateDone ? "check" : "save"} size={14} />}
+                    disabled={building || fieldCount === 0 || !editDirty}
+                    onClick={updateLiveForm}
+                  >
+                    {updateDone ? L("已更新", "Updated") : L("更新", "Update")}
+                  </Button>
+                ) : (
+                  <Button
+                    variant="primary"
+                    icon={<Icon name="spark" size={14} />}
+                    disabled={building || fieldCount === 0}
+                    onClick={() =>
+                      guard("publish", L("登录后即可发布表单", "Sign in to publish your form"))
+                    }
+                  >
+                    {L("发布", "Publish")}
+                  </Button>
+                )}
+              </React.Fragment>
+            }
+            account={
+              <AccountControl
+                user={
+                  loggedIn ? { email: userEmail || "", name: userDisplayName || undefined } : null
+                }
+                onLogin={() => goSignIn({})}
+                onLogout={doLogout}
+                // The email row opens the 账户 tab (§17 个人资料); menu items below it match the
+                // design handoff order: 集成设置 (plug) above 我的表单 (folder), with a separator.
+                onProfile={() =>
+                  guard("account", L("登录后管理你的账户", "Sign in to manage your account"))
+                }
+                items={[
+                  {
+                    label: L("集成设置", "Integrations"),
+                    icon: <Icon name="plug" size={15} />,
+                    onSelect: () =>
+                      guard("settings", L("登录后配置集成", "Sign in to configure integrations")),
+                  },
+                  { type: "separator" },
+                  {
+                    label: L("我的表单", "My forms"),
+                    icon: <Icon name="folder" size={15} />,
+                    onSelect: () =>
+                      guard(
+                        "forms",
+                        L("登录后查看你发布的表单", "Sign in to view the forms you've published"),
+                      ),
+                  },
+                ]}
+              />
+            }
+            mobileLabels={{
+              chat: (
+                <React.Fragment>
+                  <Icon name="message" size={15} /> {L("对话", "Chat")}
+                </React.Fragment>
+              ),
+              preview: (
+                <React.Fragment>
+                  <Icon name="eye" size={15} /> {L("预览", "Preview")}{" "}
+                  {fieldCount ? <span className="ax-dshell__mcount">{fieldCount}</span> : null}
+                </React.Fragment>
+              ),
+            }}
+            chat={
+              // 对话级模型芯片 (§13.6): DS 0.11.0 的 ConversationThread 透传 onModelClick 给内部
+              // Composer 的模型 pill,直接拿官方回调开锚定弹层 —— 不再用 wrapper 截内部类
+              // `.ax-composer__model`。.cm-wrap 仍是弹层的定位容器 (position: relative);弹层锚定
+              // 走纯 CSS (.cm-menu 左下,见 app.css)。SessionMenu 骑在 header `actions` 槽;模型
+              // `pill` 反映当前选择。
+              <div className="cm-wrap">
+                <ConversationThread
+                  title={L("对话", "Chat")}
+                  model={chatModelPill(chatModel)}
+                  onModelClick={() => setModelMenuOpen((o) => !o)}
+                  actions={
+                    <SessionMenu
+                      sessions={sessions}
+                      activeId={sessionIdRef.current}
+                      onNewChat={newChat}
+                      onSelect={switchSession}
+                      onDelete={removeSession}
+                    />
+                  }
+                  messages={messages}
+                  draft={draft}
+                  onDraftChange={setDraft}
+                  controller={controller}
+                  renderTurn={(m, i, ctx) => renderChatTurn(m, ctx, onSend)}
+                  emptyTitle={L("描述你想要的表单", "Describe the form you want")}
+                  hints={[
+                    L("做一个线下活动报名表", "Build an in-person event sign-up form"),
+                    L("收集一份客户满意度问卷", "Collect a customer satisfaction survey"),
+                    L("招聘投递表单", "A job application form"),
+                  ]}
+                  placeholder={L(
+                    "描述你想要的表单，例如：做一个活动报名表…",
+                    "Describe the form you want, e.g. build an event sign-up…",
+                  )}
+                  busyPlaceholder={L(
+                    "可继续输入，会收进缓冲区一起处理…",
+                    "Keep typing — it'll buffer and process together…",
+                  )}
+                  note={L(
+                    "AGENTAILY 会出错 · 发布前请核对字段",
+                    "AGENTAILY can make mistakes · review fields before publishing",
+                  )}
+                />
+                {modelMenuOpen ? (
+                  <React.Fragment>
+                    <div className="cm-scrim" onClick={() => setModelMenuOpen(false)} />
+                    <div className="cm-menu">
+                      <div className="cm-menu__label ax-label">
+                        {L("模型 · DeepSeek", "Model · DeepSeek")}
+                      </div>
+                      {CHAT_MODELS.map((m) => (
+                        <button
+                          type="button"
+                          key={m.value}
+                          className={"cm-opt" + (chatModel === m.value ? " is-on" : "")}
+                          onClick={() => {
+                            setChatModel(m.value);
+                            setModelMenuOpen(false);
+                          }}
+                        >
+                          <span className="cm-opt__body">
+                            <span className="cm-opt__name">{m.label}</span>
+                            <span className="cm-opt__desc">{m.hint}</span>
+                          </span>
+                          {chatModel === m.value ? <Icon name="check" size={14} /> : null}
+                        </button>
+                      ))}
+                    </div>
+                  </React.Fragment>
+                ) : null}
+              </div>
+            }
+            preview={
+              <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+                {/* 编辑态状态横幅 (PR-7, chat13): 低调发丝线条 — ■ EDITING mono 标签 + 状态点 + 一行
                 文案 + 「详情」HoverCard + 「退出」。与下方「预览 / Schema」工具栏等高（共用 --bar-h）。
                 文案/详情随表单真实状态自洽：已发布走「线上仍在收集」，已关闭走「未在收集」。 */}
-            {editingForm ? (
-              <div className="d-editbar" data-testid="edit-banner">
-                <span className="ax-label d-editbar__tag">EDITING</span>
-                <span className="d-editbar__txt">
-                  {editingClosed
-                    ? L(
-                        "正在编辑已关闭的表单 · 表单未在收集，改动点「更新」保存",
-                        "Editing a closed form · not collecting; click “Update” to save",
-                      )
-                    : L(
-                        "正在编辑已发布表单 · 改动点「更新」后才对访问者生效",
-                        "Editing a published form · changes go live only after you click “Update”",
-                      )}
-                </span>
-                <HoverCard
-                  side="bottom"
-                  className="d-editbar__more"
-                  trigger={<span className="d-editbar__moretxt">{L("详情", "Details")}</span>}
-                >
-                  <div className="d-editbar__pop">
-                    {editingClosed ? (
-                      <React.Fragment>
-                        <p>{L("编辑已关闭的表单时", "When editing a closed form")}</p>
-                        <ul>
-                          <li>
-                            {L(
-                              "表单当前已关闭，不接收新提交",
-                              "The form is closed and accepts no new submissions",
-                            )}
-                          </li>
-                          <li>{L("改动在「更新」后保存", "Changes are saved after “Update”")}</li>
-                          <li>
-                            {L(
-                              "重新发布后，访问者看到的是新版本",
-                              "After republishing, visitors see the new version",
-                            )}
-                          </li>
-                        </ul>
-                      </React.Fragment>
-                    ) : (
-                      <React.Fragment>
-                        <p>{L("编辑线上表单时", "When editing a live form")}</p>
-                        <ul>
-                          <li>{L("历史提交保留不变", "Past submissions stay unchanged")}</li>
-                          <li>
-                            {L(
-                              "新增字段对旧提交显示「—」",
-                              "New fields show “—” for old submissions",
-                            )}
-                          </li>
-                          <li>
-                            {L("编辑期间表单仍在收集", "The form keeps collecting while you edit")}
-                          </li>
-                        </ul>
-                      </React.Fragment>
-                    )}
+                {editingForm ? (
+                  <div className="d-editbar" data-testid="edit-banner">
+                    <span className="ax-label d-editbar__tag">EDITING</span>
+                    <span className="d-editbar__txt">
+                      {editingClosed
+                        ? L(
+                            "正在编辑已关闭的表单 · 表单未在收集，改动点「更新」保存",
+                            "Editing a closed form · not collecting; click “Update” to save",
+                          )
+                        : L(
+                            "正在编辑已发布表单 · 改动点「更新」后才对访问者生效",
+                            "Editing a published form · changes go live only after you click “Update”",
+                          )}
+                    </span>
+                    <HoverCard
+                      side="bottom"
+                      className="d-editbar__more"
+                      trigger={<span className="d-editbar__moretxt">{L("详情", "Details")}</span>}
+                    >
+                      <div className="d-editbar__pop">
+                        {editingClosed ? (
+                          <React.Fragment>
+                            <p>{L("编辑已关闭的表单时", "When editing a closed form")}</p>
+                            <ul>
+                              <li>
+                                {L(
+                                  "表单当前已关闭，不接收新提交",
+                                  "The form is closed and accepts no new submissions",
+                                )}
+                              </li>
+                              <li>
+                                {L("改动在「更新」后保存", "Changes are saved after “Update”")}
+                              </li>
+                              <li>
+                                {L(
+                                  "重新发布后，访问者看到的是新版本",
+                                  "After republishing, visitors see the new version",
+                                )}
+                              </li>
+                            </ul>
+                          </React.Fragment>
+                        ) : (
+                          <React.Fragment>
+                            <p>{L("编辑线上表单时", "When editing a live form")}</p>
+                            <ul>
+                              <li>{L("历史提交保留不变", "Past submissions stay unchanged")}</li>
+                              <li>
+                                {L(
+                                  "新增字段对旧提交显示「—」",
+                                  "New fields show “—” for old submissions",
+                                )}
+                              </li>
+                              <li>
+                                {L(
+                                  "编辑期间表单仍在收集",
+                                  "The form keeps collecting while you edit",
+                                )}
+                              </li>
+                            </ul>
+                          </React.Fragment>
+                        )}
+                      </div>
+                    </HoverCard>
+                    <button type="button" className="d-editbar__exit" onClick={exitEditing}>
+                      {L("退出", "Exit")}
+                    </button>
                   </div>
-                </HoverCard>
-                <button type="button" className="d-editbar__exit" onClick={exitEditing}>
-                  {L("退出", "Exit")}
-                </button>
-              </div>
-            ) : null}
-            <div className="ax-dshell__panebar">
-              <div className="d-pvhead__tabs">
-                <Tabs
-                  items={[
-                    { id: "preview", label: L("预览", "Preview") },
-                    { id: "schema", label: "Schema", count: fieldCount },
-                  ]}
-                  active={tab}
-                  onChange={setTab}
-                />
-              </div>
-              <span style={{ flex: 1 }} />
-              {tab === "preview" ? (
-                <div className="d-seg">
-                  <IconButton
-                    label={L("指向修改", "Point to edit")}
-                    size="sm"
-                    variant={markupOn ? "solid" : "outline"}
-                    disabled={building || fieldCount === 0}
-                    onClick={() => setMarkupOn((on) => !on)}
-                  >
-                    <Icon name="pen" size={13} />
-                  </IconButton>
-                  <span className="d-devtoggles">
-                    <span className="d-seg__sep" />
-                    <IconButton
-                      label={L("桌面宽度", "Desktop width")}
-                      size="sm"
-                      variant={device === "full" ? "solid" : "outline"}
-                      onClick={() => setDevice("full")}
-                    >
-                      <Icon name="monitor" size={13} />
-                    </IconButton>
-                    <IconButton
-                      label={L("手机宽度", "Phone width")}
-                      size="sm"
-                      variant={device === "phone" ? "solid" : "outline"}
-                      onClick={() => setDevice("phone")}
-                    >
-                      <Icon name="phone" size={13} />
-                    </IconButton>
-                  </span>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="d-pvstage">
-              <div
-                className={
-                  "d-pvbody ax-dotgrid" + (tab === "preview" && markupOn ? " is-markup" : "")
-                }
-              >
-                {tab === "preview" ? (
-                  <div className={"d-pvscroll" + (device === "phone" ? " is-phone" : "")}>
-                    <FormPreview
-                      meta={meta}
-                      fields={fields}
-                      values={values}
-                      setValue={setValue}
-                      style={t.formStyle}
-                      building={building}
+                ) : null}
+                <div className="ax-dshell__panebar">
+                  <div className="d-pvhead__tabs">
+                    <Tabs
+                      items={[
+                        { id: "preview", label: L("预览", "Preview") },
+                        { id: "schema", label: "Schema", count: fieldCount },
+                      ]}
+                      active={tab}
+                      onChange={setTab}
                     />
                   </div>
-                ) : (
-                  <div className="d-schema">
-                    <SchemaDisplay schema={schemaFor(meta, fields)} />
-                  </div>
-                )}
-              </div>
-              {tab === "preview" && markupOn ? (
-                <MarkupLayer
-                  onClose={() => setMarkupOn(false)}
-                  onSend={(txt) => {
-                    setMarkupOn(false);
-                    onSend(txt);
-                  }}
-                />
-              ) : null}
-            </div>
-          </div>
-        }
-      />
+                  <span style={{ flex: 1 }} />
+                  {tab === "preview" ? (
+                    <div className="d-seg">
+                      <IconButton
+                        label={L("指向修改", "Point to edit")}
+                        size="sm"
+                        variant={markupOn ? "solid" : "outline"}
+                        disabled={building || fieldCount === 0}
+                        onClick={() => setMarkupOn((on) => !on)}
+                      >
+                        <Icon name="pen" size={13} />
+                      </IconButton>
+                      <span className="d-devtoggles">
+                        <span className="d-seg__sep" />
+                        <IconButton
+                          label={L("桌面宽度", "Desktop width")}
+                          size="sm"
+                          variant={device === "full" ? "solid" : "outline"}
+                          onClick={() => setDevice("full")}
+                        >
+                          <Icon name="monitor" size={13} />
+                        </IconButton>
+                        <IconButton
+                          label={L("手机宽度", "Phone width")}
+                          size="sm"
+                          variant={device === "phone" ? "solid" : "outline"}
+                          onClick={() => setDevice("phone")}
+                        >
+                          <Icon name="phone" size={13} />
+                        </IconButton>
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
 
-      {/* 邮箱未验证 banner (§23.6). Soft — it gates NOTHING (§23.1); it only nudges the owner
-          to verify. A fixed strip floating over the DesignerShell frame. Shown when logged
-          in AND the AUTHORITATIVE verified bit from GET /api/auth/me is false. */}
-      {loggedIn && !emailVerified ? (
-        <div className="d-verify-banner" data-testid="verify-banner">
-          <Alert
-            variant="warn"
-            title={L("邮箱未验证", "Email unverified")}
-            icon={<Icon name="mail" size={16} />}
-          >
-            <div className="d-verify-banner__row">
-              <span>
-                {L(
-                  "验证你的邮箱可锁定它归你所有；在此之前所有功能照常可用。",
-                  "Verify your email to lock it to your account; everything works as usual until then.",
-                )}
-              </span>
-              {resendState === "sent" ? (
-                <span className="ax-label d-verify-banner__sent">{L("已重新发送", "Resent")}</span>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={resendState === "sending"}
-                  onClick={resendVerification}
-                >
-                  {resendState === "sending" ? L("发送中…", "Sending…") : L("重新发送", "Resend")}
-                </Button>
-              )}
-            </div>
-          </Alert>
+                <div className="d-pvstage">
+                  <div
+                    className={
+                      "d-pvbody ax-dotgrid" + (tab === "preview" && markupOn ? " is-markup" : "")
+                    }
+                  >
+                    {tab === "preview" ? (
+                      <div className={"d-pvscroll" + (device === "phone" ? " is-phone" : "")}>
+                        <FormPreview
+                          meta={meta}
+                          fields={fields}
+                          values={values}
+                          setValue={setValue}
+                          style={t.formStyle}
+                          building={building}
+                        />
+                      </div>
+                    ) : (
+                      <div className="d-schema">
+                        <SchemaDisplay schema={schemaFor(meta, fields)} />
+                      </div>
+                    )}
+                  </div>
+                  {tab === "preview" && markupOn ? (
+                    <MarkupLayer
+                      onClose={() => setMarkupOn(false)}
+                      onSend={(txt) => {
+                        setMarkupOn(false);
+                        onSend(txt);
+                      }}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            }
+          />
         </div>
-      ) : null}
+      </div>
 
       {/* 设置浮层 (§12/§14/§17) — since DS 0.8.0 it's a floating SettingsSheet over the designer
           (账户 + 集成 tabs), NOT a route page. Opened from the AccountControl (avatar → 账户;
@@ -1407,6 +1427,11 @@ function DesignerApp({
           saveConfig={saveConfig}
           testConnections={testConnections}
           updateProfile={updateProfile}
+          // 邮箱验证状态 (§23.6) — 账户 tab 的 acct-verify 内联卡 + 验证 Badge 用。
+          emailVerified={emailVerified}
+          onResendVerification={resendVerification}
+          resendCooldown={cooldown}
+          resending={resendState === "sending"}
         />
       ) : null}
 

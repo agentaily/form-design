@@ -416,24 +416,107 @@ body {
   margin: 0;
 }
 
-/* ─────────────── 邮箱未验证 banner (§23.6) — floating strip over DesignerShell ─────────────── */
-.d-verify-banner {
-  position: fixed;
-  left: 50%;
-  bottom: 16px;
-  transform: translateX(-50%);
-  z-index: 40;
-  width: min(620px, calc(100% - 32px));
+/* ─────────────── app stack: 顶部「邮箱待验证」内联条 + 主体 (§23.6) ───────────────
+   新设计(定稿 handoff P9-DW3zm):未验证条不再是浮在底部的浮层,而是贴 app 最顶的「内联条」——
+   纵向 flex 栈,.vb(flex:none)在上把主体往下推,DesignerShell 落在 .app-stack__main(flex:1)里。 */
+.app-stack {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
-.d-verify-banner__row {
+.app-stack__main {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 待验证提醒条:低调克制 —— 发丝线 + amber 状态点 + mono 标签,不用大块色底。 */
+.vb {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3, 12px);
-  flex-wrap: wrap;
+  gap: 14px;
+  flex: none;
+  min-height: 46px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--surface-raised);
+  animation: vb-down 280ms var(--ease-out) both;
 }
-.d-verify-banner__sent {
+@keyframes vb-down {
+  from {
+    opacity: 0;
+    transform: translateY(-7px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.vb__tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.vb__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--warn);
+  box-shadow: 0 0 0 0 var(--warn);
+  animation: vb-pulse 2.4s var(--ease-out) infinite;
+}
+@keyframes vb-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--warn) 55%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+.vb__txt {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
   color: var(--text-muted);
+  line-height: var(--leading-snug);
+}
+.vb__email {
+  color: var(--text-body);
+  font-weight: 500;
+}
+.vb__actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .vb,
+  .vb__dot {
+    animation: none;
+  }
+}
+@media (max-width: 720px) {
+  .vb {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    min-height: 0;
+    padding: 10px 14px;
+  }
+  .vb__txt {
+    flex: 1 1 100%;
+    order: 2;
+  }
+  .vb__actions {
+    order: 3;
+    width: 100%;
+  }
 }
 
 /* ─────────────── 找回密码 / 邮箱验证 落地页 (裸页, §23.6 / §24.5) ──────────────── */
@@ -494,6 +577,38 @@ body {
   flex-direction: column;
   gap: 20px;
   max-width: 460px;
+}
+
+/* 账户 tab 的邮箱未验证内联卡 (§23.6 新设计 .acct-verify) — 与顶部 .vb 条同源,仅未验证时显示。 */
+.acct-verify {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  max-width: 460px;
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-3);
+  background: var(--surface-card);
+}
+.acct-verify > svg {
+  flex: none;
+  color: var(--warn);
+}
+.acct-verify__txt {
+  flex: 1;
+  min-width: 0;
+}
+.acct-verify__h {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-body);
+}
+.acct-verify__p {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: var(--leading-snug);
+  margin: 3px 0 0;
 }
 
 /* 集成分区:自组合的就绪栏 + 连接卡容器(替代 DS 0.10.0 移除的 IntegrationSettings 内置 rail)。

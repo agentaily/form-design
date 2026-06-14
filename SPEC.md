@@ -506,7 +506,7 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
 {
   "deepseek": {
     "apiKey": "sk-xxxxxxxxxxxxxxxx",   // 必填，非空
-    "model": "DeepSeek-V4-Flash"        // 可选；缺省/空串表示未指定
+    "model": "deepseek-v4-flash"        // 可选；缺省/空串表示未指定。小写 API id（§13.6，大小写敏感）
   },
   "feishu": {                           // 可选整块；留空表示「暂不配置飞书」（link-less：只 app_id + app_secret）
     "appId": "cli_xxx",
@@ -527,7 +527,7 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
 {
   "deepseek": {
     "apiKey": "sk-…wxyz",   // 掩码串；从未配置时为 null
-    "model": "DeepSeek-V4-Flash" // 明文回显；未指定为 null
+    "model": "deepseek-v4-flash" // 明文回显；未指定为 null。小写 API id（§13.6）
   },
   "feishu": {
     "appId": "cli_xxx",      // 明文回显；未配置为 null
@@ -601,7 +601,9 @@ Worker 内部流程：
 4) fetch https://api.deepseek.com/chat/completions   ← 用 owner 明文 key
      headers: Authorization: Bearer <ownerKey>, content-type: application/json
      body: { model, messages, tools?, stream: true }
-       - model = request.model（白名单内）|| owner.deepseek.model || "DeepSeek-V4-Flash"（§13.6）
+       - model = normalizeDeepSeekModel(request.model（白名单内）|| owner.deepseek.model || DEFAULT_DEEPSEEK_MODEL)（§13.6）
+         · 默认 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"（小写 API id）
+         · normalize 兜住 owner 保存的旧驼峰显示名脏配置（"DeepSeek-V4-Flash" → "deepseek-v4-flash"），避免上游 400
        - messages / tools 透传自请求体
 5) 上游 2xx          → 把上游响应体（SSE）原样透传，Content-Type: text/event-stream
    上游 4xx/5xx       → 包装成可辨识错误响应（见 §13.4），绝不回显 owner key
@@ -657,10 +659,12 @@ Worker 内部流程：
 
 > **新增：** 设计器对话支持「模型(型号)选择器」——owner 为**这一段对话**选用哪个 DeepSeek 型号（V4-Flash 通用·快 vs V4-Pro 更强·深度推理）。选择经 `POST /api/chat` 的**可选 `model` 参数**带入代理，与 §12 集成设置里**保存的凭据/默认模型**正交（选择器是对话级的瞬态选择，不是凭据）。
 >
-> **型号名（manager from-parent-1/2，2026-06）：** DeepSeek 现仅两个型号 —— `DeepSeek-V4-Flash`(通用·快,**默认**) / `DeepSeek-V4-Pro`(更强·深度推理)。旧 `deepseek-chat`/`deepseek-reasoner` 作废。
+> **型号名（2026-06）：** DeepSeek 现仅两个型号 —— V4-Flash(通用·快,**默认**) / V4-Pro(更强·深度推理)。**显示名**是 `DeepSeek-V4-Flash` / `DeepSeek-V4-Pro`（前端 `chatModels.ts` 的 label/pill），但 **API model id 大小写敏感、必须是小写** `deepseek-v4-flash` / `deepseek-v4-pro` —— 发给上游的 wire 值即这个小写 id（OpenAI 兼容端点对驼峰显示名/未知 id 直接 **400**，见 skill `deepseek-api`）。旧 `deepseek-chat`/`deepseek-reasoner` 作废。
+>
+> ⚠️ **PR #71 修复：** 早期把驼峰显示名当 wire `model` 发出去，每次对话 400。已把白名单 / 默认 / 前端 value 全改小写 id，并在代理发上游前 `normalizeDeepSeekModel` 归一化（兜住 D1 里已存的旧驼峰脏配置，老用户不用重存）。
 
-- **请求带可选 `model`：** `ChatRequest` 多一个可选 `model`（§13.2 的 `ChatRequest`）。带上时**必须**∈ 白名单 `DEEPSEEK_MODELS = ["DeepSeek-V4-Flash", "DeepSeek-V4-Pro"]`（`workers/src/chat.ts`），否则 `parseChatRequest` reject → route 映射 `400 { error: "unsupported model" }`，**不**把任意 model 串透传上游。不带 `model` 则省略该字段。
-- **代理 model 取值优先级：** `request.model`（白名单内）`|| owner.deepseek.model`（§12 owner 保存的）`|| DEFAULT_DEEPSEEK_MODEL`（`"DeepSeek-V4-Flash"`）。即：对话级选择器经 per-request `model` 参数带入并**优先**，owner 凭据里的默认模型 / 全局默认仅作兜底（无 per-request model 时生效）。
+- **请求带可选 `model`：** `ChatRequest` 多一个可选 `model`（§13.2 的 `ChatRequest`）。带上时**必须**∈ 白名单 `DEEPSEEK_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"]`（小写 id，`workers/src/chat.ts`），否则 `parseChatRequest` reject → route 映射 `400 { error: "unsupported model" }`，**不**把任意 model 串透传上游。不带 `model` 则省略该字段。
+- **代理 model 取值优先级 + 归一化：** `normalizeDeepSeekModel(request.model（白名单内）|| owner.deepseek.model（§12 owner 保存的）|| DEFAULT_DEEPSEEK_MODEL（`"deepseek-v4-flash"`）)`。即：对话级选择器经 per-request `model` 参数带入并**优先**，owner 凭据里的默认模型 / 全局默认仅作兜底；最终值在发上游前归一化成合法小写 id（大小写不敏感匹配 + 非法回退默认），兜住旧驼峰脏配置。
 - **前端契约：** 可选项 + 默认 + 校验在 `src/core/chatModels.ts`（`CHAT_MODELS` / `DEFAULT_CHAT_MODEL` / `isValidChatModel` / `chatModelPill` / `CHAT_MODEL_STORAGE_KEY`），`value` 与后端 `DEEPSEEK_MODELS` 一一对应。选择只作 UI 偏好持久化（localStorage），**绝不**当凭据存、**绝不**带 key。**UI（最终 spec，from-parent-2）：** 收起 pill 显示当前型号（默认「DeepSeek · V4-Flash」），点开两项下拉（型号名 + 描述 + 当前打勾），放在 composer（沿用既有模型选择器布局/交互，只换型号名+描述）。
 
 ---
@@ -1794,9 +1798,10 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 
 ### 23.6 前端「邮箱未验证」banner（UI）
 
-- owner 登录后，若其账号 `email_verified=0`，前端在显著位置（如顶栏下方）展示一个可关闭的提示条：「邮箱未验证 · 重新发送」，点「重新发送」调 `POST /api/auth/verify-email/request`，发出后给「已重新发送」的中性反馈。
+- owner 登录后，若其账号 `email_verified=0`（权威位来自 `GET /api/auth/me`，跨刷新），前端展示未验证提示条。**位置（PR #71 改版，定稿 handoff `P9-DW3zm`）：** 不再是浮在底部的浮层，而是**贴 app 最顶的内联条**（`.vb`，在 `.app-stack` 里、`.app-stack__main`/DesignerShell 之上，把主体往下推）。内容：左「待验证」脉冲点 + mono 标签；中「验证邮件已发送至 **<email>**，点击邮件中的链接以完成验证。」；右「重新发送」按钮，点它调 `POST /api/auth/verify-email/request`（§23.3 owner-only），成功后进入 **30s 冷却**（按钮禁用、显示「重新发送 · {n}s」，防连点）。
+- **账户设置页**同源未验证内联卡（`.acct-verify`，仅未验证时显示）：「邮箱还未验证」+ 说明 + 同一「重新发送」（与顶部条共用 App 的重发逻辑、冷却同步）。
 - 落地页 `/verify-email?status=ok|invalid`（§23.4 重定向目标）据 `status` 展示「已验证」/「链接已失效，请重新发送」。
-- **UI 一律消费 `@agentaily/design-system`**（banner / 按钮 / 反馈），不手搓组件。banner 不阻断任何操作（§23.1 不门禁）。
+- **UI 一律消费 `@agentaily/design-system`**（按钮等），`.vb` / `.acct-verify` 只是布局，值引用 DS token。banner 不阻断任何操作（§23.1 不门禁）。
 
 ---
 
