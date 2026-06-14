@@ -18,7 +18,14 @@ import {
   parseChatRequest,
   type ChatRequest,
 } from "./chat";
-import { testDeepSeek, testFeishu, type ConnProbe, type ConnTestResult } from "./conntest";
+import {
+  testDeepSeek,
+  testFeishu,
+  type ConnProbe,
+  type ConnTestResult,
+  type ConnTestRequest,
+  type ConnTestSingleResult,
+} from "./conntest";
 import { getFeishuTenantToken } from "./feishu";
 import {
   answersToTypedFields,
@@ -747,32 +754,77 @@ app.post("/api/chat", async (c) => {
   });
 });
 
-// POST /api/config/test — probe whether the SAVED owner config can connect.
-// Reads + decrypts the stored config (credentials are NOT taken from the request
-// body), then probes DeepSeek and Feishu INDEPENDENTLY: an unconfigured block is
-// reported as ok:false "未配置" without touching its upstream, and one probe's
-// failure never blocks the other. HTTP is always 200 — "can't connect" is a
-// normal result, not an HTTP error. The owner key / app_secret never appear in
-// any message, header, or body. See SPEC.md §14.
+// POST /api/config/test — probe whether a connection can connect. §14, revised for
+// per-card 测试连接 (PR #72):
+//   • Legacy (no `service` in body): probe BOTH stored blocks → 200 { deepseek, feishu }.
+//   • `service: "deepseek" | "feishu"`: probe ONLY that block → 200 { <service>: probe },
+//     so the caller flips a single card.
+// Candidate credentials may ride in the body (DeepSeek apiKey / Feishu appId+appSecret)
+// so the owner can verify a key BEFORE saving; an omitted credential falls back to the
+// owner's STORED value (the masked-unchanged fallback — the frontend OMITS, never sends
+// the mask). A block with neither a body nor a stored credential → { ok:false, "未配置" }
+// without touching its upstream, and one probe's failure never blocks the other.
+// HTTP is always 200 — "can't connect" is a normal result, not an HTTP error. The owner
+// key / app_secret (stored OR body-supplied) ride ONLY to their upstream probe and never
+// appear in any message, header, body, or log. See SPEC.md §14 (+ §14.5 security).
 app.post("/api/config/test", async (c) => {
   const ownerId = c.get("session").sub;
   const key = await importConfigKey(c.env.CONFIG_KEY);
   const owner = await getOwnerConfig(c.env.DB, key, ownerId);
 
-  // DeepSeek: unconfigured → "未配置" (no upstream call); otherwise probe.
-  const deepseek: ConnProbe =
-    owner.deepseek === null
-      ? { ok: false, message: "未配置" }
-      : await testDeepSeek(owner.deepseek.apiKey);
+  // Parse the OPTIONAL request body defensively: a missing / non-JSON body is the
+  // legacy "probe both stored" request, NOT a 400.
+  let body: ConnTestRequest = {};
+  try {
+    const raw = await c.req.json();
+    if (raw && typeof raw === "object") body = raw as ConnTestRequest;
+  } catch {
+    body = {};
+  }
 
-  // Feishu: independent of DeepSeek's outcome. Unconfigured → "未配置" (no
-  // upstream call); otherwise probe with the saved app_id + app_secret.
-  const feishu: ConnProbe =
-    owner.feishu === null
-      ? { ok: false, message: "未配置" }
-      : await testFeishu(owner.feishu.appId, owner.feishu.appSecret);
+  // DeepSeek probe: candidate apiKey from body (verify-before-save) → stored key
+  // fallback (masked-unchanged) → "未配置" (no upstream).
+  const probeDeepSeek = (): Promise<ConnProbe> => {
+    const apiKey =
+      typeof body.deepseek?.apiKey === "string" && body.deepseek.apiKey.length > 0
+        ? body.deepseek.apiKey
+        : (owner.deepseek?.apiKey ?? null);
+    return apiKey === null
+      ? Promise.resolve({ ok: false, message: "未配置" })
+      : testDeepSeek(apiKey);
+  };
 
-  const result: ConnTestResult = { deepseek, feishu };
+  // Feishu probe: candidate appId / appSecret from body, each falling back to the
+  // stored value; both must resolve to probe, else "未配置" (no upstream).
+  const probeFeishu = (): Promise<ConnProbe> => {
+    const appId =
+      typeof body.feishu?.appId === "string" && body.feishu.appId.length > 0
+        ? body.feishu.appId
+        : (owner.feishu?.appId ?? null);
+    const appSecret =
+      typeof body.feishu?.appSecret === "string" && body.feishu.appSecret.length > 0
+        ? body.feishu.appSecret
+        : (owner.feishu?.appSecret ?? null);
+    return appId === null || appSecret === null
+      ? Promise.resolve({ ok: false, message: "未配置" })
+      : testFeishu(appId, appSecret);
+  };
+
+  // Single-service (per-card): probe only the named block, return only that block.
+  if (body.service === "deepseek") {
+    const result: ConnTestSingleResult = { deepseek: await probeDeepSeek() };
+    return c.json(result, 200);
+  }
+  if (body.service === "feishu") {
+    const result: ConnTestSingleResult = { feishu: await probeFeishu() };
+    return c.json(result, 200);
+  }
+
+  // Legacy: probe both stored blocks INDEPENDENTLY (one's failure never blocks the other).
+  const result: ConnTestResult = {
+    deepseek: await probeDeepSeek(),
+    feishu: await probeFeishu(),
+  };
   return c.json(result, 200);
 });
 

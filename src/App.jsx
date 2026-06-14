@@ -261,7 +261,7 @@ function DesignerApp({
   // config/profile clients; injectable so tests drive the integration + account tabs.
   getConfig,
   saveConfig,
-  testConnections,
+  testConnection,
   updateProfile = authUpdateProfile,
   // Initial path (from App's route split). When it is /settings the overlay opens on mount
   // (deep-link); otherwise the overlay starts closed.
@@ -1425,7 +1425,7 @@ function DesignerApp({
           onProfileSaved={onProfileSaved}
           getConfig={getConfig}
           saveConfig={saveConfig}
-          testConnections={testConnections}
+          testConnection={testConnection}
           updateProfile={updateProfile}
           // 邮箱验证状态 (§23.6) — 账户 tab 的 acct-verify 内联卡 + 验证 Badge 用。
           emailVerified={emailVerified}

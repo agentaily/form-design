@@ -49,6 +49,42 @@ export interface ConnTestResult {
   feishu: ConnProbe;
 }
 
+/** Which single connection a {@link ConnTestRequest} targets (per-card 测试连接). */
+export type ConnService = "deepseek" | "feishu";
+
+/**
+ * Request body for `POST /api/config/test` (§14.1, revised for per-card testing,
+ * PR #72). All fields optional; the route stays backward compatible — an empty /
+ * absent body ⇒ the legacy "probe BOTH stored blocks" behavior returning
+ * {@link ConnTestResult}.
+ *
+ * - `service` present ⇒ probe ONLY that one connection, returning a
+ *   {@link ConnTestSingleResult} carrying just that block (so the caller updates a
+ *   single card).
+ * - `deepseek.apiKey` / `feishu.appId` / `feishu.appSecret` ⇒ the *candidate*
+ *   credentials to probe WITH, so the owner can verify a key BEFORE saving it. A
+ *   credential left absent falls back to the owner's STORED value (the
+ *   "masked-unchanged" fallback — the frontend must NEVER send the mask
+ *   placeholder, it OMITS the field instead). When neither a body nor a stored
+ *   credential resolves, the block is reported `{ ok:false, message:"未配置" }`
+ *   without touching the upstream.
+ *
+ * ⚠️ Candidate credentials ride ONLY to their upstream probe; they are never
+ * persisted, logged, or echoed into any response / message / header (§14.5).
+ */
+export interface ConnTestRequest {
+  service?: ConnService;
+  deepseek?: { apiKey?: string };
+  feishu?: { appId?: string; appSecret?: string };
+}
+
+/**
+ * Response of a SINGLE-service test (`service` present in {@link ConnTestRequest}):
+ * exactly the probed block is present, so the caller updates only that one card.
+ * The legacy both-blocks path still returns the full {@link ConnTestResult}.
+ */
+export type ConnTestSingleResult = Partial<ConnTestResult>;
+
 /**
  * Probe DeepSeek with the owner's plaintext key.
  *
