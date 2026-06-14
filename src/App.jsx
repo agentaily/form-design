@@ -329,9 +329,9 @@ function DesignerApp({
     }
     return DEFAULT_CHAT_MODEL;
   });
-  // 模型菜单开合 + 锚定坐标 (相对 .cm-wrap),由 composer 芯片点击驱动 (handoff chat13).
+  // 模型菜单开合,由 DS Composer 的模型 pill 点击 (onModelClick) 驱动 (handoff chat13).
+  // 弹层锚定走纯 CSS (.cm-menu 相对 .cm-wrap 左下),不再读 pill 坐标。
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [modelMenuPos, setModelMenuPos] = useState({ left: 0, bottom: 0 });
   // Always-current mirror of the picked model so the §4.1 queue consumer closure (captured on
   // first render) reads the LATEST model when it constructs the chat call, not a stale one.
   const chatModelRef = useRef(chatModel);
@@ -1086,29 +1086,16 @@ function DesignerApp({
           ),
         }}
         chat={
-          // 对话级模型芯片 (§13.6): ConversationThread does NOT forward onModelClick to its inner
-          // Composer (DS seam debt), so we wrap the thread in a div that intercepts clicks on the
-          // composer's internal model pill (.ax-composer__model) and opens an anchored popup of
-          // CHAT_MODELS (handoff chat13 prototype's approach). SessionMenu rides the header
-          // `actions` slot; the model `pill` reflects the current pick.
-          <div
-            className="cm-wrap"
-            onClick={(e) => {
-              const chip = e.target.closest && e.target.closest(".ax-composer__model");
-              if (!chip) return;
-              e.preventDefault();
-              const w = e.currentTarget.getBoundingClientRect();
-              const r = chip.getBoundingClientRect();
-              setModelMenuPos({
-                left: Math.round(r.left - w.left),
-                bottom: Math.round(w.bottom - r.top + 6),
-              });
-              setModelMenuOpen((o) => !o);
-            }}
-          >
+          // 对话级模型芯片 (§13.6): DS 0.11.0 的 ConversationThread 透传 onModelClick 给内部
+          // Composer 的模型 pill,直接拿官方回调开锚定弹层 —— 不再用 wrapper 截内部类
+          // `.ax-composer__model`。.cm-wrap 仍是弹层的定位容器 (position: relative);弹层锚定
+          // 走纯 CSS (.cm-menu 左下,见 app.css)。SessionMenu 骑在 header `actions` 槽;模型
+          // `pill` 反映当前选择。
+          <div className="cm-wrap">
             <ConversationThread
               title="对话"
               model={chatModelPill(chatModel)}
+              onModelClick={() => setModelMenuOpen((o) => !o)}
               actions={
                 <SessionMenu
                   sessions={sessions}
@@ -1132,10 +1119,7 @@ function DesignerApp({
             {modelMenuOpen ? (
               <React.Fragment>
                 <div className="cm-scrim" onClick={() => setModelMenuOpen(false)} />
-                <div
-                  className="cm-menu"
-                  style={{ left: modelMenuPos.left, bottom: modelMenuPos.bottom }}
-                >
+                <div className="cm-menu">
                   <div className="cm-menu__label ax-label">模型 · DeepSeek</div>
                   {CHAT_MODELS.map((m) => (
                     <button
