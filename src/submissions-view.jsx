@@ -421,9 +421,7 @@ export function SubmissionsContent({
               description={`没有包含「${query}」的记录。试试别的关键词。`}
             />
           ) : (
-            <div className="sb-tablewrap">
-              <DataTable columns={columns} rows={filtered} pageSize={8} />
-            </div>
+            <DataTable columns={columns} rows={filtered} pageSize={8} />
           )}
         </div>
       </React.Fragment>
