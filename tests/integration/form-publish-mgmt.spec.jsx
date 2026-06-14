@@ -79,9 +79,11 @@ function rowFor(title) {
   return within(row || titleEl.parentElement);
 }
 
-// Open the card's `⋯` overflow menu so its menu items (关闭收集 / 重新发布 / 删除) mount.
-function openCardMenu(title) {
-  fireEvent.click(rowFor(title).getByRole("button", { name: /更多操作/ }));
+// Click a foot action button on a form's card by its accessible name. Card actions are a
+// FLAT row of direct buttons now (design N-_ayo8x) — there's NO `⋯` overflow menu — so each
+// lifecycle action (关闭收集 / 重新发布 / 删除) is a plain button scoped to that card.
+function clickCardAction(title, name) {
+  fireEvent.click(rowFor(title).getByRole("button", { name }));
 }
 
 // ── 发布 / 分享 (App 级) seam ──────────────────────────────────────────────────
@@ -354,8 +356,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       expect(row.getByText(/已发布/)).toBeInTheDocument();
     });
     When("owner 点击关闭该表单", () => {
-      openCardMenu("活动报名表");
-      fireEvent.click(screen.getByRole("menuitem", { name: /关闭收集/ }));
+      clickCardAction("活动报名表", /关闭收集/);
     });
     And("后端返回该表单状态已变为关闭", async () => {
       await waitFor(() => expect(client.updateForm).toHaveBeenCalled());
@@ -380,8 +381,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       expect(rowFor("已结束的问卷").getByText("已关闭")).toBeInTheDocument();
     });
     When("owner 点击重新开放该表单", () => {
-      openCardMenu("已结束的问卷");
-      fireEvent.click(screen.getByRole("menuitem", { name: /重新发布|重新开放|开放/ }));
+      clickCardAction("已结束的问卷", /重新发布|重新开放|开放/);
     });
     And("后端返回该表单状态已变为已发布", async () => {
       await waitFor(() => expect(client.updateForm).toHaveBeenCalled());
@@ -404,8 +404,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await screen.findByText("活动报名表");
     });
     When("owner 点击删除某份表单", () => {
-      openCardMenu("活动报名表");
-      fireEvent.click(screen.getByRole("menuitem", { name: /删除/ }));
+      clickCardAction("活动报名表", /删除/);
     });
     Then("弹出删除确认提示", async () => {
       await screen.findByText(/确认删除|确定删除|删除.*\?|无法撤销|不可恢复/);
@@ -422,8 +421,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     Given("owner 已对某份表单点击删除并看到确认提示", async () => {
       renderPanel(client);
       await screen.findByText("活动报名表");
-      openCardMenu("活动报名表");
-      fireEvent.click(screen.getByRole("menuitem", { name: /删除/ }));
+      clickCardAction("活动报名表", /删除/);
       await screen.findByText(/确认删除|确定删除|删除.*\?|无法撤销|不可恢复/);
     });
     When("owner 确认删除", () => {
@@ -448,8 +446,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     Given("owner 已对某份表单点击删除并看到确认提示", async () => {
       renderPanel(client);
       await screen.findByText("活动报名表");
-      openCardMenu("活动报名表");
-      fireEvent.click(screen.getByRole("menuitem", { name: /删除/ }));
+      clickCardAction("活动报名表", /删除/);
       await screen.findByText(/确认删除|确定删除|删除.*\?|无法撤销|不可恢复/);
     });
     When("owner 取消删除", () => {
