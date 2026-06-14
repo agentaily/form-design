@@ -25,16 +25,17 @@ export interface MaskedDeepSeek {
   model: string | null;
 }
 
-/** Masked 飞书 block as returned by GET/POST /api/config (SPEC §12.3). */
+/**
+ * Masked 飞书 block as returned by GET/POST /api/config (SPEC §12.3). PR-4 link-less:
+ * the account-level 飞书 credential is exactly `appId` + `appSecret`. `appToken` /
+ * `tableId` are NO LONGER echoed — per-form 飞书 tables come from "发布即自动建表"
+ * (§16.9) and live on the forms row, surfaced via FormSummary.feishuTable, not here.
+ */
 export interface MaskedFeishu {
   /** Plaintext app id; null when unconfigured. */
   appId: string | null;
   /** Masked app secret (e.g. "yy…yy") when configured; null when never set. */
   appSecret: string | null;
-  /** Plaintext bitable app token; null when unconfigured. */
-  appToken: string | null;
-  /** Plaintext table id; null when unconfigured. */
-  tableId: string | null;
 }
 
 /**
@@ -61,7 +62,12 @@ export interface DeepSeekInput {
   model?: string;
 }
 
-/** 飞书 block of a save (SPEC §12.3). All-or-nothing: send the whole block or omit it. */
+/**
+ * 飞书 block of a save (SPEC §12.3). PR-4 link-less: the account-level 飞书 credential
+ * is exactly `appId` + `appSecret` — no 分享链接, no `appToken` / `tableId`. Send the
+ * whole block (both fields, or `appId` + an omitted-secret re-save) or omit it entirely
+ * ("暂不配置飞书"). per-form 飞书 tables are auto-created at publish (§16.9), never typed here.
+ */
 export interface FeishuInput {
   appId?: string;
   /**
@@ -69,15 +75,14 @@ export interface FeishuInput {
    * unchanged on re-save — never send the masked value.
    */
   appSecret?: string;
-  appToken?: string;
-  tableId?: string;
 }
 
 /**
  * Save payload for POST /api/config (SPEC §12.3). The backend enforces: DeepSeek
- * apiKey required (else 400), 飞书 all-or-nothing (else 400). Omitting a secret
- * subfield = "keep stored value" (see mask convention above). `feishu` omitted
- * entirely = "暂不配置飞书".
+ * apiKey required (else 400); when a 飞书 block is sent, `appId` + `appSecret` must
+ * both resolve (a half-filled block — e.g. appId with no stored/new secret — is a 400).
+ * Omitting a secret subfield = "keep stored value" (see mask convention above). `feishu`
+ * omitted entirely = "暂不配置飞书". (PR-4 link-less: the block is only appId + appSecret.)
  */
 export interface ConfigInput {
   deepseek: DeepSeekInput;

@@ -102,6 +102,8 @@ function isFilled(v) {
  * @param {(d: object|null) => void} props.setDetail  进入 / 退出详情子页（父面板据此更新面包屑）
  * @param {() => void} props.onBackToList  返回「我的表单」列表（父面板清 viewing+detail）
  * @param {() => void} [props.onNeedLogin]  401 → 引导登录（§17）
+ * @param {string} [props.feishuUrl]  该表单 per-form 飞书多维表格的打开链接（§16.9）；已建表时显示
+ *   「飞书表格↗」工具栏外链（新标签打开），未建表 → 省略。父面板据 viewing.feishuTable 拼出。
  * @param {(slug: string) => Promise<import("./core/submissionsClient").SubmissionsResult>} [props.listSubmissions]
  */
 export function SubmissionsContent({
@@ -110,6 +112,7 @@ export function SubmissionsContent({
   setDetail,
   onBackToList,
   onNeedLogin,
+  feishuUrl,
   listSubmissions = defaultListSubmissions,
 } = {}) {
   // loading 初始为 true：本组件只在父面板 swap 进提交数据时挂载（.mf-swap 换 key 重挂），挂载即拉取。
@@ -402,6 +405,18 @@ export function SubmissionsContent({
             >
               {exported ? "已导出" : "导出 CSV"}
             </Button>
+            {/* 飞书表格外链（§16.9）：已建表时显示。它是真链接（要支持新标签 / 右键打开），DS Button
+                是 <button onClick> 做不到，故按设计 chat13 退化为复用 ax-btn 样式的真 <a>（非手搓外观）。 */}
+            {feishuUrl ? (
+              <a
+                className="ax-btn ax-btn--secondary ax-btn--sm sb-feishu"
+                href={feishuUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <Icon name="external" size={14} /> 飞书表格
+              </a>
+            ) : null}
           </div>
 
           {form.status === "closed" ? (

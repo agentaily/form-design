@@ -5,9 +5,11 @@
 # 自 DS 0.6.0 起集成设置从弹窗改为独立页；DS 0.8.0 起改为**设计器内浮起浮层**(账户 + 集成双 tab)。
 # DS 0.10.0 移除了 IntegrationSettings 与厂商专用的 FeishuCard,集成分区改为**调用方自组合**:
 # SettingsSheet › PageSection(就绪栏只 gate DeepSeek + 连接卡容器)› DeepSeekCard(已无对话模型选择) +
-# 自组合的飞书卡(ConnectionCard + App ID/App Secret/分享链接 + HelpSteps) + 底部 SettingsSaveBar(显式保存)。
-# 打开浮层会反映 /settings URL 但不卸载设计器;本项目的后端接线与可观察行为契约不变(飞书仍按分享链接
-# 桥接 App Token/数据表)。「owner 打开集成设置」= 打开浮层并切到集成 tab。
+# 自组合的飞书卡(ConnectionCard + App ID/App Secret + HelpSteps) + 底部 SettingsSaveBar(显式保存)。
+# ★ PR-4 link-less:飞书卡**不再有分享链接**——飞书凭据 = **app_id + app_secret 两项**(账户级,"连一次"),
+#   不再桥接 app_token/table_id。per-form 飞书表由「发布即自动建表」(§16.9)在发布时产出并写进 forms 行,
+#   集成设置只配账户级凭据;app_token/table_id **既不再由 owner 填、也不再回显**(MaskedConfig 退场,§12.1)。
+# 打开浮层会反映 /settings URL 但不卸载设计器。「owner 打开集成设置」= 打开浮层并切到集成 tab。
 Feature: 集成设置页 · owner 配置 DeepSeek 与飞书
   作为表单作者(owner)
   我想在集成设置页里连接自己的 DeepSeek key 与飞书多维表格
@@ -18,7 +20,7 @@ Feature: 集成设置页 · owner 配置 DeepSeek 与飞书
     And 后端已保存过 DeepSeek key 与飞书凭据
     When owner 打开集成设置
     Then 设置页用掩码值回显 DeepSeek key 与飞书 app_secret
-    And 非密字段（app_id / app_token / table_id）以明文回显
+    And 非密字段（app_id）以明文回显
 
   Scenario: 从未配置时打开设置显示空表单
     Given owner 已登录
@@ -35,13 +37,6 @@ Feature: 集成设置页 · owner 配置 DeepSeek 与飞书
   Scenario: 缺 DeepSeek key 时保存被后端拒绝并提示
     Given owner 已登录并打开集成设置
     When owner 把 DeepSeek key 留空并保存
-    And 后端返回 400 与错误说明
-    Then 设置页显示后端给出的错误说明
-    And 配置未被保存
-
-  Scenario: 飞书字段半填时保存被后端拒绝并提示
-    Given owner 已登录并打开集成设置
-    When owner 只填了部分飞书字段并保存
     And 后端返回 400 与错误说明
     Then 设置页显示后端给出的错误说明
     And 配置未被保存

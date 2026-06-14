@@ -689,6 +689,12 @@ export interface FormListItem {
   createdAt: string;
   /** 可选：该表单已收集的提交条数（需打飞书才能算，MVP 可省略，§21.2）。 */
   submissionCount?: number;
+  /**
+   * 可选：该表单 per-form 飞书表定位（§16.9「发布即自动建表」产出）——只在 forms 行的
+   * `feishu_app_token` + `feishu_table_id` **都**非 NULL 时带（未建表 → 省略）。非密明文、无凭据
+   * （app_secret 仍在 owner_config）；前端「飞书表格↗」外链据此拼开表 URL（feishuTableUrl）。
+   */
+  feishuTable?: { appToken: string; tableId: string };
 }
 
 /**
@@ -759,17 +765,33 @@ export async function listForms(
   // （列表不带 fields 全量），更不碰 owner_config —— 凭据 / owner_id 永不进列表（§21.2）。
   const { results } = await db
     .prepare(
-      `SELECT slug, meta_json, status, created_at FROM forms WHERE owner_id = ? ORDER BY created_at DESC`,
+      `SELECT slug, meta_json, status, created_at, feishu_app_token, feishu_table_id
+       FROM forms WHERE owner_id = ? ORDER BY created_at DESC`,
     )
     .bind(ownerId)
-    .all<{ slug: string; meta_json: string; status: string; created_at: string }>();
+    .all<{
+      slug: string;
+      meta_json: string;
+      status: string;
+      created_at: string;
+      feishu_app_token: string | null;
+      feishu_table_id: string | null;
+    }>();
 
-  return (results ?? []).map((row) => ({
-    slug: row.slug,
-    meta: JSON.parse(row.meta_json) as FormMeta,
-    status: row.status as FormStatus,
-    createdAt: row.created_at,
-  }));
+  return (results ?? []).map((row) => {
+    // per-form 飞书表定位只在两列都非空时投影（§16.9）——非密明文，无凭据。
+    const ft =
+      row.feishu_app_token && row.feishu_table_id
+        ? { feishuTable: { appToken: row.feishu_app_token, tableId: row.feishu_table_id } }
+        : {};
+    return {
+      slug: row.slug,
+      meta: JSON.parse(row.meta_json) as FormMeta,
+      status: row.status as FormStatus,
+      createdAt: row.created_at,
+      ...ft,
+    };
+  });
 }
 
 /**

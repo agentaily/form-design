@@ -51,18 +51,13 @@ export interface DeepSeekInput {
  * Feishu Bitable connection input. Optional as a whole block.
  *
  * **账户级凭据只需 `appId` + `appSecret`（§16.9）。** `appToken` / `tableId` 不再由 owner 填——
- * 改由「发布即自动建表」per-form 产出并写进 form 行（见 SPEC §16.9 / feishu-schema.ts）。二者保留
- * 为**可选**：提供则存（向后兼容旧前端飞书卡的分享链接回显），缺省 → NULL（不再要求）。PR-4
- * 前端飞书卡 link-less 落地后，这两个字段从输入彻底退场。
+ * 改由「发布即自动建表」per-form 产出并写进 form 行（见 SPEC §16.9 / feishu-schema.ts）。PR-4
+ * 前端飞书卡 link-less 落地后，这两个字段已从输入彻底退场（owner 只填 app_id + app_secret）。
  */
 export interface FeishuInput {
   appId: string;
   /** Secret — encrypted at rest. */
   appSecret: string;
-  /** @deprecated 不再由 owner 填，改由自动建表写进 form 行（§16.9）；提供则存、缺省 → NULL。 */
-  appToken?: string;
-  /** @deprecated 同 {@link appToken}。 */
-  tableId?: string;
 }
 
 /**
@@ -116,8 +111,6 @@ export interface MaskedConfig {
     appId: PlainField;
     /** Masked secret; `null` when never configured. */
     appSecret: MaskedSecret;
-    appToken: PlainField;
-    tableId: PlainField;
   };
   /** ISO-8601 of the last write; `null` when never configured. */
   updatedAt: PlainField;
@@ -169,15 +162,13 @@ export async function saveConfig(
 
   // Feishu is an optional whole block. When present, its secret is encrypted; the
   // rest stays plaintext for read-back echo. When absent, all feishu columns NULL.
+  // app_token / table_id 不再由 owner 填、不再写 owner_config——per-form 表定位改由
+  // 「发布即自动建表」产出并写进 forms 行（§16.9）；这两列在此恒绑 NULL。
   let feishuAppId: string | null = null;
   let feishuSecret: SealedSecret | null = null;
-  let feishuAppToken: string | null = null;
-  let feishuTableId: string | null = null;
   if (input.feishu) {
     // 账户级飞书凭据只需 app_id + app_secret（§16.9，PR-3 解除旧 all-or-nothing）：缺其一仍
-    // 视为半填拒绝（appSecret 无 appId 无法 auth、appId 无 appSecret 换不到 token），但
-    // **app_token / table_id 不再必填**——它们改由「发布即自动建表」per-form 产出并写进 form 行。
-    // 这里二者保留为**可选**：提供则原样存（向后兼容旧前端飞书卡的分享链接回显），缺省 → NULL。
+    // 视为半填拒绝（appSecret 无 appId 无法 auth、appId 无 appSecret 换不到 token）。
     const fe = input.feishu;
     const filled = (v: unknown) => typeof v === "string" && v.trim().length > 0;
     if (!filled(fe.appId) || !filled(fe.appSecret)) {
@@ -185,9 +176,6 @@ export async function saveConfig(
     }
     feishuAppId = normalizePlain(fe.appId);
     feishuSecret = await encryptSecret(fe.appSecret, key);
-    // 可选、向后兼容：normalizePlain 把 undefined / 空串 → null（= 不再用于同步，仅回显）。
-    feishuAppToken = normalizePlain(fe.appToken);
-    feishuTableId = normalizePlain(fe.tableId);
   }
 
   const updatedAt = new Date().toISOString();
@@ -220,8 +208,9 @@ export async function saveConfig(
       feishuAppId,
       feishuSecret?.ciphertext ?? null,
       feishuSecret?.iv ?? null,
-      feishuAppToken,
-      feishuTableId,
+      // app_token / table_id 列保留但恒为 NULL——per-form 表定位走 forms 行（§16.9）。
+      null,
+      null,
       updatedAt,
     )
     .run();
@@ -272,7 +261,7 @@ export async function getMaskedConfig(
     .prepare(
       `SELECT
          deepseek_key_cipher, deepseek_key_iv, deepseek_model,
-         feishu_app_id, feishu_secret_cipher, feishu_secret_iv, feishu_app_token, feishu_table_id,
+         feishu_app_id, feishu_secret_cipher, feishu_secret_iv,
          updated_at
        FROM owner_config WHERE owner_id = ?`,
     )
@@ -283,13 +272,14 @@ export async function getMaskedConfig(
   if (row === null) {
     return {
       deepseek: { apiKey: null, model: null },
-      feishu: { appId: null, appSecret: null, appToken: null, tableId: null },
+      feishu: { appId: null, appSecret: null },
       updatedAt: null,
     };
   }
 
   // Secret fields: decrypt then mask the plaintext (a null cipher means never set
-  // → null, not a mask). The full plaintext never leaves this function.
+  // → null, not a mask). The full plaintext never leaves this function. app_token /
+  // table_id are NOT echoed — per-form 表定位走 forms 行（§16.9），不在 owner config 视图。
   return {
     deepseek: {
       apiKey: await maskStored(row.deepseek_key_cipher, row.deepseek_key_iv, key),
@@ -298,8 +288,6 @@ export async function getMaskedConfig(
     feishu: {
       appId: row.feishu_app_id,
       appSecret: await maskStored(row.feishu_secret_cipher, row.feishu_secret_iv, key),
-      appToken: row.feishu_app_token,
-      tableId: row.feishu_table_id,
     },
     updatedAt: row.updated_at,
   };

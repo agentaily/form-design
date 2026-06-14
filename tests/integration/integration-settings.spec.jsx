@@ -27,15 +27,16 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/integration-settings.feature"));
 
 // A fully-configured masked view as GET /api/config would return it: secret fields
-// (deepseek.apiKey, feishu.appSecret) come back MASKED; the rest plaintext (§12.3). The 飞书
-// card surfaces appToken/tableId via a Bitable share link the page reconstructs.
+// (deepseek.apiKey, feishu.appSecret) come back MASKED; the rest plaintext (§12.3).
+// ★ PR-4 link-less: the 飞书 card is now ONLY App ID + App Secret (account-level "连一次"
+// credentials). app_token/table_id are no longer filled by the owner nor echoed — they're
+// produced per-form by "发布即自动建表" (§16.9), not surfaced here. So a configured 飞书 view
+// carries just { appId, appSecret }; no Bitable share link, no app_token/table_id read-out.
 const MASKED_CONFIGURED = {
   deepseek: { apiKey: "sk-…wxyz", model: "deepseek-chat" },
   feishu: {
     appId: "cli_a1b2c3",
     appSecret: "yy…yy",
-    appToken: "bascnTOKEN",
-    tableId: "tblTABLE",
   },
   updatedAt: "2026-06-11T08:00:00.000Z",
 };
@@ -43,7 +44,7 @@ const MASKED_CONFIGURED = {
 // Never-configured backend → all-null skeleton (the normal "未配置" state, not error).
 const MASKED_EMPTY = {
   deepseek: { apiKey: null, model: null },
-  feishu: { appId: null, appSecret: null, appToken: null, tableId: null },
+  feishu: { appId: null, appSecret: null },
   updatedAt: null,
 };
 
@@ -108,18 +109,16 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
         masked.forEach((el) => expect(el.value).toBe(""));
       });
     });
-    And("非密字段（app_id / app_token / table_id）以明文回显", () => {
-      // app_id echoes in its input; app_token + table_id are surfaced (plaintext) via the 飞书
-      // card's parsed share-link read-out. (DS 0.10.0 dropped the model <Select>, so model has
-      // no UI here — it still round-trips through config, just isn't displayed.)
+    And("非密字段（app_id）以明文回显", () => {
+      // app_id echoes in its input. PR-4 link-less: the 飞书 card has no share-link read-out
+      // anymore, so app_token/table_id are neither filled nor displayed here. (DS 0.10.0 also
+      // dropped the model <Select>, so model has no UI — it still round-trips through config,
+      // just isn't displayed.)
       const inputs = Array.from(document.querySelectorAll("input"));
       const values = inputs.map((el) => el.value);
       expect(values).toContain("cli_a1b2c3"); // app_id input
       // No model <Select> is rendered anymore.
       expect(document.querySelector("select")).toBeNull();
-      // app_token + table_id are read out from the reconstructed link (plaintext).
-      expect(screen.getByText("bascnTOKEN")).toBeInTheDocument();
-      expect(screen.getByText("tblTABLE")).toBeInTheDocument();
     });
   });
 
@@ -154,17 +153,15 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await waitFor(() => expect(saveButton()).toBeInTheDocument());
     });
     When("owner 填入 DeepSeek key 与完整飞书凭据并保存", async () => {
-      // Fill the DeepSeek key, the 飞书 App ID + secret, and a parseable 飞书 share link
-      // so the save carries a valid, complete config.
+      // Fill the DeepSeek key plus the 飞书 App ID + App Secret — the complete account-level
+      // 飞书 credential (PR-4 link-less: there is no share-link input anymore; app_token/
+      // table_id are produced per-form at publish, not entered here).
       fireEvent.change(screen.getByPlaceholderText(/sk-/), { target: { value: "sk-newkey" } });
       fireEvent.change(screen.getByPlaceholderText("cli_xxxxxxxxxxxx"), {
         target: { value: "cli_real" },
       });
       const secretInput = document.querySelector('input[id="secret-app-secret"]');
       fireEvent.change(secretInput, { target: { value: "feishu-secret" } });
-      fireEvent.change(screen.getByPlaceholderText(/feishu\.cn\/base/), {
-        target: { value: "https://team.feishu.cn/base/bascnNEW?table=tblNEW" },
-      });
       fireEvent.click(saveButton());
       await waitFor(() => expect(client.saveConfig).toHaveBeenCalled());
     });
@@ -172,12 +169,12 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       await screen.findByText(/已保存|保存成功/);
     });
     And("设置页用后端返回的掩码视图回显当前配置", async () => {
-      // Re-echo of the returned masked view: secret masks reset to the masked affordance,
-      // plaintext (app_id / app_token / table_id) back.
+      // Re-echo of the returned masked view: both secret masks reset to the masked affordance
+      // (DeepSeek key + 飞书 app_secret), with the plaintext app_id back. PR-4 link-less: there
+      // is no app_token/table_id read-out to re-echo anymore.
       await waitFor(() => {
         expect(screen.getAllByPlaceholderText(/已保存.*留空则保持不变/).length).toBe(2);
       });
-      expect(screen.getByText("bascnTOKEN")).toBeInTheDocument();
     });
   });
 
@@ -213,50 +210,6 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
     And("配置未被保存", () => {
       // Page stays put and no success alert appears — the owner can retry.
-      expect(saveButton()).toBeInTheDocument();
-      expect(screen.queryByText(/已保存|保存成功/)).not.toBeInTheDocument();
-    });
-  });
-
-  Scenario("飞书字段半填时保存被后端拒绝并提示", ({ Given, When, And, Then }) => {
-    const saveErr = new ApiError(400, "飞书凭据需要一次性完整填写");
-    const client = fakeClient({
-      getConfig: vi.fn(async () => MASKED_EMPTY),
-      saveConfig: vi.fn(async () => {
-        throw saveErr;
-      }),
-    });
-    Given("owner 已登录并打开集成设置", async () => {
-      openSettings(client);
-      await waitFor(() => expect(saveButton()).toBeInTheDocument());
-    });
-    When("owner 只填了部分飞书字段并保存", () => {
-      // Fill exactly ONE 飞书 field (APP ID) and leave the secret + link empty — this is
-      // the observable "half-filled 飞书" state. Also fill the DeepSeek key so DeepSeek is
-      // not itself the reason for a 400 (the 飞书 half-fill is what the backend rejects).
-      fireEvent.change(screen.getByPlaceholderText(/sk-/), { target: { value: "sk-ok" } });
-      fireEvent.change(screen.getByPlaceholderText("cli_xxxxxxxxxxxx"), {
-        target: { value: "cli_partial" },
-      });
-      fireEvent.click(saveButton());
-    });
-    And("后端返回 400 与错误说明", async () => {
-      await waitFor(() => expect(client.saveConfig).toHaveBeenCalled());
-      // Make the half-filled state observable on the wire: saveConfig must receive a 飞书
-      // block carrying only appId, with the other 飞书 keys absent (omitted, per the "don't
-      // send empty fields" rule) — that absence is exactly what a real backend rejects 400.
-      const input = client.saveConfig.mock.calls[0][0];
-      expect(input.feishu).toBeTruthy();
-      expect(input.feishu.appId).toBe("cli_partial");
-      expect("appSecret" in input.feishu).toBe(false);
-      expect("appToken" in input.feishu).toBe(false);
-      expect("tableId" in input.feishu).toBe(false);
-    });
-    Then("设置页显示后端给出的错误说明", async () => {
-      const hits = await screen.findAllByText("飞书凭据需要一次性完整填写");
-      expect(hits.length).toBeGreaterThanOrEqual(1);
-    });
-    And("配置未被保存", () => {
       expect(saveButton()).toBeInTheDocument();
       expect(screen.queryByText(/已保存|保存成功/)).not.toBeInTheDocument();
     });

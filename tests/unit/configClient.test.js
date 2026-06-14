@@ -19,13 +19,12 @@ function jsonResponse(body, init = {}) {
 }
 
 // A fully-configured masked view as the backend would return it (secrets masked).
+// 账户级飞书凭据只剩 appId + appSecret——app_token / table_id 已退场（§16.9），不再 echo。
 const MASKED = {
   deepseek: { apiKey: "sk-…wxyz", model: "deepseek-chat" },
   feishu: {
     appId: "cli_abc",
     appSecret: "yy…yy",
-    appToken: "bascn123",
-    tableId: "tbl456",
   },
   updatedAt: "2026-06-11T00:00:00.000Z",
 };
@@ -59,7 +58,7 @@ describe("configClient · getConfig", () => {
   it("returns the all-null skeleton (never-configured) without erroring", async () => {
     const skeleton = {
       deepseek: { apiKey: null, model: null },
-      feishu: { appId: null, appSecret: null, appToken: null, tableId: null },
+      feishu: { appId: null, appSecret: null },
       updatedAt: null,
     };
     const fetchMock = vi.fn(async () => jsonResponse(skeleton));
@@ -87,8 +86,6 @@ describe("configClient · saveConfig", () => {
       feishu: {
         appId: "cli_abc",
         appSecret: "real-secret",
-        appToken: "bascn123",
-        tableId: "tbl456",
       },
     };
     const out = await saveConfig(input);

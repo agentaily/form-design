@@ -33,8 +33,6 @@ interface MaskedConfig {
   feishu: {
     appId: string | null;
     appSecret: string | null;
-    appToken: string | null;
-    tableId: string | null;
   };
   updatedAt: string | null;
 }
@@ -44,8 +42,6 @@ const fullPayload = (apiKey: string = DEEPSEEK_KEY) => ({
   feishu: {
     appId: "cli_fixtureAppId",
     appSecret: FEISHU_SECRET,
-    appToken: "bascnFixtureToken",
-    tableId: "tblFixture",
   },
 });
 
@@ -103,6 +99,10 @@ describe("owner config API (workers/features/owner-config.feature)", () => {
     expect(saved.feishu.appSecret).toContain("…");
     // The POST echo must also be free of plaintext secrets.
     expectNoPlaintextSecrets(postRaw);
+    // And the echo must not carry the退场ed app_token/table_id keys (§16.9): per-form
+    // 表定位走 forms 行，config echo 不再带这两个键（回归保护）。
+    expect(postRaw).not.toContain("appToken");
+    expect(postRaw).not.toContain("tableId");
 
     // Read back via GET and assert the full masked view.
     const getRes = await getConfig();
@@ -110,15 +110,16 @@ describe("owner config API (workers/features/owner-config.feature)", () => {
     const getRaw = await getRes.clone().text();
     const view = (await getRes.json()) as MaskedConfig;
 
-    // And 读回的 DeepSeek model 与飞书 app id、app token、table id 为明文回显
+    // And 读回的 DeepSeek model 与飞书 app id 为明文回显（app_token/table_id 已退场，§16.9）
     expect(view.deepseek.model).toBe("deepseek-chat");
     expect(view.feishu.appId).toBe("cli_fixtureAppId");
-    expect(view.feishu.appToken).toBe("bascnFixtureToken");
-    expect(view.feishu.tableId).toBe("tblFixture");
     // Secret fields are masked, never plaintext.
     expect(view.deepseek.apiKey).toContain("…");
     expect(view.feishu.appSecret).toContain("…");
     expectNoPlaintextSecrets(getRaw);
+    // GET echo 同样不带退场ed app_token/table_id 键（§16.9）。
+    expect(getRaw).not.toContain("appToken");
+    expect(getRaw).not.toContain("tableId");
 
     // And 读回带有更新时间
     expect(view.updatedAt).toBeTypeOf("string");
@@ -170,7 +171,7 @@ describe("owner config API (workers/features/owner-config.feature)", () => {
     // Then 返回结构完整但各字段为空的骨架
     expect(view).toEqual({
       deepseek: { apiKey: null, model: null },
-      feishu: { appId: null, appSecret: null, appToken: null, tableId: null },
+      feishu: { appId: null, appSecret: null },
       updatedAt: null,
     });
   });
@@ -274,9 +275,9 @@ describe("owner config API (workers/features/owner-config.feature)", () => {
     expect(count?.n).toBe(0);
   });
 
-  it("Scenario: 飞书只填 app_id + app_secret 即可保存（不再要求 app_token/table_id，§16.9）", async () => {
-    // PR-3 解除旧 all-or-nothing：app_token / table_id 改由「发布即自动建表」per-form 产出，
-    // 不再由 owner 填。只给 app_id + app_secret 应保存成功。
+  it("Scenario: 飞书只填 app_id + app_secret 即可保存（app_token/table_id 已退场，§16.9）", async () => {
+    // PR-3 解除旧 all-or-nothing、PR-4 link-less 后：app_token / table_id 改由「发布即自动建表」
+    // per-form 产出，不再由 owner 填、不再进 config echo。只给 app_id + app_secret 应保存成功。
     const res = await postConfig({
       deepseek: { apiKey: DEEPSEEK_KEY },
       feishu: { appId: "cli_relaxed", appSecret: FEISHU_SECRET },
@@ -284,11 +285,9 @@ describe("owner config API (workers/features/owner-config.feature)", () => {
     expect(res.status).toBe(200);
 
     const view = (await getConfig().then((r) => r.json())) as MaskedConfig;
-    // app_id 明文回显、app_secret 掩码；app_token / table_id 未填 → NULL。
+    // app_id 明文回显、app_secret 掩码；echo 不再带 app_token / table_id 键（§16.9）。
     expect(view.feishu.appId).toBe("cli_relaxed");
     expect(view.feishu.appSecret).toContain("…");
     expect(view.feishu.appSecret).not.toBe(FEISHU_SECRET);
-    expect(view.feishu.appToken).toBeNull();
-    expect(view.feishu.tableId).toBeNull();
   });
 });

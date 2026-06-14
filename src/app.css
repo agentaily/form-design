@@ -550,17 +550,6 @@ body {
   letter-spacing: 0.04em;
   flex: none;
 }
-/* 飞书卡内:解析出的 App Token / 数据表明文回显行。 */
-.fs-readout {
-  margin: 0;
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  line-height: var(--leading-snug);
-}
-.fs-readout code {
-  font-family: var(--font-mono);
-  color: var(--text-body);
-}
 
 /* ───────────────────────── responsive: phone (preview inner only) ───────────────────────── */
 /* The shell/thread/mobile-switch responsiveness is owned by DesignerShell + ConversationThread;
@@ -824,6 +813,12 @@ body {
   color: var(--text-faint);
   letter-spacing: 0.02em;
   white-space: nowrap;
+}
+/* 飞书表格外链（§16.9）：复用 DS .ax-btn--secondary--sm 的外观（颜色/边框/尺寸全靠那几个类）；
+   这里只做 anchor 必要的布局收口——去掉链接默认下划线，flex-none 不被工具栏拉伸。 */
+.sb-feishu {
+  flex: none;
+  text-decoration: none;
 }
 
 .sb-closed {
