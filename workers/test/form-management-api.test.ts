@@ -41,8 +41,6 @@ async function configureOwner(): Promise<void> {
       feishu: {
         appId: "cli_fixtureAppId9999",
         appSecret: OWNER_FEISHU_APP_SECRET,
-        appToken: "bascnFixtureAppTokenXYZ",
-        tableId: "tblFixture123",
       },
     }),
   });

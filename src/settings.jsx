@@ -26,11 +26,10 @@
 //   集成 cards → DeepSeek: apiKey (SecretField). The 对话模型 selection was dropped from the card
 //           in DS 0.10.0; `model` still round-trips through config (echoed in, sent back) so a
 //           re-save never wipes the stored model, but it has no UI here (the conversation-level
-//           model chip, if any, is a separate concern). 飞书: appId / secret / link (a Bitable
-//           share URL parsed to App Token + table by this module's own parseFeishuLink). The
-//           backend stores appToken + tableId separately, so this module BRIDGES: it reconstructs
-//           a share link from the stored appToken/tableId on load, and parses the edited link back
-//           on save. Secret fields show a MASKED affordance via `masked`; a secret left blank is
+//           model chip, if any, is a separate concern). 飞书 (link-less, symmetric to DeepSeek):
+//           只配 App ID + App Secret 两个账户级凭证 —— 分享链接 / App Token / 数据表 已从卡片退场
+//           (§16.9). 发布表单时由后端「自动建表」per-form 产出多维表格并写进 forms 行，owner 不再
+//           手动粘贴链接。Secret fields show a MASKED affordance via `masked`; a secret left blank is
 //           OMITTED from the ConfigInput so saveConfig keeps the stored secret (§12.4 "don't
 //           re-submit the mask").
 //
@@ -75,29 +74,6 @@ import { ApiError } from "./core/apiClient";
 // 显示名长度上限，与后端 MAX_DISPLAY_NAME_LENGTH 对齐（§17 个人资料）。超出由账户表单的
 // maxLength 规则在提交前拦下（后端 400 仅作纵深防御兜底）。
 const MAX_DISPLAY_NAME_LENGTH = 64;
-
-// Parse a 飞书 Bitable share URL into { token, table } — the App Token (from `/base/<token>`
-// or `?app_token=`) and the optional data-table id (`?table=`). Inlined here because DS 0.10.0
-// removed the FeishuCard component AND its exported `parseFeishuLink` helper (vendor-specific);
-// the link → appToken/tableId bridging is product logic now, so this module owns it. Mirrors
-// the helper's prior behavior verbatim so the saved appToken/tableId round-trip is unchanged.
-function parseFeishuLink(url) {
-  if (!url) return null;
-  const tokenM = url.match(/\/base\/([A-Za-z0-9]+)/) || url.match(/[?&]app_token=([A-Za-z0-9]+)/);
-  const tableM = url.match(/[?&]table=([A-Za-z0-9]+)/);
-  if (!tokenM) return null;
-  return { token: tokenM[1], table: tableM ? tableM[1] : "" };
-}
-
-// Reconstruct a Bitable share link `parseFeishuLink` can parse back into {token, table},
-// from the stored appToken + tableId (the backend keeps them as separate plaintext
-// fields, but the card's single editable is the share URL). Empty when no appToken.
-function linkFromStored(feishu) {
-  const token = feishu?.appToken;
-  if (!token) return "";
-  const table = feishu?.tableId;
-  return `https://feishu.cn/base/${token}` + (table ? `?table=${table}` : "");
-}
 
 // Empty per-card connection status (caller-controlled; the cards render off these).
 const IDLE = { status: "idle", result: undefined };
@@ -169,16 +145,17 @@ function AccountSection({ user, form, onLogout }) {
 }
 
 /**
- * FeishuConnectionCard — 应用层自组合的「飞书多维表格」连接卡 (SPEC §12 + §14). DS 0.10.0 删除了
- * 厂商专用的 FeishuCard,这里改用通用 <ConnectionCard> + <Input>/<SecretField>/<HelpSteps> 组合出
- * 一张与 DeepSeek 卡对称的卡:App ID + App Secret + 多维表格分享链接(就地解析出 App Token/数据表
- * 并明文回显)。纯展示 —— 配置状态 / 连接探测 / 持久化由 SettingsOverlay 拥有,props 进、事件出。
+ * FeishuConnectionCard — 应用层自组合的「飞书多维表格」连接卡 (SPEC §12 + §14 + §16.9). DS 0.10.0
+ * 删除了厂商专用的 FeishuCard,这里改用通用 <ConnectionCard> + <Input>/<SecretField>/<HelpSteps>
+ * 组合出一张与 DeepSeek 卡对称的卡:只配 App ID + App Secret 两个账户级凭证(link-less —— 分享链接 /
+ * App Token / 数据表 已退场,发布表单时由后端自动建表 per-form,§16.9)。纯展示 —— 配置状态 / 连接
+ * 探测 / 持久化由 SettingsOverlay 拥有,props 进、事件出。
  *
  * @param {object} props
- * @param {string} [props.appId] / [props.secret] / [props.link]                      受控字段值
- * @param {(v:string)=>void} props.onAppIdChange/onSecretChange/onLinkChange          编辑回调(值)
+ * @param {string} [props.appId] / [props.secret]                  受控字段值
+ * @param {(v:string)=>void} props.onAppIdChange/onSecretChange    编辑回调(值)
  * @param {boolean} [props.masked]    已存 app_secret → 显示掩码占位 + 「留空保持不变」
- * @param {string} [props.appIdError] / [secretError] / [linkError]                   字段级后端错误
+ * @param {string} [props.appIdError] / [secretError]              字段级后端错误
  * @param {"idle"|"testing"|"ok"|"error"} [props.status]   调用方控制的连接状态(驱动 StatusPill/TestRow)
  * @param {string} [props.result]     TestRow 结果行
  * @param {() => void} [props.onTest]  点「测试连接」
@@ -189,19 +166,14 @@ function FeishuConnectionCard({
   onAppIdChange,
   secret = "",
   onSecretChange,
-  link = "",
-  onLinkChange,
   masked = false,
   appIdError,
   secretError,
-  linkError,
   status = "idle",
   result,
   onTest,
   canTest,
 }) {
-  // 解析当前链接 → App Token + 数据表;就地明文回显,让 owner 确认识别正确(非密字段)。
-  const parsed = parseFeishuLink(link);
   // 已存 secret 且未编辑 → 掩码占位(与 DeepSeekCard 的掩码文案一致,§12.4 留空保持不变)。
   const secretMaskedNow = masked && !(secret || "").trim();
   // Test 探测的是后端已存配置 (§14),配置加载后即可用;canTest 显式控制,否则按本地字段派生。
@@ -211,7 +183,7 @@ function FeishuConnectionCard({
     <ConnectionCard
       icon="table"
       title="飞书多维表格"
-      desc="连接你的飞书自建应用并指定一张多维表格 —— 发布的表单每次提交都会写入一行(可选)。"
+      desc="连接你的飞书自建应用。连上后，发布表单时会自动为它创建一张多维表格，每次提交写入一行——不用你先去飞书建表。"
       status={status}
       result={result}
       onTest={onTest}
@@ -240,26 +212,6 @@ function FeishuConnectionCard({
         }
         error={secretError}
       />
-      <Input
-        label="多维表格分享链接"
-        hint="粘贴目标多维表格的分享链接，自动识别 App Token 与数据表。"
-        error={linkError}
-        mono
-        value={link}
-        placeholder="https://your-team.feishu.cn/base/bascn…?table=tbl…"
-        spellCheck={false}
-        onChange={(e) => onLinkChange && onLinkChange(e.target.value)}
-      />
-      {parsed?.token ? (
-        <p className="fs-readout">
-          已识别：App Token <code>{parsed.token}</code>
-          {parsed.table ? (
-            <React.Fragment>
-              {" · "}数据表 <code>{parsed.table}</code>
-            </React.Fragment>
-          ) : null}
-        </p>
-      ) : null}
       <HelpSteps
         title="如何获取飞书应用凭证？"
         steps={[
@@ -273,7 +225,7 @@ function FeishuConnectionCard({
             到「权限管理」开通多维表格读写权限 <code>bitable:app</code>，并发布版本。
           </React.Fragment>,
           <React.Fragment>
-            新建或打开一张多维表格，复制它的<strong>分享链接</strong>粘贴到上方。
+            连接后由 Agentaily <strong>自动建表</strong>，无需你手动创建多维表格。
           </React.Fragment>,
         ]}
         link={{ href: "https://open.feishu.cn", label: "打开飞书开放平台" }}
@@ -324,7 +276,6 @@ export function SettingsOverlay({
   const [model, setModel] = useState("deepseek-chat");
   const [appId, setAppId] = useState("");
   const [secret, setSecret] = useState("");
-  const [link, setLink] = useState("");
   // loading reflects the integration fetch; only meaningful once the 集成 tab is shown.
   const [loading, setLoading] = useState(section === "integrations");
   const [saving, setSaving] = useState(false);
@@ -355,12 +306,11 @@ export function SettingsOverlay({
   );
 
   // Echo a masked view into the card fields: non-secret plaintext fills in, secret editables
-  // reset to empty (so the masked affordance shows), 飞书 link reconstructed.
+  // reset to empty (so the masked affordance shows).
   const echo = useCallback((cfg) => {
     setConfig(cfg);
     setModel(cfg?.deepseek?.model || "deepseek-chat");
     setAppId(cfg?.feishu?.appId ?? "");
-    setLink(linkFromStored(cfg?.feishu));
     setApiKey("");
     setSecret("");
   }, []);
@@ -405,8 +355,8 @@ export function SettingsOverlay({
 
   // Build the ConfigInput, honoring the "don't re-submit the mask" rule (§12.4): a secret left
   // empty is OMITTED so the backend keeps the stored value; a typed secret is sent verbatim.
-  // 飞书 link is parsed back into appToken/tableId; 飞书 is all-or-nothing, so the whole block is
-  // omitted only when no 飞书 field is set at all.
+  // 飞书 is link-less now (§16.9): only app_id + app_secret are sent; the whole block is omitted
+  // when neither is set.
   const buildInput = () => {
     const deepseek = {};
     if (apiKey.trim()) deepseek.apiKey = apiKey;
@@ -415,9 +365,6 @@ export function SettingsOverlay({
     const feishu = {};
     if (appId.trim()) feishu.appId = appId;
     if (secret.trim()) feishu.appSecret = secret;
-    const parsed = parseFeishuLink(link);
-    if (parsed?.token) feishu.appToken = parsed.token;
-    if (parsed?.table) feishu.tableId = parsed.table;
     const hasFeishu = Object.keys(feishu).length > 0;
 
     return hasFeishu ? { deepseek, feishu } : { deepseek };
@@ -605,17 +552,9 @@ export function SettingsOverlay({
                 setSecret(v);
                 setFsConn(IDLE);
               }}
-              link={link}
-              onLinkChange={(v) => {
-                touch();
-                clearFieldError("linkError");
-                setLink(v);
-                setFsConn(IDLE);
-              }}
               masked={hasStoredSecret}
               appIdError={fieldErrors.appIdError}
               secretError={fieldErrors.secretError}
-              linkError={fieldErrors.linkError}
               status={fsConn.status}
               result={fsConn.result}
               onTest={runTest}

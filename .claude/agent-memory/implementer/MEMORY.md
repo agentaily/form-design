@@ -1,2 +1,3 @@
 - [jsdom 无 localStorage](project_jsdom-no-localstorage.md) — form-design 的 vitest/jsdom 不给 localStorage 全局；碰存储的单测要自己 stub fake
 - [ALTER ADD COLUMN 破坏 applySchema](workers-alter-add-column-applyschema.md) — workers/ 里非幂等 ALTER ADD COLUMN 迁移会让多 describe 块文件的 applySchema 第二次 apply 崩；helpers 吞 duplicate-column
+- [worktree 吃主 checkout 过期依赖](project_worktree-stale-main-node-modules.md) — worktree 没自有 node_modules 时向上解析到主仓旧 DS，build/集成假红；worktree 里 npm ci 修

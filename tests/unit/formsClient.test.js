@@ -23,6 +23,7 @@ import {
   updateForm,
   deleteForm,
   publicFormUrl,
+  feishuTableUrl,
   PUBLIC_FORM_PATH,
 } from "../../src/core/formsClient";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
@@ -189,6 +190,26 @@ describe("formsClient · listForms", () => {
     await expect(listForms()).resolves.toEqual([]);
   });
 
+  it("passes a summary's feishuTable locator straight through (§16.9 per-form 表)", async () => {
+    const withTable = {
+      ...SUMMARY,
+      feishuTable: { appToken: "bascnTOKEN123", tableId: "tblABC" },
+    };
+    const fetchMock = vi.fn(async () => jsonResponse({ forms: [withTable], count: 1 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await listForms();
+    expect(out[0].feishuTable).toEqual({ appToken: "bascnTOKEN123", tableId: "tblABC" });
+  });
+
+  it("leaves feishuTable undefined for a form that has no per-form 飞书表", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ forms: [SUMMARY], count: 1 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await listForms();
+    expect(out[0].feishuTable).toBeUndefined();
+  });
+
   it("rejects with a 401 ApiError (session expired → route into login, §17)", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -308,6 +329,21 @@ describe("formsClient · publicFormUrl (pure, no I/O)", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     publicFormUrl("f8Kq2pXa");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("formsClient · feishuTableUrl (pure, no I/O)", () => {
+  it("builds the bitable open URL from appToken + tableId (§16.9)", () => {
+    expect(feishuTableUrl("bascnTOKEN123", "tblABC")).toBe(
+      "https://feishu.cn/base/bascnTOKEN123?table=tblABC",
+    );
+  });
+
+  it("makes no network call (pure) — fetch is never touched", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    feishuTableUrl("t", "tbl");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

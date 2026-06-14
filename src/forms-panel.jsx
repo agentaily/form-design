@@ -53,6 +53,7 @@ import {
   updateForm as defaultUpdateForm,
   deleteForm as defaultDeleteForm,
   publicFormUrl as defaultPublicFormUrl,
+  feishuTableUrl,
 } from "./core/formsClient";
 import { listSubmissions as defaultListSubmissions } from "./core/submissionsClient";
 import { ApiError } from "./core/apiClient";
@@ -377,6 +378,13 @@ export function FormsPanel({
               setDetail(null);
               onNeedLogin?.();
             }}
+            // per-form 飞书表已建（viewing.feishuTable 两列都有）→ 拼出打开链接，工具栏显示
+            // 「飞书表格↗」外链（§16.9）；未建表 → undefined（不显示）。
+            feishuUrl={
+              viewing?.feishuTable
+                ? feishuTableUrl(viewing.feishuTable.appToken, viewing.feishuTable.tableId)
+                : undefined
+            }
             listSubmissions={listSubmissions}
           />
         ) : (

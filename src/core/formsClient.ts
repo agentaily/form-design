@@ -147,6 +147,16 @@ export interface FormSummary {
   createdAt: string;
   /** Collected-submission count when the backend chose to compute it; omitted otherwise. */
   submissionCount?: number;
+  /**
+   * per-form 飞书 bitable locator produced by "发布即自动建表" (§16.9): present only
+   * when the forms row's `feishu_app_token` + `feishu_table_id` are BOTH non-null, in
+   * which case GET /api/forms projects them here; not yet built → OMITTED. The 提交数据
+   * toolbar uses this to show the "飞书表格↗" external link — it builds the open URL
+   * via the pure {@link feishuTableUrl}(appToken, tableId) (same style as
+   * {@link publicFormUrl}). Never sourced from a submission response (§18.6 never carries
+   * app_token/table_id).
+   */
+  feishuTable?: { appToken: string; tableId: string };
 }
 
 /** Partial update for PATCH /api/forms/:slug (SPEC §21.3, all keys optional). The
@@ -188,6 +198,18 @@ export function publicFormUrl(slug: string, base?: string): string {
   if (!base) return path;
   // Strip any trailing slash on the base so we never double the leading slash of path.
   return base.replace(/\/+$/, "") + path;
+}
+
+/**
+ * Build the open URL for a form's per-form 飞书 bitable (SPEC §16.9). Pure/no I/O.
+ * Given the {@link FormSummary.feishuTable} locator (appToken + tableId), returns the
+ * bitable URL `https://feishu.cn/base/<appToken>?table=<tableId>` — opened in a new tab
+ * by the 提交数据 toolbar's "飞书表格↗" link. Same style as {@link publicFormUrl}.
+ *
+ * Contract-only stub — implementer owns the body (+ its unit test), inner loop.
+ */
+export function feishuTableUrl(appToken: string, tableId: string): string {
+  return `https://feishu.cn/base/${appToken}?table=${tableId}`;
 }
 
 /**

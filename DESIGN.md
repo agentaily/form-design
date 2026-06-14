@@ -20,7 +20,7 @@
 ## 消费的设计系统
 
 - **`@agentaily/design-system` ^0.9.0**:**UI 一律消费,不手搓**;升级随上游流过来(DS 0.2 → 0.9 全面上移见 ROADMAP;0.9.0 补 `monitor` 图标,桌面切换按钮换回 `<Icon name="monitor">`)。
-- 关键组件:`DesignerShell`(双栏外壳 + 移动端切换;`brand` 槽放 `BrandMark`)· `ConversationThread`(对话线程,纯渲染 + `controller`)· `AccountControl`(账户下拉,`onProfile` 开账户 tab)· `SignInPage`(登录)· `SettingsSheet`(0.8.0 起设置 = 浮起浮层,`nav` 双 tab 账户 + 集成)› 账户 tab:`PageSection` + `Avatar` + `Field`/`Input` + `SettingsSaveBar`(`form` 模式);集成 tab:`IntegrationSettings` › `DeepSeekCard` / `FeishuCard` + `SettingsSaveBar`(显式保存)· `MarkupLayer`(指向修改)· `Form.useForm`(表单校验)· `Icon` / `BrandMark`。
+- 关键组件:`DesignerShell`(双栏外壳 + 移动端切换;`brand` 槽放 `BrandMark`)· `ConversationThread`(对话线程,纯渲染 + `controller`)· `AccountControl`(账户下拉,`onProfile` 开账户 tab)· `SignInPage`(登录)· `SettingsSheet`(0.8.0 起设置 = 浮起浮层,`nav` 双 tab 账户 + 集成)› 账户 tab:`PageSection` + `Avatar` + `Field`/`Input` + `SettingsSaveBar`(`form` 模式);集成 tab(DS 0.10.0 起**调用方自组合**,IntegrationSettings/FeishuCard 已移除):`PageSection`(就绪栏只 gate DeepSeek + 连接卡容器)+ `DeepSeekCard`(已无对话模型选择)+ **自组合飞书卡**(`ConnectionCard` + App ID/App Secret + `HelpSteps`,**link-less** —— 无分享链接,凭据只 app_id + app_secret)+ `SettingsSaveBar`(显式保存)· `MarkupLayer`(指向修改)· `Form.useForm`(表单校验)· `Icon` / `BrandMark`。**per-form「飞书表格↗」入口**落在「提交数据」工具栏(挨着导出 CSV),仅在该表单已自动建表时显示(§16.9)。
 - 缺组件 / 缺 seam → 往上游反馈(下游定契约、上游照做;**叫人**)。
 
 ## 页面 / 界面清单(+ 设计状态)

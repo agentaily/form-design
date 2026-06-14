@@ -1,12 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import {
   parsePublishInput,
   parseUpdateInput,
   generateSlug,
+  listForms,
   MAX_FIELD_DEPTH,
   FormValidationError,
   type PublishFormInput,
 } from "../src/forms";
+import { applySchema, resetForms, testEnv } from "./helpers";
 
 // Inner-loop unit specs for the pure seams behind 表单发布 + 公开拉取:
 //   - parsePublishInput: shape validation (meta.title 非空 + fields 是数组 + 每个
@@ -219,5 +221,62 @@ describe("parseUpdateInput (workers/features/form-management.feature, §21.3)", 
     expect(() => parseUpdateInput({ fields: [{ type: "text", label: "无 id" }] })).toThrow(
       FormValidationError,
     );
+  });
+});
+
+// listForms projects the per-form 飞书表 locator only when BOTH columns are non-null
+// (§16.9). D1-backed inner-loop unit: insert forms rows directly + assert the shape.
+describe("listForms feishuTable projection (§16.9)", () => {
+  const OWNER = "owner-feishu-projection";
+
+  beforeAll(async () => {
+    await applySchema();
+  });
+
+  beforeEach(async () => {
+    await resetForms();
+  });
+
+  /** Insert one forms row directly, optionally with the per-form 飞书表 columns set. */
+  async function insertForm(
+    slug: string,
+    feishu: { appToken: string; tableId: string } | null,
+  ): Promise<void> {
+    await testEnv.DB.prepare(
+      `INSERT INTO forms (slug, owner_id, meta_json, schema_json, status, created_at,
+         feishu_app_token, feishu_table_id)
+       VALUES (?, ?, ?, ?, 'published', ?, ?, ?)`,
+    )
+      .bind(
+        slug,
+        OWNER,
+        JSON.stringify({ title: `表单 ${slug}` }),
+        JSON.stringify([]),
+        new Date().toISOString(),
+        feishu?.appToken ?? null,
+        feishu?.tableId ?? null,
+      )
+      .run();
+  }
+
+  it("carries feishuTable when both feishu columns are non-null", async () => {
+    await insertForm("slug-with-table", { appToken: "bascnTOKEN123", tableId: "tblABC" });
+
+    const forms = await listForms(testEnv.DB, OWNER);
+    expect(forms).toHaveLength(1);
+    expect(forms[0].slug).toBe("slug-with-table");
+    expect(forms[0].feishuTable).toEqual({ appToken: "bascnTOKEN123", tableId: "tblABC" });
+  });
+
+  it("omits feishuTable when the form has no per-form 飞书表 (both columns NULL)", async () => {
+    await insertForm("slug-no-table", null);
+
+    const forms = await listForms(testEnv.DB, OWNER);
+    expect(forms).toHaveLength(1);
+    expect(forms[0].slug).toBe("slug-no-table");
+    expect(forms[0].feishuTable).toBeUndefined();
+    // The key must be entirely absent (not present-with-undefined) so the wire JSON
+    // never carries an empty feishuTable for an un-built form.
+    expect(Object.keys(forms[0])).not.toContain("feishuTable");
   });
 });

@@ -18,6 +18,7 @@ import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 // so cleanup is per-scenario (AfterEachScenario), never per-step.
 import { render, screen, within, waitFor, fireEvent, cleanup } from "@testing-library/react/pure";
 import { FormsPanel } from "../../src/forms-panel.jsx";
+import { feishuTableUrl } from "../../src/core/formsClient";
 import { ApiError } from "../../src/core/apiClient";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +32,13 @@ const FORM = {
   status: "published",
   createdAt: "2026-06-01T00:00:00.000Z",
 };
+
+// ★ PR-4 per-form「飞书表格↗」: a form whose summary carries a feishuTable locator —
+// "发布即自动建表" (§16.9) produced its per-form 飞书 bitable, so GET /api/forms projects
+// { appToken, tableId } here. The 提交数据 toolbar uses it to show the 飞书表格 external link.
+// A form WITHOUT feishuTable (the plain FORM above) shows no such link.
+const FEISHU_TABLE = { appToken: "bascnXYZ", tableId: "tblABC" };
+const FORM_WITH_TABLE = { ...FORM, feishuTable: FEISHU_TABLE };
 
 // A §18.2 submissions payload, D1 主存投影：answers carry string + string[] values.
 const RESULT = {
@@ -54,15 +62,16 @@ const RESULT = {
   count: 2,
 };
 
-// Render the real panel (open) with injected owner-only seams. listForms returns FORM so
-// its card — and the「查看全部提交」entry — is present.
-function renderPanel({ listSubmissions, onNeedLogin } = {}) {
+// Render the real panel (open) with injected owner-only seams. listForms returns the given
+// form (default FORM) so its card — and the「查看全部提交」entry — is present. Pass `form`
+// to vary the summary (e.g. FORM_WITH_TABLE to drive the per-form 飞书表格 toolbar link).
+function renderPanel({ listSubmissions, onNeedLogin, form = FORM } = {}) {
   return render(
     <FormsPanel
       open
       onClose={vi.fn()}
       onNeedLogin={onNeedLogin ?? vi.fn()}
-      listForms={vi.fn(async () => [FORM])}
+      listForms={vi.fn(async () => [form])}
       updateForm={vi.fn(async (slug, patch) => ({ slug, status: patch.status }))}
       deleteForm={vi.fn(async (slug) => ({ ok: true, slug }))}
       publicFormUrl={(slug) => `https://forms.example/f/${slug}`}
@@ -108,6 +117,60 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       // The 累计提交 stat shows the count (2) — scoped so the seq/近7天「2」don't collide.
       const totalStat = screen.getByText("累计提交").closest(".sb-stat");
       expect(within(totalStat).getByText("2")).toBeInTheDocument();
+    });
+  });
+
+  // ── per-form「飞书表格↗」入口（§16.9）：工具栏挨着「导出 CSV」───────────────────────────
+  // 该入口的飞书表定位来自表单摘要（FormSummary.feishuTable），二者都非空才显示；未建表则不显示。
+  // ★ 工具栏（含「导出 CSV」+「飞书表格」）只在有提交时渲染（submissions.length>0；0 条是空态、无工具栏）。
+  //   所以「已建表」场景注入 ≥1 条提交，工具栏才出现，外链才有归属。
+  Scenario("已自动建表的表单在提交数据工具栏显示「飞书表格」外链", ({ Given, And, When, Then }) => {
+    const list = vi.fn(async () => RESULT);
+    Given("owner 已登录并打开「我的表单」", () => {});
+    And("其中一份表单已「发布即自动建表」产出对应的飞书多维表格", () => {
+      // 该表单摘要带 feishuTable（app_token + table_id 都非空），即 §16.9 已建表的状态。
+      expect(FORM_WITH_TABLE.feishuTable).toEqual(FEISHU_TABLE);
+    });
+    When("owner 打开该表单的提交数据", async () => {
+      await openSubmissions({ listSubmissions: list, form: FORM_WITH_TABLE });
+      // 工具栏只在有提交时渲染——等表格（有数据）就位，确认走到了有工具栏的分支。
+      await screen.findByText(/张三/);
+    });
+    Then("提交数据工具栏在「导出 CSV」旁显示「飞书表格」外链", () => {
+      // 「飞书表格」是真链接（<a>，link role），与「导出 CSV」按钮同在工具栏（.sb-toolbar），挨着它。
+      const feishuLink = screen.getByRole("link", { name: /飞书表格/ });
+      const toolbar = feishuLink.closest(".sb-toolbar");
+      expect(toolbar).not.toBeNull();
+      // 「导出 CSV」按钮也在同一工具栏——二者并排（外链挨着导出）。
+      expect(within(toolbar).getByRole("button", { name: /导出 CSV/ })).toBeInTheDocument();
+    });
+    And("该外链在新标签打开这张表单对应的飞书多维表格", () => {
+      const feishuLink = screen.getByRole("link", { name: /飞书表格/ });
+      // target="_blank" → 新标签打开。
+      expect(feishuLink.getAttribute("target")).toBe("_blank");
+      // href = 这张表单的飞书表 URL——与纯函数 feishuTableUrl 一致（直接对比，避免硬编码漂移）。
+      expect(feishuLink.getAttribute("href")).toBe(
+        feishuTableUrl(FEISHU_TABLE.appToken, FEISHU_TABLE.tableId),
+      );
+    });
+  });
+
+  Scenario("未建表的表单不显示「飞书表格」外链", ({ Given, And, When, Then }) => {
+    const list = vi.fn(async () => RESULT);
+    Given("owner 已登录并打开「我的表单」", () => {});
+    And("其中一份表单尚未产出对应的飞书多维表格", () => {
+      // 默认 FORM 无 feishuTable → 摘要无 §16.9 定位 → 工具栏不显示飞书表格入口。
+      expect(FORM.feishuTable).toBeUndefined();
+    });
+    When("owner 打开该表单的提交数据", async () => {
+      // 有提交（工具栏会渲染，含导出 CSV），但表单未建表 → feishuUrl undefined → 无飞书表格外链。
+      await openSubmissions({ listSubmissions: list, form: FORM });
+      await screen.findByText(/张三/); // 工具栏已就位
+    });
+    Then("提交数据工具栏不显示「飞书表格」外链", () => {
+      // 工具栏在（「导出 CSV」按钮存在），但飞书表格 <a>（link role）不渲染。
+      expect(screen.getByRole("button", { name: /导出 CSV/ })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: /飞书表格/ })).toBeNull();
     });
   });
 

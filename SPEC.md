@@ -479,12 +479,14 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
 | DeepSeek | `model`（可选，默认留空） | 非密 | 明文 |
 | 飞书多维表格 | `appId`（账户级，必填） | 非密 | 明文 |
 | 飞书多维表格 | `appSecret`（账户级，必填） | **密钥** | AES-GCM 密文 + iv |
-| 飞书多维表格 | ~~`appToken`~~（多维表格 app token，**owner 已不再填**） | 非密 | 明文（仅向后兼容回显） |
-| 飞书多维表格 | ~~`tableId`~~（**owner 已不再填**） | 非密 | 明文（仅向后兼容回显） |
+
+> **账户级飞书凭据 = `appId` + `appSecret` 两项（PR-4 link-less）：** `appToken` / `tableId` 在 PR-4 **彻底退场**——既不再由 owner 填、**也不再进 MaskedConfig 回显**。这两列保留在 DB `owner_config` 仅为向后兼容（恒为 `NULL`，不再写），per-form 飞书表改由「发布即自动建表」（§16.9）按表单产出并写进 `forms` 行（见 §21.2）。
 
 > **为什么 DeepSeek key 必填、飞书整块可选：** 没有 DeepSeek key 连设计器都跑不起来；飞书是「答题落库」目的地，配置阶段可以先留空，发布前再补。本刀只校验 DeepSeek `apiKey` 必填。
 >
-> **`appToken` / `tableId` 已不再由 owner 填（PR-3，§16.9）：** 飞书从「owner 单一对 app_token/table_id」升级为 **per-form 一张多维表格**——`appToken` / `tableId` 改由「**发布即自动建表**」（§16.9）按表单自动产出并写进 `forms` 行，owner 无需在集成设置里粘贴它们。账户级飞书凭据现在**只需 `appId` + `appSecret`**（缺其一仍视为半填 → `400`；二者齐全即可保存）。`appToken` / `tableId` 保留为**可选可空**字段，仅为向后兼容旧前端飞书卡（提供则存 + 回显，缺省 → `NULL`）；**对提交同步不再使用**（同步改读 per-form 表，§15.1 / §16.9）。前端飞书卡 link→link-less 的彻底改造在 **PR-4** 退场这两个字段，本期不动前端。
+> **`appToken` / `tableId` 已不再由 owner 填（PR-3，§16.9）：** 飞书从「owner 单一对 app_token/table_id」升级为 **per-form 一张多维表格**——`appToken` / `tableId` 改由「**发布即自动建表**」（§16.9）按表单自动产出并写进 `forms` 行，owner 无需在集成设置里粘贴它们。账户级飞书凭据现在**只需 `appId` + `appSecret`**（缺其一仍视为半填 → `400`；二者齐全即可保存）。
+>
+> **PR-4（本票）已退场：** 飞书卡 **link-less**（ConnectionCard + App ID/App Secret + HelpSteps，**无分享链接**）；`MaskedConfig` **不再回显** `appToken` / `tableId`（从 `MaskedFeishu` 移除这两字段）；`FeishuInput` 保存体**只收** `app_id` + `app_secret`（不再发 `appToken` / `tableId`）。DB 的 `feishu_app_token` / `feishu_table_id` 两列在 `owner_config` 保留但恒为 `NULL`、不再写，仅向后兼容；per-form 表定位改读 `forms` 行（§16.9 / §21.2）。
 
 ### 12.2 加密方案（AES-GCM + `CONFIG_KEY` + 每字段独立 iv）
 
@@ -506,11 +508,9 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
     "apiKey": "sk-xxxxxxxxxxxxxxxx",   // 必填，非空
     "model": "deepseek-chat"            // 可选；缺省/空串表示未指定
   },
-  "feishu": {                           // 可选整块；留空表示「暂不配置飞书」
+  "feishu": {                           // 可选整块；留空表示「暂不配置飞书」（link-less：只 app_id + app_secret）
     "appId": "cli_xxx",
-    "appSecret": "yyyy",                // 密钥
-    "appToken": "bascnXXXX",
-    "tableId": "tblXXXX"
+    "appSecret": "yyyy"                 // 密钥
   }
 }
 ```
@@ -531,9 +531,7 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
   },
   "feishu": {
     "appId": "cli_xxx",      // 明文回显；未配置为 null
-    "appSecret": "yy…yy",    // 掩码串；未配置为 null
-    "appToken": "bascnXXXX", // 明文回显
-    "tableId": "tblXXXX"     // 明文回显
+    "appSecret": "yy…yy"     // 掩码串；未配置为 null
   },
   "updatedAt": "2026-06-11T08:00:00.000Z" // 从未配置时为 null
 }
@@ -541,7 +539,7 @@ owner 在「集成设置」里连接两样东西，后端负责**持久化 + 安
 
 - **密钥字段一律掩码，绝不返回完整明文。** `apiKey` / `appSecret` 在 Worker 内解密后经 `maskSecret` 脱敏（保留首尾、隐藏中间）再返回（见 §12.4），调用方拿不到完整原值。
 - **未配置时返回空骨架：** D1 里没有那一行时，返回上面的结构但所有值为 `null`，HTTP 仍为 `200`（「没配过」是正常态，不是错误）。
-- 非密字段（`model` / `appId` / `appToken` / `tableId`）明文回显，方便前端展示当前连的是哪张表。
+- 非密字段（`model` / `appId`）明文回显，方便前端展示当前连的是哪个账户。（PR-4 起 `appToken` / `tableId` **不再回显**，见 §12.1；per-form 表定位走 `forms` 行，§16.9 / §21.2。）
 
 ### 12.4 掩码规则（`maskSecret`）
 
@@ -567,8 +565,8 @@ CREATE TABLE IF NOT EXISTS owner_config (
   feishu_app_id         TEXT,               -- 明文，可空
   feishu_secret_cipher  TEXT,               -- AES-GCM 密文 (base64)
   feishu_secret_iv      TEXT,               -- 该密文的 iv (base64)，与 cipher 成对
-  feishu_app_token      TEXT,               -- 明文，可空
-  feishu_table_id       TEXT,               -- 明文，可空
+  feishu_app_token      TEXT,               -- @deprecated PR-4 起 owner_config 不再写、不再回显，恒为 NULL（仅向后兼容保留列）；per-form 表见 §16.9 的 forms 行
+  feishu_table_id       TEXT,               -- @deprecated 同上：owner_config 不再写，per-form 表定位走 forms.feishu_app_token/table_id（§16.9）
   updated_at            TEXT NOT NULL       -- ISO-8601，每次写入刷新
 );
 ```
@@ -1637,6 +1635,7 @@ CREATE TABLE IF NOT EXISTS users (
 ```
 
 - 项形状（`FormListItem`）：`{ slug, meta, status, createdAt }`。**不**含 `fields` 全量（列表只给概览，详情走 `GET /api/forms/:slug` 或 PATCH 回显）；`submissionCount`（该表单已收集条数）列为**可选**字段——拉一次飞书才能算，实现可省略或异步补，MVP 不强求。
+- **可选** per-form 飞书表定位 `feishuTable`：当该 form 行的 `feishu_app_token` + `feishu_table_id` **都非空**（「发布即自动建表」§16.9 已产出）时，列表项投影带回 `{ "feishuTable": { "appToken": "...", "tableId": "..." } }`；**未建表则 omit**。供前端「提交数据」工具栏显示「飞书表格↗」外链（在新标签打开这张表单对应的飞书多维表格）。这是 `forms` 行的非密明文字段，**不含**任何 owner 凭据。
 - `forms`：当前登录 owner（`owner_id = c.get('session').sub`）的所有表单，按 `created_at` 倒序（最新在前）或不约定顺序，由实现定。空 → `[]`（正常态）。**绝不**把别的 owner 的表单泄漏进列表（§17.9 第 6 条）。
 - **与公开拉取的区别：** 这是 owner-only 列表，**可以**回 `status` / `createdAt`（owner 自己的私有维度）；而公开 `GET /api/forms/:slug` 仍只投影 `slug + meta + fields`（§16.4 不变）。但本列表项**仍不含**任何 owner 凭据（凭据在 `owner_config`，不在 `forms` 表）。
 
