@@ -34,7 +34,7 @@ const sessionParam = () => new URLSearchParams(window.location.search).get("s");
 const projectInUrl = () => readProjectId(window.location.pathname);
 
 // A' (§26.10): the conversation and the workspace are now TWO decoupled rows. A persisted session's
-// turns are PURE chat (no embedded workspace snapshot turn — buildWorkspaceSnapshotTurn is deleted);
+// turns are PURE chat (no embedded workspace snapshot turn — that #76 snapshot mechanism is gone);
 // the workspace lives on the PROJECT row, restored separately via loadProject. These helpers build
 // the two halves so a restore harness can wire loadChatSession (conversation) + loadProject (workspace).
 function conversationOnly({ sessionId = "ds-deep", convoText }) {
