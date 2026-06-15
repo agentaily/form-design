@@ -820,12 +820,23 @@ function DesignerApp({
   // Guarded by the caller's load-sequence token (`myLoad`) so an out-of-order arrival across the
   // project + conversation async chain can never clobber a newer load (§4.3 乱序防护覆盖两路异步).
   // Returns the resolved session id, or null if superseded mid-flight.
-  const resolveAndLoadConversation = async (projectId, preferredSessionId, myLoad) => {
+  const resolveAndLoadConversation = async (
+    projectId,
+    preferredSessionId,
+    myLoad,
+    fallbackSessionId = "",
+  ) => {
     let sid = (preferredSessionId || "").trim();
     if (!sid) {
       const { sessions: list } = await listChatSessions(projectId);
       if (loadSeqRef.current !== myLoad) return null;
-      sid = Array.isArray(list) && list.length > 0 ? list[0].sessionId : newDesignSessionId();
+      // Most-recent conversation if any; else the caller's fallback (mount reuses the already-resolved
+      // sessionIdRef so a bare load doesn't MINT a new session each time — no URL churn, and refresh
+      // resumes the SAME conversation deterministically); else mint a fresh one.
+      sid =
+        Array.isArray(list) && list.length > 0
+          ? list[0].sessionId
+          : (fallbackSessionId || "").trim() || newDesignSessionId();
     }
     sessionIdRef.current = sid;
     setActiveDesignSessionId(sid);
@@ -844,7 +855,10 @@ function DesignerApp({
   // leave the prior state.
   //   urlMode: "replace" (mount normalization) | "push" (an explicit navigation) | "none" (popstate,
   //   the URL already changed → don't re-write it).
-  const enterProject = async (projectId, { preferredSessionId = "", urlMode = "replace" } = {}) => {
+  const enterProject = async (
+    projectId,
+    { preferredSessionId = "", fallbackSessionId = "", urlMode = "replace" } = {},
+  ) => {
     setActiveProjectId(projectId);
     projectIdRef.current = projectId;
     restoredRef.current = true; // we restore explicitly here, not via the mount effect
@@ -861,7 +875,12 @@ function DesignerApp({
         setPublished(false);
         syncModel();
       }
-      const sid = await resolveAndLoadConversation(projectId, preferredSessionId, myLoad);
+      const sid = await resolveAndLoadConversation(
+        projectId,
+        preferredSessionId,
+        myLoad,
+        fallbackSessionId,
+      );
       if (sid == null) return; // superseded mid-flight
       if (urlMode !== "none")
         reflectDesignerUrl(projectId, sid, { replace: urlMode === "replace" });
@@ -884,6 +903,10 @@ function DesignerApp({
     if (!loggedIn || restoredRef.current) return;
     enterProject(projectIdRef.current, {
       preferredSessionId: readSessionId(search),
+      // Bare load (no ?s=, no sessions yet) reuses the first-render-resolved session id (the
+      // localStorage-backed designSessionId) instead of minting a fresh one — no URL churn on mount,
+      // and a refresh resumes the SAME conversation deterministically (fixes an e2e flake).
+      fallbackSessionId: sessionIdRef.current,
       urlMode: "replace",
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
