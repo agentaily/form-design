@@ -398,6 +398,77 @@ describe("回归 · BUG #3 继续编辑(无既存项目→mint)后刷新工作�
   });
 });
 
+describe("回归 · BUG #4 继续编辑已发布表单后刷新 → 编辑态(EDITING 横幅 + 「更新」按钮)恢复", () => {
+  // 老板线上一步复现的「#86 follow-up」:继续编辑一份**已发布**表单 → 进编辑态(顶栏 EDITING 横幅 +
+  // 主按钮「更新」)→ URL /p/:id?s= → 刷新。#86 修好了「工作台 meta/fields 恢复」,但**编辑态本身没恢复**:
+  // 刷新后横幅没了、主按钮变回「发布」。后果致命 —— 此时点主按钮会走 doPublish 把这份已发布表单当**新
+  // 表单重发**(POST → 新 slug / 新记录),而非 PATCH 更新原表单。
+  //
+  // ROOT CAUSE: 刷新走 enterProject → applyProjectWorkspace 恢复了 modelRef.meta/fields + publishedSlugRef
+  //   + published 标志(#86),但**没重建 editingForm**(横幅 / 主按钮「更新 vs 发布」由它驱动)。
+  // FIX 契约(本测钉死):项目行已带 formSlug(publish / 继续编辑时落库)→ applyProjectWorkspace 在 formSlug
+  //   存在时同步重建 editingForm ⇒ EDITING 横幅回来 + 主按钮是「更新」(onClick=updateLiveForm,PATCH 原
+  //   slug),绝不是「发布」(onClick=doPublish,POST 新表单)。用真实 persist→reload 往返,非 spy。
+  it("继续编辑 → 刷新(/p/:id?s=)→ EDITING 横幅回来、主按钮是「更新」而非「发布」(否则点击重发新 slug)", async () => {
+    asLoggedIn();
+    const be = makeMemoryBackend();
+    // 一份早先发布的表单已有其项目行(formSlug 关联)—— loadFormForEdit 反查 listProjects 命中它。
+    be.projects.set("pj-pub", {
+      meta: { title: "活动报名表" },
+      fields: [{ id: "fld_3", type: "text", label: "姓名" }],
+      formSlug: "pubSlugAA",
+    });
+    const FORM = {
+      slug: "pubSlugAA",
+      status: "published",
+      meta: { title: "活动报名表" },
+      fields: [{ id: "fld_3", type: "text", label: "姓名", required: true }],
+    };
+    const { unmount } = render(
+      <App
+        {...baseProps({
+          ...be,
+          listForms: vi.fn(async () => [
+            {
+              slug: "pubSlugAA",
+              meta: { title: "活动报名表" },
+              status: "published",
+              createdAt: "2026-06-11T08:00:00.000Z",
+            },
+          ]),
+          getFormForEdit: vi.fn(async () => FORM),
+        })}
+      />,
+    );
+    // 继续编辑 → 进编辑态:横幅 + 主按钮「更新」(loadFormForEdit 直接设 editingForm)。
+    await openMyForms();
+    fireEvent.click(await screen.findByRole("button", { name: /继续编辑/ }));
+    await screen.findByTestId("edit-banner");
+    expect(screen.getByRole("button", { name: /^更新$/ })).toBeInTheDocument();
+    await waitFor(() => expect(window.location.pathname).toMatch(/^\/p\//));
+
+    // ── 真实刷新:在同一 /p/:id?s= 处重挂同后端 —— restore 走 loadProject(项目行带 formSlug),
+    //    不依赖 getFormForEdit/listForms(故 remount 用 baseProps 不注入它们,正是真实刷新路径)。──
+    const url = window.location.pathname + window.location.search;
+    unmount();
+    cleanup();
+    window.history.replaceState({}, "", url);
+    render(
+      <App
+        {...baseProps({ ...be })}
+        pathname={window.location.pathname}
+        search={window.location.search}
+      />,
+    );
+
+    // 编辑态恢复:EDITING 横幅回来 + 主按钮是「更新」(PATCH 原 slug),且**没有**「发布」按钮
+    // (否则点它会 doPublish 重发新表单)—— 这正是 bug 的核验。
+    await screen.findByTestId("edit-banner");
+    expect(screen.getByRole("button", { name: /^更新$/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^发布$/ })).not.toBeInTheDocument();
+  });
+});
+
 describe("回归 · A' 核心:切换对话只换聊天,右侧工作区不变", () => {
   it("切到另一段对话后聊天变了,但工作区字段与 /p/:id 不变(只 ?s= 改)", async () => {
     asLoggedIn();
