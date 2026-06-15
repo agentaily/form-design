@@ -143,6 +143,32 @@ const SUBMIT_MINUTE_LIMIT = SUBMIT_RATE_LIMITS[0].limit; // 10/minute
 const SUBMIT_HOUR_LIMIT = SUBMIT_RATE_LIMITS[1].limit; // 100/hour
 
 // =============================================================================
+// 确定化固定窗口（消除「连打跨窗边界」flake，§25）
+// =============================================================================
+// 限流是 fixed-window：windowStart = floor(now/windowSeconds)*windowSeconds（ratelimit.ts
+// §25.2）。下面那些「连打 N+margin 次串行请求、期望触发 429」的场景，要求这一串请求**全部落在
+// 同一个固定窗口**里计数才能累加到上限。可它们若用真实墙钟，当这串请求恰好横跨一个分钟窗边界
+// （:59→:00），固定窗计数在中途清零、N 次请求被劈到两个窗口、哪个都到不了上限 → 期望的 429
+// 永不出现（denied 为 undefined）。这是纯墙钟运气、与被测代码无关的历史 flake（§25 回归点）。
+//
+// 修法（与下方「窗口重置」场景同一范式）：把 Date 钉死在一个窗口起点 → 串行连打全程 now 不变 →
+// 同一 windowStart → 同一计数键 → 确定性累加到上限触发 429。只伪造 Date（toFake:["Date"]），
+// **不动** setTimeout 等真正的 I/O 定时器，workerd 的真实 fetch / KV I/O 照常跑。
+//
+// 起点同时对齐分钟(60s)与小时(3600s)窗口：1_699_999_200 % 3600 === 0 ⇒ 也 % 60 === 0，
+// 故 windowStartFor(now,60)===now、windowStartFor(now,3600)===now，连打全程不跨界。
+const RL_WINDOW_START_MS = 1_699_999_200_000;
+
+/**
+ * 把 Date 钉在一个固定窗口起点（{@link RL_WINDOW_START_MS}），让一串串行 hammer 请求无法横跨
+ * 窗口边界（§25 的连打 flake）。只伪造 Date、不动真实 I/O 定时器。配 `vi.useRealTimers()`（afterEach）复位。
+ */
+function pinRateLimitWindow(): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(RL_WINDOW_START_MS);
+}
+
+// =============================================================================
 // 登录限流套件（最轻量的 driver：login 不发信、不打上游，只读 users 表）
 // =============================================================================
 describe("公开端点限流 / 防刷 — 登录 (workers/features/rate-limit.feature, §25)", () => {
@@ -154,6 +180,12 @@ describe("公开端点限流 / 防刷 — 登录 (workers/features/rate-limit.fe
     await resetForms();
     await resetUsers();
     await resetAuthTokens();
+    // 本块全是 login（60s 固定窗）场景，含多个「连打到 429」的串行 hammer。钉死时钟于窗口起点，
+    // 杜绝连打跨分钟边界导致计数清零、429 永不出现的 flake（§25）。见 pinRateLimitWindow 注释。
+    pinRateLimitWindow();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   /** Send a wrong-password login from `ip` (always reaches the handler → unified 401). */
@@ -296,6 +328,7 @@ describe("公开端点限流 / 防刷 — 注册 + 跨桶独立 (workers/feature
   });
   afterEach(() => {
     resend.restore();
+    vi.useRealTimers(); // 复位本块内按需钉过的 fake Date（仅跨桶 login-hammer 那条用）
   });
 
   it("Scenario: 各公开端点按各自默认限额限流 — POST /api/auth/register (5/小时)", async () => {
@@ -349,6 +382,9 @@ describe("公开端点限流 / 防刷 — 注册 + 跨桶独立 (workers/feature
   });
 
   it("Scenario: 不同端点各自独立计数互不串桶", async () => {
+    // 这条要把 login（60s 窗）连打到 429。钉死时钟于窗口起点，杜绝连打跨分钟边界的 flake（§25）。
+    // 仅此条钉（本块其余是 register 5/小时窗、且依赖真实时间 drain 发信，故不在 beforeEach 全块钉）。
+    pinRateLimitWindow();
     // Given 同一个 IP 已把 POST /api/auth/login 的窗口配额刷满 (并触发 429)
     const ip = freshIp();
     const loginDenied = await hammerUntil429(
@@ -766,9 +802,14 @@ describe("公开端点限流 / 防刷 — 提交 (workers/features/rate-limit.fe
     await new Promise((r) => setTimeout(r, 40));
     mock.resetCalls();
     await resetRateLimit();
+    // 全部 setup（login/config/publish + 后台 fan-out settle）已在真实时间跑完；此处才钉时钟，
+    // 让随后测试体里「连打 submit 分钟窗（60s）到 429」的串行 hammer 全程落同一窗口、确定触发 429
+    // （消除连打跨分钟边界的 flake，§25）。只伪造 Date、不动 setTimeout 等真实 I/O 定时器。
+    pinRateLimitWindow();
   });
 
   afterEach(() => {
+    vi.useRealTimers(); // 复位 beforeEach 钉的 fake Date
     mock.restore();
   });
 
