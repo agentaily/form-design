@@ -1,7 +1,9 @@
 # Runbook · A' 一次性数据迁移(老会话各成单对话项目)
 
-> 状态:**⏳ 待执行**(PR-B / #83 合并后,由**老板**手动跑;CI / 自动部署**绝不**调它)。
-> 执行后回到本文件头标注 `✅ 已于 <日期> 执行`。
+> 状态:**✅ 已完结**(2026-06-15 由**老板**手动执行:dry-run + apply 确认**当前生产账号无老数据可迁**
+> —— `migrated:0`、no-op,机制验证 OK)。PR-D(#85)已收口清债:删 `POST /api/admin/migrate-projects`
+> 端点 + `migrateProjects.ts` + 两个测试,并新 migration `0008_drop_migrate_backup.sql` DROP 空备份表。
+> 本 runbook 留作历史记录,不再执行。
 
 把老 `chat_sessions` 数据迁到 A'「项目 ↔ 对话」模型(背景 + 策略见
 [`docs/refactor-project-conversation.md` §2.3](../../docs/refactor-project-conversation.md))。**需 JS**
@@ -128,9 +130,10 @@ curl -s -X POST https://form-design-api.agentaily.workers.dev/api/admin/migrate-
 
 ---
 
-## 收口(PR-D)
+## 收口(PR-D · ✅ 已完结,#85)
 
-A' 重构第 4 根(PR-D)收口时:① 删 `POST /api/admin/migrate-projects` 端点 + `migrateProjects.ts`
-
-- 两个测试文件;② `DROP TABLE IF EXISTS chat_sessions_a_backup`(确认迁移稳定、不再需要精准回滚后);
-  ③ 删前端 `splitWorkspaceSnapshot` / `buildWorkspaceSnapshotTurn` / `WORKSPACE_SNAPSHOT_ID` 残留。
+A' 重构第 4 根(PR-D / #85)已收口清债:① 删 `POST /api/admin/migrate-projects` 端点 +
+`migrateProjects.ts` + 两个测试文件;② migration `0008_drop_migrate_backup.sql` =
+`DROP TABLE IF EXISTS chat_sessions_a_backup`(迁移稳定完结、无回滚需求,且生产备份表为空);
+③ 前端 `splitWorkspaceSnapshot` / `buildWorkspaceSnapshotTurn` / `WORKSPACE_SNAPSHOT_ID` 符号
+已随迁移码一并清净(PR-C 已删前端主体,PR-D 删迁移脚本里的最后引用)。
