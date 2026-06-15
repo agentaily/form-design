@@ -145,6 +145,14 @@ project,`meta_json` / `fields_json` 留 NULL(空工作区);其余同上。这些
   - 数据迁移**幂等**:重跑时跳过「已有 project_id」的行(`WHERE project_id IS NULL`),避免二次
     抽取把已清理的行再处理一遍。
 
+> **PR-B 已定载体(realized)**:owner-only + owner-scoped 一次性维护端点 `POST /api/admin/migrate-projects`
+> (`mode: dry-run|apply|rollback`,apply/rollback 需 confirm),逻辑在 `workers/src/migrateProjects.ts`
+> (复用本节的 `splitWorkspaceSnapshot` 移植做 split),被 vitest 直接覆盖。**需 JS 故走端点而非纯 SQL**;
+> 备份是**两层**:apply 时写库内备份表 `chat_sessions_a_backup`(供 `rollback` 精准还原)+ 库外
+> `wrangler d1 export` 全量兜底。完整 runbook(备份→dry-run→apply→verify→rollback)+ 卡窗口见
+> [`workers/runbooks/0007-migrate-projects.md`](../workers/runbooks/0007-migrate-projects.md)。
+> **apply 生产不可逆 → 老板手动触发**;PR-D 收口删端点 + DROP 备份表。
+
 ### 2.4 键的变化与查询
 
 - 单会话定位:`WHERE owner_id=? AND session_id=?` **保持可用**(session_id 仍全局唯一够定位),

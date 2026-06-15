@@ -74,11 +74,12 @@ D1 库 `form-design-db`(id `9666fb73-…`)。**Schema 演进走 wrangler 迁移(
 
 一次性的**数据**搬迁(非 schema)。**不**进 `migrations/`、**不**被 CI 自动跑 —— 它们常依赖运行时参数(如某账号的 user id)、且只跑一次。手动按 runbook 执行,执行后在文件头标注状态。
 
-| runbook                     | 何时                                         | 作用                                                                                       |
-| --------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `migrate-default-owner.sql` | 单租户 → 多用户上线(✅ 已于 2026-06-12 执行) | 把历史 `owner_id='default'` 的 `owner_config` / `forms` 转给首个注册 owner(`yarnb@qq.com`) |
+| runbook                        | 何时                                            | 作用                                                                                                                                                                    |
+| ------------------------------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `migrate-default-owner.sql`    | 单租户 → 多用户上线(✅ 已于 2026-06-12 执行)    | 把历史 `owner_id='default'` 的 `owner_config` / `forms` 转给首个注册 owner(`yarnb@qq.com`)                                                                              |
+| `0007-migrate-projects.md`(JS) | A' 项目↔对话重构(PR-B / #83，**⏳ 待老板触发**) | 老 `chat_sessions` 各成单对话项目:抽 #76 快照工作区写 `projects`、删快照 turn、回填 `project_id`。**需 JS**(parse turns_json),走 owner-only 端点而非纯 SQL,见该 runbook |
 
-执行(模板,把占位换成真实 user id 后):
+纯 SQL 的数据搬迁(如 `migrate-default-owner.sql`)执行模板(把占位换成真实 user id 后):
 
 ```bash
 cd workers
@@ -86,6 +87,8 @@ npx wrangler d1 execute form-design-db --remote --file=runbooks/<name>.sql -y
 ```
 
 > 本地 dev 同理,把 `--remote` 换 `--local`。本地起站见 §6。
+
+**需 JS 的数据搬迁**(要 parse JSON / 按 sentinel 抽数据,纯 SQL 干不了)走一个 **owner-only + owner-scoped 一次性维护端点**(`POST /api/admin/migrate-projects`),逻辑在 `workers/src/migrateProjects.ts`、被 vitest 直接覆盖。默认 dry-run(只读+报告)、apply/rollback 需 confirm,**先备份**(库内备份表 + `wrangler d1 export` 全量)。完整步骤(备份→dry-run→apply→verify→rollback)见 [`runbooks/0007-migrate-projects.md`](./workers/runbooks/0007-migrate-projects.md)。**⚠️ apply 生产不可逆 → 老板手动触发,CI / 自动部署绝不调它**;PR-D 收口删该端点。
 
 ---
 
