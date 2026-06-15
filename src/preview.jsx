@@ -51,7 +51,12 @@ function pvValidate(fields, vals) {
 
 // ── one field, bound to the form hook ──
 function FieldView({ field, form }) {
-  const { id, type, label, placeholder, required, options, _new } = field;
+  const { id, type, label, placeholder, required, _new } = field;
+  // DEFENSIVE (A' 验收 bug #1): a stored CHOICE field (radio / checks / select) may come back with a
+  // missing / non-array `options` (e.g. a real published form whose choice field never got options, or
+  // a draft mid-edit). The renderers below call `options.map(...)`, so an undefined here threw
+  // "Cannot read properties of undefined (reading 'map')" → blank screen on「继续编辑」. Default to [].
+  const options = Array.isArray(field.options) ? field.options : [];
   // DS Field has no className prop, so the entrance animation lives on a wrapper.
   const cls = _new ? "pv-in" : undefined;
 

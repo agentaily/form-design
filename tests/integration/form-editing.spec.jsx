@@ -81,17 +81,26 @@ function chatAddsField() {
   });
 }
 
-// Mount the App in a logged-in owner session with the edit seams injected. saveChatTurns /
-// loadChatSession are stubbed so §26 persistence never reaches the network during a turn (a
-// saveChatTurns spy can be injected to assert the edit-session isolation invariant).
+// Mount the App in a logged-in owner session with the edit seams injected. The A' project↔对话 seams
+// (loadProject / saveProjectWorkspace / listProjects + renameChatSession) are injected with empty-
+// state fakes so「继续编辑」(= 进项目) doesn't hit the real clients (real fetch → undefined in jsdom).
+// A saveChatTurns / saveProjectWorkspace spy can be injected to assert what an edit turn persists.
 function renderApp(seams = {}) {
   setToken("owner-jwt");
   render(
     <App
       chat={seams.chat ?? vi.fn(async () => ({ text: "", toolCalls: [] }))}
       getCurrentUser={verifiedMe}
-      loadChatSession={async () => ({ session: null })}
+      loadChatSession={seams.loadChatSession ?? (async () => ({ session: null }))}
       saveChatTurns={seams.saveChatTurns ?? (async () => ({}))}
+      listChatSessions={seams.listChatSessions ?? (async () => ({ sessions: [] }))}
+      deleteChatSession={seams.deleteChatSession ?? (async () => ({ deleted: true }))}
+      renameChatSession={seams.renameChatSession ?? (async () => ({ renamed: true }))}
+      loadProject={seams.loadProject ?? (async () => ({ project: null }))}
+      saveProjectWorkspace={
+        seams.saveProjectWorkspace ?? (async () => ({ projectId: "pj", updatedAt: "t" }))
+      }
+      listProjects={seams.listProjects ?? (async () => ({ projects: [] }))}
       publishForm={vi.fn()}
       listForms={seams.listForms}
       getFormForEdit={seams.getFormForEdit}
@@ -309,9 +318,13 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     });
   });
 
-  // ── 编辑会话隔离（不污染 §26 设计会话）────────────────────────────────────────
-  Scenario("编辑期间的对话不污染设计会话持久化", ({ Given, When, Then }) => {
+  // ── 编辑对话就是项目的对话(A' 反转:不再隔离,照常持久化)────────────────────────
+  // 反转自旧场景「编辑期间的对话不污染设计会话持久化」(§4.4 整条要改):A' 下「继续编辑」= 进入该表单
+  // 对应的项目,编辑态对话就是该项目下的会话,照常持久化到项目的会话行(这修了「继续编辑后刷新对话丢」
+  // 的 bug —— 旧 editingFormRef 跳过持久化把每个编辑回合都丢了)。
+  Scenario("编辑态的对话照常持久化到项目的会话", ({ Given, When, Then, And }) => {
     const saveChatTurns = vi.fn(async () => ({}));
+    const saveProjectWorkspace = vi.fn(async () => ({ projectId: "pj", updatedAt: "t" }));
     Given("owner 已把一份已发布表单载回设计器编辑", async () => {
       renderApp({
         listForms: vi.fn(async () => [PUBLISHED_SUMMARY]),
@@ -319,6 +332,9 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
         updateFormDefinition: vi.fn(),
         chat: chatAddsField(),
         saveChatTurns,
+        saveProjectWorkspace,
+        // No prior conversation under the project → a fresh session id for this edit conversation.
+        listChatSessions: vi.fn(async () => ({ sessions: [] })),
       });
       await openMyForms();
       fireEvent.click(await screen.findByRole("button", { name: /继续编辑/ }));
@@ -327,10 +343,23 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     When("owner 在编辑态发生一轮对话改动", async () => {
       await makeDirty();
     });
-    Then("这轮编辑对话不写进设计会话持久化", () => {
-      // An edit conversation is ephemeral: turn-end §26 persistence is skipped while editing, so
-      // it never overwrites the form's design session with a foreign transcript (Blocker fix).
-      expect(saveChatTurns).not.toHaveBeenCalled();
+    Then("这轮编辑对话写进该项目下的会话持久化", async () => {
+      // A' 反转 (§4.4): an edit conversation IS the project's conversation, so turn-end §26 persistence
+      // RUNS — the edit turn is saved to the project-scoped session row (keyed (projectId, sessionId)).
+      await waitFor(() => expect(saveChatTurns).toHaveBeenCalled());
+      const [projectId, sessionId, input] = saveChatTurns.mock.calls[0];
+      expect(projectId).toBeTruthy();
+      expect(sessionId).toBeTruthy();
+      // the persisted batch carries the edit conversation's turns (the「加个备注字段」turn + reply).
+      expect(Array.isArray(input.turns)).toBe(true);
+      expect(input.turns.length).toBeGreaterThan(0);
+    });
+    And("编辑改动的工作区也落到该项目行", async () => {
+      // The workspace (the form being edited) is persisted to the PROJECT row (decoupled write).
+      await waitFor(() => expect(saveProjectWorkspace).toHaveBeenCalled());
+      const [projectId, ws] = saveProjectWorkspace.mock.calls[0];
+      expect(projectId).toBeTruthy();
+      expect(Array.isArray(ws.fields)).toBe(true);
     });
   });
 

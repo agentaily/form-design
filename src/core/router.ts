@@ -131,6 +131,43 @@ export function matchSignIn(pathname: string): SignInRoute | null {
   return isExactPath(pathname, SIGNIN_PATH) ? {} : null;
 }
 
+/**
+ * The designer's project-path prefix (A' 项目↔对话, §26.10). The designer lives at `/p/:projectId`
+ * (老板定案：路径化项目 id + query 对话 `?s=`), so a refresh / deep-link / shared link restores BOTH
+ * the project (path) AND the active conversation (`?s=`). Bare `/` (and the legacy `/settings/:tab`)
+ * still resolve to the designer; App normalizes the URL to `/p/:id?s=` on mount.
+ */
+export const PROJECT_PREFIX = "/p/";
+
+/**
+ * Read the active design-project id off a pathname (`/p/:projectId` or, with the settings overlay,
+ * `/p/:projectId/settings/:tab`), URL-decoded; "" when the path carries no project (bare `/`, the
+ * legacy `/settings/:tab`, or a malformed id). Pure — App falls back to getOrCreateProjectId() when
+ * this is "" (§A'.1 不报错纪律).
+ */
+export function readProjectId(pathname: string): string {
+  if (typeof pathname !== "string" || !pathname.startsWith(PROJECT_PREFIX)) return "";
+  // The project id is the FIRST segment after "/p/"; anything after it (`/settings/:tab`) is the
+  // nested overlay path, not part of the id.
+  const seg = pathname.slice(PROJECT_PREFIX.length).split("/")[0];
+  if (!seg) return "";
+  try {
+    return decodeURIComponent(seg);
+  } catch {
+    // A malformed percent-encoding is not a usable project id → treat as no project (degrade).
+    return "";
+  }
+}
+
+/**
+ * Build the designer base path for a project (`/p/:projectId`, A'). Pure; round-trips through
+ * {@link readProjectId}. App push/replaces this (preserving any `?s=` session query) on mount
+ * normalization and when entering another project (e.g.「继续编辑」reverse-resolves a form's project).
+ */
+export function projectBasePath(projectId: string): string {
+  return `${PROJECT_PREFIX}${encodeURIComponent(projectId)}`;
+}
+
 /** The two settings tabs reflected into the URL (`/settings/:tab`, PR #76). */
 export type SettingsSection = "account" | "integrations";
 
@@ -154,8 +191,17 @@ export interface SettingsRoute {
  */
 export function matchSettings(pathname: string): SettingsRoute | null {
   if (typeof pathname !== "string") return null;
-  // Normalise exactly one trailing slash (but never the root "/settings" itself away).
   let p = pathname;
+  // A' (§26.10): settings nests UNDER the project path (`/p/:id/settings/:tab`) so the project
+  // stays in the URL while the overlay is open. Strip an optional `/p/:id` prefix before matching.
+  // (`/p/:id` ALONE is the designer, not settings → no `/settings` segment → falls through to null.)
+  if (p.startsWith(PROJECT_PREFIX)) {
+    const rest = p.slice(PROJECT_PREFIX.length);
+    const slash = rest.indexOf("/");
+    if (slash < 0) return null; // "/p/:id" with no sub-path is the bare designer.
+    p = rest.slice(slash); // e.g. "/settings/account"
+  }
+  // Normalise exactly one trailing slash (but never the root "/settings" itself away).
   if (p.length > SETTINGS_PATH.length && p.endsWith("/")) p = p.slice(0, -1);
   if (p === SETTINGS_PATH) return { section: "integrations" };
   if (p === `${SETTINGS_PATH}/account`) return { section: "account" };
@@ -164,19 +210,26 @@ export function matchSettings(pathname: string): SettingsRoute | null {
 }
 
 /**
- * Build the `/settings/:tab` path reflecting a tab (PR #76): `/settings/account` or
- * `/settings/integrations`. Pure; round-trips through {@link matchSettings}. App pushes/
- * replaces this (preserving any `?s=` session query) when opening settings or switching tabs.
+ * Build the settings path reflecting a tab (PR #76 + A' §26.10). When `projectId` is given, the path
+ * nests under the project (`/p/:id/settings/:tab`) so the project stays in the URL while the overlay
+ * is open; otherwise it falls back to the bare `/settings/:tab` (legacy / no active project). Pure;
+ * round-trips through {@link matchSettings}. App pushes/replaces this (preserving any `?s=` session
+ * query) when opening settings or switching tabs.
  */
-export function settingsPath(section: SettingsSection): string {
-  return section === "account" ? `${SETTINGS_PATH}/account` : `${SETTINGS_PATH}/integrations`;
+export function settingsPath(section: SettingsSection, projectId?: string | null): string {
+  const tab = section === "account" ? `${SETTINGS_PATH}/account` : `${SETTINGS_PATH}/integrations`;
+  const id = (projectId ?? "").trim();
+  return id ? `${projectBasePath(id)}${tab}` : tab;
 }
 
 /**
- * Query param carrying the active design-session id on the designer route (PR #76). The value
- * is the §26.2 client-minted stable session id, so a refresh / deep-link / shared link restores
- * the same conversation + workspace. `?s=` is orthogonal to the `/settings/:tab` path (both can
- * coexist, e.g. `/settings/integrations?s=<id>`).
+ * Query param carrying the active design-session id on the designer route (PR #76 + A' §26.10). The
+ * value is the §26.2 client-minted stable session id; under A' it names ONLY the active conversation
+ * within the project (the project — and thus the shared workspace — lives in the `/p/:id` path). So a
+ * refresh / deep-link / shared link of `/p/:id?s=<sid>` restores「哪个项目 + 哪个对话」. `?s=` is
+ * orthogonal to the project path AND the nested `/settings/:tab` overlay (all three coexist, e.g.
+ * `/p/:id/settings/integrations?s=<sid>`). Switching conversations changes only `?s=` (workspace
+ * unchanged); switching projects changes the `/p/:id` path (workspace reloads).
  */
 export const SESSION_PARAM = "s";
 

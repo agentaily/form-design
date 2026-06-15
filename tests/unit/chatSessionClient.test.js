@@ -21,13 +21,15 @@ import {
   toPersistedTurns,
   listChatSessions,
   deleteChatSession,
+  renameChatSession,
   setActiveDesignSessionId,
   newDesignSessionId,
-  WORKSPACE_SNAPSHOT_ID,
-  buildWorkspaceSnapshotTurn,
-  splitWorkspaceSnapshot,
 } from "../../src/core/chatSessionClient";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
+
+// A' (§26.10): the session endpoints are now PROJECT-scoped — the client takes a projectId first and
+// rides it as a `?projectId=` query so the backend scopes the row to the project.
+const PROJECT_ID = "pj-test-uuid";
 
 function jsonResponse(body, init = {}) {
   return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -214,11 +216,13 @@ describe("chatSessionClient · loadChatSession", () => {
     const fetchMock = vi.fn(async () => jsonResponse({ session: SESSION }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const out = await loadChatSession("b3f1aaaa-uuid");
+    const out = await loadChatSession(PROJECT_ID, "b3f1aaaa-uuid");
 
     expect(out).toEqual({ session: SESSION });
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain(`${CHAT_SESSION_PATH}/b3f1aaaa-uuid`);
+    // A': the active project rides as a `?projectId=` query (backend scopes the read to it).
+    expect(url).toContain(`projectId=${PROJECT_ID}`);
     expect((init.method ?? "GET").toUpperCase()).toBe("GET");
     // OWNER-ONLY: the Bearer token rides along (§17).
     expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
@@ -230,14 +234,14 @@ describe("chatSessionClient · loadChatSession", () => {
     const fetchMock = vi.fn(async () => jsonResponse({ session: null }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(loadChatSession("never-seen")).resolves.toEqual({ session: null });
+    await expect(loadChatSession(PROJECT_ID, "never-seen")).resolves.toEqual({ session: null });
   });
 
   it("rejects with a 401 ApiError when the session expired (caller routes into /signin)", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(loadChatSession("b3f1aaaa-uuid")).rejects.toMatchObject({
+    await expect(loadChatSession(PROJECT_ID, "b3f1aaaa-uuid")).rejects.toMatchObject({
       name: "ApiError",
       status: 401,
     });
@@ -252,11 +256,12 @@ describe("chatSessionClient · saveChatTurns", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const input = { turns: SESSION.turns, history: SESSION.history };
-    const out = await saveChatTurns("b3f1aaaa-uuid", input);
+    const out = await saveChatTurns(PROJECT_ID, "b3f1aaaa-uuid", input);
 
     expect(out).toEqual(result);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain(`${CHAT_SESSION_PATH}/b3f1aaaa-uuid`);
+    expect(url).toContain(`projectId=${PROJECT_ID}`);
     expect(init.method.toUpperCase()).toBe("PUT");
     // OWNER-ONLY: the Bearer token rides along (§17).
     expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
@@ -272,7 +277,7 @@ describe("chatSessionClient · saveChatTurns", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await saveChatTurns("b3f1aaaa-uuid", {
+    await saveChatTurns(PROJECT_ID, "b3f1aaaa-uuid", {
       turns: SESSION.turns,
       history: SESSION.history,
       formSlug: "f8Kq2pXa",
@@ -286,7 +291,9 @@ describe("chatSessionClient · saveChatTurns", () => {
     const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(saveChatTurns("b3f1aaaa-uuid", { turns: [], history: [] })).rejects.toMatchObject({
+    await expect(
+      saveChatTurns(PROJECT_ID, "b3f1aaaa-uuid", { turns: [], history: [] }),
+    ).rejects.toMatchObject({
       name: "ApiError",
       status: 401,
     });
@@ -297,9 +304,9 @@ describe("chatSessionClient · saveChatTurns", () => {
     const fetchMock = vi.fn(async () => jsonResponse({ error: "boom" }, { status: 500 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(saveChatTurns("b3f1aaaa-uuid", { turns: [], history: [] })).rejects.toBeInstanceOf(
-      ApiError,
-    );
+    await expect(
+      saveChatTurns(PROJECT_ID, "b3f1aaaa-uuid", { turns: [], history: [] }),
+    ).rejects.toBeInstanceOf(ApiError);
   });
 });
 
@@ -332,7 +339,7 @@ describe("chatSessionClient · listChatSessions", () => {
     const fetchMock = vi.fn(async () => jsonResponse({ sessions: SUMMARIES }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const out = await listChatSessions();
+    const out = await listChatSessions(PROJECT_ID);
 
     expect(out).toEqual({ sessions: SUMMARIES });
     const [url, init] = fetchMock.mock.calls[0];
@@ -340,25 +347,30 @@ describe("chatSessionClient · listChatSessions", () => {
     // CHAT_SESSION_PATH (`/api/chat/session/:id`).
     expect(url).toContain(CHAT_SESSIONS_PATH);
     expect(url).not.toMatch(/\/session\/[^/]/); // not the per-session path
+    // A': only this project's conversations (the projectId rides as a query).
+    expect(url).toContain(`projectId=${PROJECT_ID}`);
     expect((init.method ?? "GET").toUpperCase()).toBe("GET");
     // OWNER-ONLY: the Bearer token rides along (§17).
     expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
     expect(init.body).toBeUndefined();
   });
 
-  it("resolves the empty state { sessions: [] } for an owner with no sessions (not an error)", async () => {
+  it("resolves the empty state { sessions: [] } for a project with no sessions (not an error)", async () => {
     setToken("jwt-owner");
     const fetchMock = vi.fn(async () => jsonResponse({ sessions: [] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(listChatSessions()).resolves.toEqual({ sessions: [] });
+    await expect(listChatSessions(PROJECT_ID)).resolves.toEqual({ sessions: [] });
   });
 
   it("rejects with a 401 ApiError when the session expired (caller routes into /signin)", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(listChatSessions()).rejects.toMatchObject({ name: "ApiError", status: 401 });
+    await expect(listChatSessions(PROJECT_ID)).rejects.toMatchObject({
+      name: "ApiError",
+      status: 401,
+    });
   });
 });
 
@@ -368,11 +380,12 @@ describe("chatSessionClient · deleteChatSession", () => {
     const fetchMock = vi.fn(async () => jsonResponse({ deleted: true }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const out = await deleteChatSession("ds-1");
+    const out = await deleteChatSession(PROJECT_ID, "ds-1");
 
     expect(out).toEqual({ deleted: true });
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain(`${CHAT_SESSION_PATH}/ds-1`);
+    expect(url).toContain(`projectId=${PROJECT_ID}`);
     expect(init.method.toUpperCase()).toBe("DELETE");
     // OWNER-ONLY: the Bearer token rides along (§17).
     expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
@@ -384,21 +397,54 @@ describe("chatSessionClient · deleteChatSession", () => {
     const fetchMock = vi.fn(async () => jsonResponse({ error: "会话不存在" }, { status: 404 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(deleteChatSession("not-mine")).rejects.toMatchObject({
+    await expect(deleteChatSession(PROJECT_ID, "not-mine")).rejects.toMatchObject({
       name: "ApiError",
       status: 404,
     });
     // The 404 is not swallowed — it surfaces as an ApiError carrying the backend message.
-    await expect(deleteChatSession("not-mine")).rejects.toBeInstanceOf(ApiError);
+    await expect(deleteChatSession(PROJECT_ID, "not-mine")).rejects.toBeInstanceOf(ApiError);
   });
 
   it("rejects with a 401 ApiError when the session expired (caller routes into /signin)", async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(deleteChatSession("ds-1")).rejects.toMatchObject({
+    await expect(deleteChatSession(PROJECT_ID, "ds-1")).rejects.toMatchObject({
       name: "ApiError",
       status: 401,
+    });
+  });
+});
+
+// —— 重命名会话 (SPEC §26.10, A') ————————————————————————————————————————————
+// renameChatSession PATCH /api/chat/session/:id?projectId= — owner-only (Bearer), sends { title },
+// resolves { renamed }; a foreign / never-existing session surfaces as a 404 ApiError for the caller.
+describe("chatSessionClient · renameChatSession", () => {
+  it("PATCHes the title as the owner (Bearer, project-scoped) and resolves { renamed }", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse({ renamed: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await renameChatSession(PROJECT_ID, "ds-1", "客户回访问卷");
+
+    expect(out).toEqual({ renamed: true });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain(`${CHAT_SESSION_PATH}/ds-1`);
+    expect(url).toContain(`projectId=${PROJECT_ID}`);
+    expect(init.method.toUpperCase()).toBe("PATCH");
+    expect(init.headers["authorization"]).toBe("Bearer jwt-owner");
+    expect(init.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(init.body)).toEqual({ title: "客户回访问卷" });
+  });
+
+  it("rejects with a 404 ApiError for a foreign / never-existing session (caller handles)", async () => {
+    setToken("jwt-owner");
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "会话不存在" }, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(renameChatSession(PROJECT_ID, "not-mine", "x")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 404,
     });
   });
 });
@@ -463,103 +509,5 @@ describe("chatSessionClient · setActiveDesignSessionId / newDesignSessionId", (
     const a = newDesignSessionId();
     const b = newDesignSessionId();
     expect(a).not.toBe(b);
-  });
-});
-
-// 工作区快照 (PR #76)：§26 只持久化【对话】(turns + history)，不存表单预览模型，所以刷新后右侧
-// 工作区会丢。这两个纯函数让 App 把表单模型 (meta + fields) 作为一条合成 turn 搭进 §26 既有的
-// 不透明 turns_json 里（无 D1 迁移）：buildWorkspaceSnapshotTurn 造快照 turn，splitWorkspaceSnapshot
-// 在恢复时把它从对话 turns 里摘出来重建预览。合成 turn 是 role:"assistant"（不影响后端按 user 回合
-// 推的 title/turnCount），恢复时被滤掉、绝不渲染成气泡。
-describe("chatSessionClient · workspace snapshot (PR #76)", () => {
-  it("exposes a stable sentinel id for the synthetic snapshot turn", () => {
-    expect(typeof WORKSPACE_SNAPSHOT_ID).toBe("string");
-    expect(WORKSPACE_SNAPSHOT_ID.length).toBeGreaterThan(0);
-  });
-
-  it("builds an assistant-role snapshot turn carrying the form model (meta + fields)", () => {
-    const meta = { title: "活动报名" };
-    const fields = [{ id: "fld_5", type: "text", label: "姓名", required: true }];
-    const turn = buildWorkspaceSnapshotTurn(meta, fields);
-    expect(turn).toMatchObject({
-      id: WORKSPACE_SNAPSHOT_ID,
-      role: "assistant", // never counted as a user turn → no title/turnCount pollution
-      kind: "workspace",
-      meta,
-    });
-    expect(turn.fields).toEqual(fields);
-  });
-
-  it("strips the transient _new flag so the snapshot is stable JSON", () => {
-    const turn = buildWorkspaceSnapshotTurn(null, [
-      { id: "fld_1", type: "text", label: "x", _new: true },
-    ]);
-    expect(turn.fields[0]).not.toHaveProperty("_new");
-  });
-
-  it("returns null for an empty model (nothing to restore → no snapshot turn written)", () => {
-    expect(buildWorkspaceSnapshotTurn(null, [])).toBeNull();
-    expect(buildWorkspaceSnapshotTurn(null, undefined)).toBeNull();
-  });
-
-  it("builds a snapshot when only meta is set (a titled-but-fieldless draft)", () => {
-    const turn = buildWorkspaceSnapshotTurn({ title: "草稿" }, []);
-    expect(turn).not.toBeNull();
-    expect(turn.meta).toEqual({ title: "草稿" });
-    expect(turn.fields).toEqual([]);
-  });
-
-  it("splits the snapshot out of a turns array, returning the real turns + the workspace", () => {
-    const real = [
-      { id: "m1", role: "user", text: "做个报名表" },
-      { id: "m2", role: "assistant", kind: "text", text: "好的" },
-    ];
-    const snap = buildWorkspaceSnapshotTurn({ title: "报名" }, [
-      { id: "fld_3", type: "text", label: "姓名" },
-    ]);
-    const { turns, workspace } = splitWorkspaceSnapshot([...real, snap]);
-    expect(turns).toEqual(real); // snapshot removed → only the real conversation renders
-    expect(workspace).toEqual({
-      meta: { title: "报名" },
-      fields: [{ id: "fld_3", type: "text", label: "姓名" }],
-    });
-  });
-
-  it("returns workspace:null when there is no snapshot turn (a conversation-only session)", () => {
-    const real = [{ id: "m1", role: "user", text: "hi" }];
-    const { turns, workspace } = splitWorkspaceSnapshot(real);
-    expect(turns).toEqual(real);
-    expect(workspace).toBeNull();
-  });
-
-  it("tolerates an empty / null turns array (first-visit empty state, no throw)", () => {
-    expect(splitWorkspaceSnapshot([])).toEqual({ turns: [], workspace: null });
-    expect(splitWorkspaceSnapshot(null)).toEqual({ turns: [], workspace: null });
-    expect(splitWorkspaceSnapshot(undefined)).toEqual({ turns: [], workspace: null });
-  });
-
-  it("tolerates a corrupt (null / non-object) row inside a populated array (no throw)", () => {
-    // "one bad row must not break restore" — a corrupt entry alongside real turns must not throw
-    // and must not be mistaken for the snapshot; the real conversation turn survives.
-    const real = { id: "m1", role: "user", text: "hi" };
-    expect(() => splitWorkspaceSnapshot([null, real, 42, "x"])).not.toThrow();
-    const { turns, workspace } = splitWorkspaceSnapshot([null, real]);
-    expect(workspace).toBeNull();
-    expect(turns).toContainEqual(real);
-  });
-
-  it("round-trips: split(build(...)) recovers the same model the snapshot captured", () => {
-    const meta = { kicker: "REG", title: "报名", desc: "来" };
-    const fields = [
-      { id: "fld_5", type: "text", label: "姓名", required: true },
-      { id: "fld_7", type: "radio", label: "票种", options: ["A", "B"] },
-    ];
-    const snap = buildWorkspaceSnapshotTurn(meta, fields);
-    const { turns, workspace } = splitWorkspaceSnapshot([
-      { id: "m1", role: "user", text: "..." },
-      snap,
-    ]);
-    expect(turns).toHaveLength(1);
-    expect(workspace).toEqual({ meta, fields });
   });
 });
