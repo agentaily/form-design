@@ -8,7 +8,6 @@ artifacts** — `features/*.feature` is the contract everyone works against.
 
 | Agent            | Owns                                                                                | Doesn't touch                 |
 | ---------------- | ----------------------------------------------------------------------------------- | ----------------------------- |
-| `pr-analyst`     | triage an incoming PR → classify / decompose / route (read-only)                    | implementing, merging         |
 | `spec-architect` | `SPEC.md`, `features/`, `src/core` type contracts                                   | implementation, tests         |
 | `designer`       | `DESIGN.md` (visual truth) + design pages in Claude Design → land via `design-sync` | product logic, tests          |
 | `design-syncer`  | land a handoff you already have → code (`design-sync` skill, passive)               | behavior design               |
@@ -20,7 +19,7 @@ artifacts** — `features/*.feature` is the contract everyone works against.
 ## Flow (double-loop TDD + PR-driven)
 
 ```
-PR (task ticket) ─► pr-analyst ─► classify + route ──────────────┐
+PR (task ticket) ─► worker self-triage ─► classify + route ──────┐
 intent / handoff ─► spec-architect ─► features/ + contracts ─────┤
         designer ─► design (Claude Design) ─┐                     │
         design-syncer ─► land handoff ──────┴► design deltas ─────┤
