@@ -127,19 +127,28 @@ async function openMyForms() {
   fireEvent.click(screen.getByRole("menuitem", { name: /我的表单/ }));
 }
 
+// This jsdom config provides NO `localStorage` global (the project/session id helpers wrap every
+// access in try/catch and fall back to a module-level in-memory mirror — which would LEAK across
+// tests). Install a fresh, working fake per test so the project-id resolution (URL → stored → resume
+// → mint) is deterministic and isolated.
+function installFakeLocalStorage() {
+  const store = new Map();
+  vi.stubGlobal("localStorage", {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => void store.set(k, String(v)),
+    removeItem: (k) => void store.delete(k),
+    clear: () => void store.clear(),
+  });
+}
+
 beforeEach(() => {
+  installFakeLocalStorage();
   window.history.replaceState({}, "", "/");
 });
 afterEach(() => {
   cleanup();
   clearToken();
-  try {
-    localStorage.removeItem(DESIGN_SESSION_ID_KEY);
-    localStorage.removeItem(DESIGN_PROJECT_ID_KEY);
-    localStorage.removeItem(MODEL_KEY);
-  } catch {
-    /* ignore */
-  }
+  vi.unstubAllGlobals();
   window.history.replaceState({}, "", "/");
 });
 
@@ -320,5 +329,55 @@ describe("回归 · A' 核心:切换对话只换聊天,右侧工作区不变", (
     // …and only ?s= flipped while the /p/:id project path stayed put.
     await waitFor(() => expect(new URLSearchParams(window.location.search).get("s")).toBe("ds-b"));
     expect(window.location.pathname).toBe("/p/pj-1");
+  });
+});
+
+describe("A' cutover · 裸开 resume 最近项目(消除「现有 owner 看不到已迁数据」gap)", () => {
+  it("无 URL / 无 localStorage 项目 → listProjects() resume 最近项目,载其工作区 + URL 落 /p/<id>", async () => {
+    asLoggedIn();
+    const be = makeMemoryBackend();
+    // an existing / just-migrated owner already has a server project (its workspace).
+    be.projects.set("pj-recent", {
+      meta: { title: "已迁表单" },
+      fields: [{ id: "fld_r", type: "text", label: "恢复项目字段-唯一标记" }],
+      formSlug: null,
+    });
+    window.history.replaceState({}, "", "/");
+    render(<App {...baseProps({ ...be })} pathname="/" search="" />);
+
+    // mount RESUMES the most-recent server project → its workspace renders + URL anchors to it.
+    expect(await screen.findByText("恢复项目字段-唯一标记")).toBeInTheDocument();
+    await waitFor(() => expect(window.location.pathname).toBe("/p/pj-recent"));
+    expect(be.listProjects).toHaveBeenCalled();
+  });
+
+  it("无 URL / 无 localStorage 项目 + owner 无任何项目 → mint 全新项目(不 resume)", async () => {
+    asLoggedIn();
+    const listProjects = vi.fn(async () => ({ projects: [] }));
+    window.history.replaceState({}, "", "/");
+    render(<App {...baseProps({ listProjects })} pathname="/" search="" />);
+
+    // listProjects consulted, came back empty → a fresh /p/<minted-id>, empty designer.
+    await waitFor(() => expect(window.location.pathname).toMatch(/^\/p\/[^/]+$/));
+    expect(listProjects).toHaveBeenCalled();
+    expect(await screen.findByText("描述你想要的表单")).toBeInTheDocument();
+  });
+
+  it("有 localStorage 活跃项目 → resume 它(不查 listProjects,localStorage 优先)", async () => {
+    asLoggedIn();
+    localStorage.setItem(DESIGN_PROJECT_ID_KEY, "pj-stored");
+    const be = makeMemoryBackend();
+    be.projects.set("pj-stored", {
+      meta: { title: "上次的表单" },
+      fields: [{ id: "fld_s", type: "text", label: "存储项目字段-唯一标记" }],
+      formSlug: null,
+    });
+    window.history.replaceState({}, "", "/");
+    render(<App {...baseProps({ ...be })} pathname="/" search="" />);
+
+    expect(await screen.findByText("存储项目字段-唯一标记")).toBeInTheDocument();
+    await waitFor(() => expect(window.location.pathname).toBe("/p/pj-stored"));
+    // localStorage named the active project → no most-recent lookup needed.
+    expect(be.listProjects).not.toHaveBeenCalled();
   });
 });

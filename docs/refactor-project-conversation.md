@@ -422,8 +422,11 @@ export function renameChatSession(
 - **改成**:URL 升为 **`?p=<projectId>&s=<sessionId>`**(决定如下)。刷新恢复:按 `?p=` 载项目级
   工作区(`loadProject`),按 `?s=` 载该会话对话(`loadChatSession`)。**废弃** workspace 快照路径。
   - **URL 取舍(已定本方案)**:`?p=` 是**主**载体(项目 = 表单 = 可分享/书签的单位),`?s=` 是
-    项目内的活跃对话。缺 `?s=` → 退化到该项目最近会话(updated_at DESC)或新建。缺 `?p=` →
-    `getOrCreateProjectId` 退化到当前/新建项目(同 §26.2 不报错纪律)。
+    项目内的活跃对话。缺 `?s=` → 退化到该项目最近会话(updated_at DESC)或新建。缺路径项目 id →
+    解析顺序 = localStorage 活跃项目 → **都没有则 `listProjects()` resume 最近项目(updated_at DESC)、
+    owner 无任何项目才 mint 新的**(PR-C 落地;老板拍板 = resume,避免现有/刚迁移 owner 裸开看不到
+    已迁数据;同 §26.2 不报错纪律)。**注**:URL 最终定案为**路径化 `/p/:projectId`**(非本稿早写的
+    `?p=` query),设置浮层嵌 `/p/:id/settings/:tab`,见 SPEC §26「A' 前端接线」。
 - **影响场景**:`url-state-persistence.feature` 全部「会话进 URL」场景要补 `?p=` 维度:
   「进入设计器规整 `?p=&s=` 进 URL」「带参刷新恢复**项目工作区** + 会话对话」「切对话改 `?s=`
   但 `?p=` 不变、工作区不动」「切项目改 `?p=`(并落到该项目最近会话)」「后退在**对话**间

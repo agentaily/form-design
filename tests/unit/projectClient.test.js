@@ -14,6 +14,7 @@ import {
   DESIGN_PROJECT_ID_KEY,
   PROJECTS_PATH,
   getOrCreateProjectId,
+  readStoredProjectId,
   setActiveProjectId,
   newProjectId,
   loadProject,
@@ -126,6 +127,40 @@ describe("projectClient · getOrCreateProjectId", () => {
     expect(typeof a).toBe("string");
     expect(a.length).toBeGreaterThan(0);
     expect(b).toBe(a); // the in-memory mirror coheres the page
+  });
+});
+
+describe("projectClient · readStoredProjectId (A' resume — no mint)", () => {
+  it("returns a pre-existing stored id WITHOUT minting", () => {
+    const store = installFakeLocalStorage();
+    store.setItem(DESIGN_PROJECT_ID_KEY, "pj-prior");
+    expect(readStoredProjectId()).toBe("pj-prior");
+  });
+
+  it("returns '' when storage is available but empty (NOT a mint, NOT a stale mirror)", () => {
+    installFakeLocalStorage();
+    expect(readStoredProjectId()).toBe("");
+    // and it didn't write anything (no side effect, unlike getOrCreate).
+    expect(localStorage.getItem(DESIGN_PROJECT_ID_KEY)).toBeNull();
+  });
+
+  it("falls back to the in-memory mirror only when storage is unavailable (throws)", () => {
+    // seed the mirror via a working store first…
+    const store = installFakeLocalStorage();
+    setActiveProjectId("pj-mirror");
+    expect(store.getItem(DESIGN_PROJECT_ID_KEY)).toBe("pj-mirror");
+    // …then make storage throw → the mirror is the only coherence left.
+    vi.stubGlobal("localStorage", {
+      getItem() {
+        throw new Error("unavailable");
+      },
+      setItem() {
+        throw new Error("unavailable");
+      },
+      removeItem() {},
+      clear() {},
+    });
+    expect(readStoredProjectId()).toBe("pj-mirror");
   });
 });
 

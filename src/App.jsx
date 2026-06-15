@@ -79,7 +79,7 @@ import {
   toPersistedTurns,
 } from "./core/chatSessionClient";
 import {
-  getOrCreateProjectId,
+  readStoredProjectId,
   setActiveProjectId,
   newProjectId,
   loadProject as loadProjectClient,
@@ -409,16 +409,29 @@ function DesignerApp({
   // mirroring the session-id resolution below:
   //   1. the URL's /p/:projectId path (a refresh / deep-link / shared link names the project) — make
   //      it active (localStorage + mirror) so a subsequent reload without touching the URL resumes it.
-  //   2. else getOrCreate (the localStorage-backed default, minted on first ever entry into设计器).
-  // A blank/malformed /p/ falls through to getOrCreate (degrade, never throw, §A'.1).
+  //   2. else the prior active project from localStorage (resume where the owner left off).
+  //   3. else mint a FRESH project — but mark it (freshProjectRef) so the logged-in mount restore can
+  //      first try to RESUME the owner's most-recent SERVER project (listProjects, §A' cutover): an
+  //      existing / just-migrated owner opening a bare URL should land on their data, not an empty new
+  //      project. Only when the owner truly has no projects does the fresh one stick.
   const projectIdRef = useRef(null);
+  // Marks "projectIdRef was freshly minted (no URL, no prior localStorage)" → the mount restore tries
+  // listProjects() to resume the most-recent server project before committing to this fresh id.
+  const freshProjectRef = useRef(false);
   if (!projectIdRef.current) {
     const fromUrl = readProjectId(pathname);
     if (fromUrl) {
       setActiveProjectId(fromUrl);
       projectIdRef.current = fromUrl;
     } else {
-      projectIdRef.current = getOrCreateProjectId();
+      const stored = readStoredProjectId();
+      if (stored) {
+        setActiveProjectId(stored);
+        projectIdRef.current = stored;
+      } else {
+        projectIdRef.current = newProjectId();
+        freshProjectRef.current = true;
+      }
     }
   }
 
@@ -901,14 +914,36 @@ function DesignerApp({
   // effect from re-entering.
   useEffect(() => {
     if (!loggedIn || restoredRef.current) return;
-    enterProject(projectIdRef.current, {
-      preferredSessionId: readSessionId(search),
-      // Bare load (no ?s=, no sessions yet) reuses the first-render-resolved session id (the
-      // localStorage-backed designSessionId) instead of minting a fresh one — no URL churn on mount,
-      // and a refresh resumes the SAME conversation deterministically (fixes an e2e flake).
-      fallbackSessionId: sessionIdRef.current,
-      urlMode: "replace",
-    });
+    restoredRef.current = true; // guard StrictMode's double-invoke + the empty-deps re-fire (we resolve once)
+    (async () => {
+      let projectId = projectIdRef.current;
+      // A' cutover: a FRESHLY-minted project (no URL, no prior localStorage) → first try to RESUME the
+      // owner's most-recent SERVER project (updated_at DESC), so an existing / just-migrated owner
+      // opening a bare URL lands on their data instead of an empty new project. Keep the fresh id only
+      // when the owner truly has no projects (or the lookup fails — best-effort).
+      if (freshProjectRef.current) {
+        try {
+          const { projects } = await listProjects();
+          if (Array.isArray(projects) && projects.length > 0) {
+            projectId = projects[0].projectId;
+            projectIdRef.current = projectId;
+            setActiveProjectId(projectId);
+          }
+        } catch {
+          /* best-effort — keep the freshly-minted project */
+        }
+      }
+      enterProject(projectId, {
+        preferredSessionId: readSessionId(search),
+        // Bare load (no ?s=, no sessions yet) reuses the first-render-resolved session id (the
+        // localStorage-backed designSessionId) instead of minting a fresh one — no URL churn on mount,
+        // and a refresh resumes the SAME conversation deterministically (fixes an e2e flake). When we
+        // resumed a different project above, that project's own most-recent session wins (list lookup
+        // inside enterProject), so this fallback only applies to a genuinely empty project.
+        fallbackSessionId: sessionIdRef.current,
+        urlMode: "replace",
+      });
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loggedIn]);
 

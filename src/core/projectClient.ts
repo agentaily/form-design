@@ -150,6 +150,30 @@ export function getOrCreateProjectId(): string {
 }
 
 /**
+ * Read the persisted design-project id WITHOUT minting one (A' resume): returns the localStorage
+ * {@link DESIGN_PROJECT_ID_KEY} value (or the in-memory mirror), or "" when none has ever been
+ * stored. Unlike {@link getOrCreateProjectId} this has NO side effects — App uses it on mount to tell
+ * "the owner has a prior active project (resume it)" apart from "truly first entry" (then resume the
+ * owner's most-recent server project via {@link listProjects}, else mint).
+ */
+export function readStoredProjectId(): string {
+  try {
+    const existing = localStorage.getItem(DESIGN_PROJECT_ID_KEY);
+    if (existing) {
+      memProjectId = existing;
+      return existing;
+    }
+    // localStorage works but holds no project id → none stored. Do NOT fall back to the in-memory
+    // mirror here: when storage is available it is the source of truth, and a stale mirror would
+    // wrongly report a stored project (resume the wrong one / skip the most-recent lookup).
+    return "";
+  } catch {
+    // storage genuinely unavailable (private mode / sandboxed) → the mirror is the only coherence.
+    return memProjectId ?? "";
+  }
+}
+
+/**
  * Make `id` the active design-project id (§A'.1) — used when the owner enters another project
  * (e.g.「继续编辑」reverse-resolves a published form's project). Writes it to localStorage so a
  * reload resumes THIS project, and updates the in-memory mirror so {@link getOrCreateProjectId}
