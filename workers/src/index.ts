@@ -97,7 +97,9 @@ import {
   upsertChatSession,
   listChatSessions,
   deleteChatSession,
+  renameChatSession,
 } from "./chatSessions";
+import { loadProject, upsertProject, listProjects, deleteProject } from "./projects";
 import {
   rateLimit,
   SUBMIT_RATE_LIMITS,
@@ -344,6 +346,16 @@ app.get("/api/chat/sessions", guard);
 app.delete("/api/chat/session/:sessionId", guard);
 app.get("/api/chat/session/:sessionId", guard);
 app.put("/api/chat/session/:sessionId", guard);
+// 项目级工作区 + 会话重命名（A' 项目↔对话，§26.10 / PR-A），owner-only。逐条点名 method+path
+// （不用宽匹配，与上面 chat session 同纪律）。**注意路由区分**：`/api/projects`（复数、无 :id，
+// 列表）与 `/api/projects/:projectId`（单项目）是两条不同路由，Hono 精确匹配区分；逐条挂 guard，
+// 绝不用宽匹配，否则 `:projectId` 段会把列表路由也吞进来。都按 (owner_id, project_id) 隔离。
+app.get("/api/projects", guard);
+app.get("/api/projects/:projectId", guard);
+app.put("/api/projects/:projectId", guard);
+app.delete("/api/projects/:projectId", guard);
+// PATCH /api/chat/session/:sessionId → owner 重命名自己的一段会话（写 title 列，§26.10）。
+app.patch("/api/chat/session/:sessionId", guard);
 // POST /api/auth/verify-email/request → owner-only 重发验证邮件（§23.3）。其它三个邮件端点
 // （verify-email/confirm、password-reset/request、password-reset/confirm）是**公开**，不挂 guard。
 app.post("/api/auth/verify-email/request", guard);
@@ -1153,6 +1165,114 @@ app.get("/api/chat/sessions", async (c) => {
 app.delete("/api/chat/session/:sessionId", async (c) => {
   const ok = await deleteChatSession(c.env.DB, c.get("session").sub, c.req.param("sessionId"));
   return ok ? c.json({ deleted: true }, 200) : c.json({ error: "会话不存在" }, 404);
+});
+
+// ---------------------------------------------------------------------------
+// 项目级工作区 + 会话重命名（A' 项目↔对话，§26.10 / PR-A）——owner-only，已挂 guard。
+// 都按 (owner_id, project_id) 隔离（ownerId = c.get("session").sub）；纯加性，现有路由不改。
+// ---------------------------------------------------------------------------
+
+// GET /api/projects — owner 列出自己名下的全部项目摘要（owner-only，已挂 guard，§26.10）。
+// 仅 WHERE owner_id=?（跨 owner 隔离，§26.8），按 updated_at DESC（最近在前）；每项含 title
+// （从 meta.title 推，空回退"未命名表单"）+ fieldCount + formSlug + updatedAt，不含工作区全量、
+// 不含 owner_id / 凭据（§26.8）。owner 名下零项目 → 200 { projects: [] }（正常空态，非错误）。
+app.get("/api/projects", async (c) => {
+  const projects = await listProjects(c.env.DB, c.get("session").sub);
+  return c.json({ projects }, 200);
+});
+
+// GET /api/projects/:projectId — 读回一个项目的工作区（owner-only，已挂 guard，§26.10）。
+// 命中 → 200 { project }（meta/fields 已 parse）；该 owner 从未存过这个 projectId（含「A 猜 B
+// 的 id」越权读）→ 200 { project: null }（正常空态，**非 404**，镜像 chat session GET，§26.8）。
+// 隔离靠 (owner_id, projectId) 复合键——绝不暴露别的 owner 的项目。响应不含 owner_id / 凭据。
+app.get("/api/projects/:projectId", async (c) => {
+  const ownerId = c.get("session").sub;
+  const projectId = c.req.param("projectId");
+  const project = await loadProject(c.env.DB, ownerId, projectId);
+  // null（未命中 / 越权）回 { project: null }，与「该 id 自己从没写过」同结果，不暴露 B 有此项目。
+  return c.json({ project }, 200);
+});
+
+// PUT /api/projects/:projectId — 写入 / 整段替换项目工作区（owner-only，已挂 guard，§26.10）。
+// 按 (owner_id, projectId) upsert（last-write-wins），updated_at 刷新；可附 formSlug 关联已发布
+// 表单（缺省不清空已存的 slug）。非法 JSON / fields 非数组 / meta 非对象且非 null → 400，不落库。
+// 成功 → 200 { projectId, updatedAt }。表只存工作区模型，绝不存任何 owner 凭据（§26.8）。
+app.put("/api/projects/:projectId", async (c) => {
+  const ownerId = c.get("session").sub;
+  const projectId = c.req.param("projectId");
+
+  // 1) 解析 + 形状校验。非 JSON → 400，不落库。
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const body = (raw ?? {}) as { meta?: unknown; fields?: unknown; formSlug?: unknown };
+  // fields 必须是数组。非数组 → 400，不落库。
+  if (!Array.isArray(body.fields)) {
+    return c.json({ error: "fields 必须是数组" }, 400);
+  }
+  // meta 缺省按 null；若显式存在则必须是对象或 null（非对象 / 非 null → 400）。
+  let meta: unknown | null = null;
+  if (body.meta !== undefined) {
+    const isObject =
+      typeof body.meta === "object" && body.meta !== null && !Array.isArray(body.meta);
+    if (!(isObject || body.meta === null)) {
+      return c.json({ error: "meta 必须是对象或 null" }, 400);
+    }
+    meta = body.meta;
+  }
+  // formSlug 可选：显式 string → 关联；其它（含 undefined / null）→ undefined（缺省不清空）。
+  const formSlug = typeof body.formSlug === "string" ? body.formSlug : undefined;
+
+  // 2) 整段 upsert（last-write-wins），按 (owner_id, projectId) 隔离。
+  const result = await upsertProject(c.env.DB, ownerId, projectId, {
+    meta,
+    fields: body.fields,
+    formSlug,
+  });
+
+  return c.json(result, 200);
+});
+
+// DELETE /api/projects/:projectId — owner 删自己名下指定项目（owner-only，已挂 guard，§26.10）。
+// **级联**删其下会话（项目没了对话无处挂）：先删本项目的 chat_sessions、再删 projects 行。
+// 项目存在并删到 → 200 { deleted: true }；无匹配项目行（从未存过 / 属于别的 owner）→
+// 404 { error: "项目不存在" }——A 删 B 的 id → A 名下无此项目行 → false → 404，B 的项目+会话不动。
+app.delete("/api/projects/:projectId", async (c) => {
+  const ok = await deleteProject(c.env.DB, c.get("session").sub, c.req.param("projectId"));
+  return ok ? c.json({ deleted: true }, 200) : c.json({ error: "项目不存在" }, 404);
+});
+
+// PATCH /api/chat/session/:sessionId — owner 重命名自己名下指定会话（owner-only，已挂 guard，
+// §26.10）。写 title 列（不刷 updated_at，rename 不顶列表顺序）。非法 JSON / title 非 string /
+// title trim 后为空 → 400，不落库。改到 → 200 { renamed: true }；无匹配行（从未存过 / 属于别的
+// owner）→ 404 { error: "会话不存在" }——A rename B 的 id → A 名下无此行 → false → 404，B 不动。
+app.patch("/api/chat/session/:sessionId", async (c) => {
+  const ownerId = c.get("session").sub;
+  const sessionId = c.req.param("sessionId");
+
+  // 1) 解析 + 校验。非 JSON → 400，不落库。
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const body = (raw ?? {}) as { title?: unknown };
+  // title 必须是 string，trim 后非空（空标题无意义 → 400，不落库）。
+  if (typeof body.title !== "string") {
+    return c.json({ error: "title 必须是字符串" }, 400);
+  }
+  const title = body.title.trim();
+  if (title.length === 0) {
+    return c.json({ error: "title 不能为空" }, 400);
+  }
+
+  // 2) 写 title 列，按 (owner_id, sessionId) 隔离。无匹配行 → 404。
+  const renamed = await renameChatSession(c.env.DB, ownerId, sessionId, title);
+  return renamed ? c.json({ renamed: true }, 200) : c.json({ error: "会话不存在" }, 404);
 });
 
 export default app;

@@ -1250,6 +1250,11 @@ ALTER TABLE forms ADD COLUMN feishu_table_id  TEXT;  -- per-form 数据表 id，
 | `GET /api/chat/session/:sessionId` | owner（设计器） | **owner-only** | 读回**当前 owner**按 `(owner_id, sessionId)` 持久化的设计对话；从未持久化 → `{ session: null }`（§26）|
 | `PUT /api/chat/session/:sessionId` | owner（设计器） | **owner-only** | upsert**当前 owner**该会话的 UI 回合 + LLM 历史（§26）|
 | `DELETE /api/chat/session/:sessionId` | owner（设计器） | **owner-only** | 删**当前 owner**该会话；删到 → `{ deleted: true }`，无匹配行 → **404**（§26.9）|
+| `PATCH /api/chat/session/:sessionId` | owner（设计器） | **owner-only** | rename**当前 owner**该会话（body `{ title }` 改 title 列）；改到 → `{ renamed: true }`，无匹配行 → **404**（§26.9，A'）|
+| `GET /api/projects` | owner（设计器） | **owner-only** | 列**当前 owner**全部项目摘要（`ProjectSummary[]`，updated_at DESC）；零项目 → `{ projects: [] }`（§26.10，A'）|
+| `GET /api/projects/:projectId` | owner（设计器） | **owner-only** | 读**当前 owner**按 `(owner_id, projectId)` 的项目级工作区；从未存在 → `{ project: null }`（§26.10，A'）|
+| `PUT /api/projects/:projectId` | owner（设计器） | **owner-only** | upsert**当前 owner**该项目工作区（`meta` + `fields`，可附 `formSlug`）（§26.10，A'）|
+| `DELETE /api/projects/:projectId` | owner（设计器） | **owner-only** | 删**当前 owner**该项目**并级联删其下会话**；删到 → `{ deleted: true }`，无匹配行 → **404**（§26.10，A'）|
 | `POST /api/forms` | owner（设计器） | **owner-only** | 发布表单，归属**当前 owner**（§16） |
 | `GET /api/forms` | owner（管理台） | **owner-only** | 只列**当前 owner**的表单（§21） |
 | `PATCH /api/forms/:slug` | owner | **owner-only** | 改表单，须属**当前 owner**，否则 404（§17.9 / §21） |
@@ -1972,7 +1977,11 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 >
 > **不在本节：** 历史裁剪 / 上下文窗口压缩、对话搜索、删除单条回合、协作 / 实时同步。**多会话列表 / 切换的 UI 放置**（芯片 / 列表组件挂在哪）由设计另拍，本节只钉后端列表 / 删除端点 + 列表项契约（§26.9）。
 >
-> **URL 状态持久化 + 工作区恢复（PR #76，纯前端、无新 D1 / migration）：** 活跃 `designSessionId` 反映进设计器 URL 的 **`?s=<sessionId>` query**（`src/core/router.ts` `readSessionId` / `withSessionId`；与 `/settings/:tab` 路径正交、可共存）：进设计器即把会话规整进 URL（`replaceState`），带 `?s=` 刷新 / 深链 / 分享 → `setActiveDesignSessionId` + 按该 id 走本节的恢复路径；新建 / 切换 `pushState`、浏览器前进后退切回对应会话。**乱序到达防护：** 每次异步会话加载（mount 恢复 + 切换 + popstate）领一个单调 load-sequence token，await 回来后只在「仍是最新加载且活跃会话未变」时才应用——否则**绝不**用过期结果覆盖当前会话（不串会话）。**工作区（右侧表单预览模型）恢复：** §26 只持久化对话（`turns` + `history`），不存表单模型；回放 tool 调用重建不可靠（字段 `uid` 与消息 id 交错→引用错位）。故把模型快照（`meta` + `fields`）作为**一条合成 turn**（`id = WORKSPACE_SNAPSHOT_ID`、`role: "assistant"`、`kind: "workspace"`）搭进 §26.6 既有的**不透明 `turns_json`**（后端零改、不影响按 `role==="user"` 推的 `title` / `turnCount`），恢复时由 `splitWorkspaceSnapshot` 摘出重建预览、绝不渲染成对话气泡（`src/core/chatSessionClient.ts` `buildWorkspaceSnapshotTurn` / `splitWorkspaceSnapshot`）。行为契约见 `features/url-state-persistence.feature`。
+> **URL 状态持久化 + 工作区恢复（PR #76，纯前端、无新 D1 / migration）：** 活跃 `designSessionId` 反映进设计器 URL 的 **`?s=<sessionId>` query**（`src/core/router.ts` `readSessionId` / `withSessionId`；与 `/settings/:tab` 路径正交、可共存）：进设计器即把会话规整进 URL（`replaceState`），带 `?s=` 刷新 / 深链 / 分享 → `setActiveDesignSessionId` + 按该 id 走本节的恢复路径；新建 / 切换 `pushState`、浏览器前进后退切回对应会话。**乱序到达防护：** 每次异步会话加载（mount 恢复 + 切换 + popstate）领一个单调 load-sequence token，await 回来后只在「仍是最新加载且活跃会话未变」时才应用——否则**绝不**用过期结果覆盖当前会话（不串会话）。**工作区（右侧表单预览模型）恢复（#76 灰度期机制，仍活着）：** §26 只持久化对话（`turns` + `history`），不存表单模型；回放 tool 调用重建不可靠（字段 `uid` 与消息 id 交错→引用错位）。故把模型快照（`meta` + `fields`）作为**一条合成 turn**（`id = WORKSPACE_SNAPSHOT_ID`、`role: "assistant"`、`kind: "workspace"`）搭进 §26.6 既有的**不透明 `turns_json`**（后端零改、不影响按 `role==="user"` 推的 `title` / `turnCount`），恢复时由 `splitWorkspaceSnapshot` 摘出重建预览、绝不渲染成对话气泡（`src/core/chatSessionClient.ts` `buildWorkspaceSnapshotTurn` / `splitWorkspaceSnapshot`）。行为契约见 `features/url-state-persistence.feature`。**注意（A' 重构）：** 这条「工作区快照骑在 `turns_json`」是 #76 的灰度期做法，**A' 项目层落地后将被废弃**——工作区上提到项目级 `projects` 表（见下方「A' 项目层」 + §26.10）。废弃发生在前端切到项目级工作区的 PR-C / PR-D，本节描述在灰度窗口内**仍然有效**。
+
+> **A' 项目层（「项目 ↔ 对话」重构，加性灰度落地中）：** 把工作区从「骑在每条会话的 `turns_json` 里」上提到**项目级**。一个**项目** = 一份表单的容器（新建 `projects` 表，§26.10，按 client-minted UUID `project_id` keying，键 `(owner_id, project_id)`），承载**项目级共享工作区**（表单 `meta` + `fields`）；一个项目下可有多条**会话**（聊天线索），它们**共编同一份表单**——切对话只换左侧对话、右侧工作区不变。会话因此退化为「同一表单下的多条编辑线索」：`chat_sessions` 加可空 `project_id`（归到项目下）+ 可编辑 `title`（显式标题，缺省回退 §26.9 推导）。详见 `docs/refactor-project-conversation.md`。
+> 
+> **本批是 PR-A，纯加性 / 灰度：** 0007 migration 只**新建 `projects` 表 + 给 `chat_sessions` 加可空列 + 加索引**，新端点（§26.1 的 projects 四端点 + rename）全部**加性新增**。**旧前端（未切 A'）照常工作**——它不传 `project_id`，会话仍按 `(owner_id, session_id)` 定位（§26.2），工作区仍走上面 #76 的快照路径，本批不动它。**前端真正切到项目级工作区在 PR-C**（按 `project_id` 载工作区、`switchSession` 不动工作区、`persistTurn` 拆两写）；老会话各成单对话项目的一次性数据迁移是 PR-B。本节及 §26.10 只钉**PR-A 的后端结构 + 端点契约**，前端接线 / URL `?p=` 载体在 PR-C 章节细化。
 
 ### 26.1 端点职责与鉴权
 
@@ -1982,8 +1991,13 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 | `GET /api/chat/session/:sessionId` | owner（设计器） | **owner-only**（§17） | 按 `(owner_id, sessionId)` 读回一段已持久化的设计对话；从未持久化 → `{ session: null }`（非 404）|
 | `PUT /api/chat/session/:sessionId` | owner（设计器） | **owner-only**（§17） | 按 `(owner_id, sessionId)` upsert（整段替换）该会话的 UI 回合 + LLM 历史；可附 `formSlug` 关联已发布表单 |
 | `DELETE /api/chat/session/:sessionId` | owner（设计器） | **owner-only**（§17） | 删 `(owner_id, sessionId)` 行；删到 → `200 { deleted: true }`，无匹配行（从未存在 / 属于别的 owner）→ **404** `{ error: "会话不存在" }`（§26.9）|
+| `PATCH /api/chat/session/:sessionId` | owner（设计器） | **owner-only**（§17） | **rename**：body `{ title }` → 改 `(owner_id, sessionId)` 行的 `title` 列；改到 → `200 { renamed: true }`，无匹配行 → **404** `{ error: "会话不存在" }`（§26.9，A'）|
+| `GET /api/projects` | owner（设计器） | **owner-only**（§17） | 列**当前 owner**全部项目摘要（`ProjectSummary[]`，按 `updated_at DESC`）；零项目 → `{ projects: [] }`（§26.10，A'）|
+| `GET /api/projects/:projectId` | owner（设计器） | **owner-only**（§17） | 按 `(owner_id, projectId)` 读回项目级工作区（`meta` + `fields` + `formSlug`）；从未存在 → `{ project: null }`（非 404，§26.10，A'）|
+| `PUT /api/projects/:projectId` | owner（设计器） | **owner-only**（§17） | 按 `(owner_id, projectId)` upsert（整段替换）项目工作区（`meta` + `fields`，可附 `formSlug`）（§26.10，A'）|
+| `DELETE /api/projects/:projectId` | owner（设计器） | **owner-only**（§17） | 删 `(owner_id, projectId)` 行**并级联删其下全部会话**；删到 → `200 { deleted: true }`，无匹配行 → **404**（§26.10，A'）|
 
-> 四端点都 owner-only，挂 §17 的 `requireAuth` 中间件，`ownerId = c.get('session').sub`。设计对话本就 owner-only（§13 `POST /api/chat`），持久化沿用同一道门——陌生人读不到任何 owner 的对话。注意路径区分：`/api/chat/sessions`（列表，复数、无 `:id`）vs `/api/chat/session/:sessionId`（单会话 GET/PUT/DELETE，单数 + `:id`）。
+> 设计对话 / 项目相关端点都 owner-only，挂 §17 的 `requireAuth` 中间件，`ownerId = c.get('session').sub`。设计对话本就 owner-only（§13 `POST /api/chat`），持久化沿用同一道门——陌生人读不到任何 owner 的对话 / 项目。注意路径区分：`/api/chat/sessions`（会话列表，复数、无 `:id`）vs `/api/chat/session/:sessionId`（单会话 GET/PUT/DELETE/**PATCH**，单数 + `:id`）；`/api/projects`（项目列表）vs `/api/projects/:projectId`（单项目 GET/PUT/DELETE）。**rename 用独立 `PATCH`**（不复用 PUT 带 title，避免和整段 turns/history upsert 混淆）；`PUT /api/projects/:projectId` 只承载工作区整段替换，会话归属由 `chat_sessions.project_id` 列承载（§26.10）。
 
 ### 26.2 keying 决策（本节的 load-bearing 取舍）
 
@@ -2077,6 +2091,8 @@ owner 点邮件里的链接，落到这个公开端点（不需要 session——
 CREATE TABLE IF NOT EXISTS chat_sessions (
   owner_id     TEXT NOT NULL,    -- owner 的真实 user id（users.id，§17.11）；隔离键
   session_id   TEXT NOT NULL,    -- 客户端生成的稳定 design session id（§26.2）
+  project_id   TEXT,             -- A'：归属项目（projects.project_id，§26.10）；回填后逻辑非空、物理可空
+  title        TEXT,             -- A'：可编辑显式标题；NULL → 运行期 deriveSessionTitle 推导回退（§26.9）
   turns_json   TEXT NOT NULL,    -- 序列化的 PersistedTurn[]（UI 回合，按原顺序）
   history_json TEXT NOT NULL,    -- 序列化的 ChatMessage[]（OpenAI LLM 历史，含 system）
   form_slug    TEXT,             -- 发布后关联的 forms.slug（§26.2）；未发布为 NULL，可空
@@ -2084,11 +2100,15 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
   updated_at   TEXT NOT NULL,    -- ISO-8601，每次写入刷新
   PRIMARY KEY (owner_id, session_id)
 );
+-- A'：会话列表按当前项目过滤用（§26.9 可选 project 过滤、§26.10）
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_owner_project ON chat_sessions (owner_id, project_id);
 ```
 
 - **复合主键 `(owner_id, session_id)`：** 每个 owner 的每个 session 一行；同 owner 重复 `PUT` upsert 自己那行。复合键天然让「同一 session id 在不同 owner 名下互不相干」——隔离不靠运行期过滤，靠键本身（§26.2）。
 - **`owner_id` 与 `users.id` 的关系：** 同 `owner_config` / `forms` 的约定（§17.11）——是发起持久化的 owner 的真实 user id，所有读 / 写按它隔离。
-- **`form_slug` 与 `forms.slug` 的关系（弱关联，可空）：** 发布后填入，**软引用** `forms.slug`；不设强外键（一段对话可能始终没发布 → 恒 `NULL`；slug 删除后会话不必连删，留作历史）。它只用于「这段对话设计的是哪张表」的关联查询，不参与定位会话（定位永远靠复合主键）。
+- **`project_id`（A'，可空 → 回填后逻辑非空）：** 会话归属的项目（软引用 `projects.project_id`，§26.10）。SQLite/D1 的 `ALTER TABLE ADD COLUMN` 不能给非空表加 `NOT NULL` 无默认列，故**物理可空**、靠回填（PR-B 数据迁移）+ 应用层保证逻辑非空。**灰度期可空**正是加性的关键：旧前端不传 `project_id`，老行 `project_id` 为 `NULL`，仍按 `(owner_id, session_id)` 正常读 / 写（§26.2 兼容）。带 `idx_chat_sessions_owner_project` 复合索引供「列本项目会话」用（§26.9）。
+- **`title`（A'，可空，显式标题）：** owner 给会话起的显式标题（经 `PATCH /api/chat/session/:sessionId` rename 写入）。`NULL` = 未显式命名 → 列表里回退到 §26.9 的运行期推导（`deriveSessionTitle`，首条 user 消息截断）。语义：**行里 `title` 列优先，仅当为 `NULL` 才回退推导**。
+- **`form_slug` 与 `forms.slug` 的关系（弱关联，可空）：** 发布后填入，**软引用** `forms.slug`；不设强外键（一段对话可能始终没发布 → 恒 `NULL`；slug 删除后会话不必连删，留作历史）。它只用于「这段对话设计的是哪张表」的关联查询，不参与定位会话（定位永远靠复合主键）。**A' 注意：** `form_slug` 长期上移到 **project 行**（一项目一表单一 slug，§26.10）；`chat_sessions.form_slug` 列在灰度期**保留一版**以兼容旧前端，PR-D 收口时再视情清理（长期真相源是 `projects.form_slug`）。
 - **`turns_json` / `history_json`：** 序列化的两份转写（§26.6），整段 `PUT` 时整列覆盖。表只存对话转写 + 关联 slug，**绝不**存任何凭据（§26.6）。
 
 ### 26.8 多租户数据隔离 + 横向越权（沿用 §17.9 纪律）
@@ -2122,7 +2142,8 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 
 - 命中：`200`，`{ sessions }`，按 `updated_at DESC`（最近在前）。仅 `WHERE owner_id = ?`（跨 owner 隔离，§26.8）——只含本 owner 名下的会话。
 - **owner 名下零会话：** `200`，`{ "sessions": [] }`——正常空态（首次进入 / 全删了），**非错误**。
-- **`title` 推导（运行期，不存列）：** `turns_json` 里**首条** `role === "user"` 的 turn 的 `text`，trim 后截断到 **40 字**（超出补单个 `…`）。无 user turn / 空 / 损坏 `turns_json` → `"新会话"`。
+- **A' 可选 project 过滤：** `listChatSessions(db, ownerId, projectId?)` 接受**可选** `projectId`——传入 → `WHERE owner_id = ? AND project_id = ?`（只列本项目的会话，走 `idx_chat_sessions_owner_project`，§26.7）；不传 → 旧行为 `WHERE owner_id = ?`（全列出，灰度期旧前端路径不变）。**加性**：过滤是可选维度，不破旧契约。
+- **`title` 语义（A' 起：列优先，缺省回退推导）：** 列表项 `title` **优先用行里 `title` 列**（owner 经 rename 显式命名的，§26.7）；仅当 `title` 列为 `NULL` 才回退 §26.9 的**运行期推导**——`turns_json` 里**首条** `role === "user"` 的 turn 的 `text`，trim 后截断到 **40 字**（超出补单个 `…`）；无 user turn / 空 / 损坏 `turns_json` → `"新会话"`。
 - **`turnCount` 推导：** `turns_json` 里 `role === "user"` 的 turn 数（= 对话轮数 N 轮）。损坏 / 空 → `0`。
 - **`formSlug`：** 该会话行的 `form_slug`（已发布关联的 slug，未发布 `null`，§26.2）。
 - 缺 / 坏 / 过期 token：`401 { error }`，auth 中间件拦截（§17.6），不进入 handler。
@@ -2134,10 +2155,68 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 - 缺 / 坏 / 过期 token：`401 { error }`。
 - **路径与读 / 写复用同一段：** `DELETE` 走 `/api/chat/session/:sessionId`（与 `GET`/`PUT` 同路径、按 method 区分），列表是另一条 `/api/chat/sessions`（复数、无 `:id`）。
 
-> **数据层契约（`workers/src/chatSessions.ts`）：** `listChatSessions(db, ownerId)` → `ChatSessionSummary[]`（按 updatedAt DESC，零会话回 `[]`）；`deleteChatSession(db, ownerId, sessionId)` → `boolean`（删到 `true`，无行 `false`，route 把 `false` 映射成 `404`）。`title` / `turnCount` 各抽成可单测纯函数 `deriveSessionTitle(turnsJson)` / `countUserTurns(turnsJson)`（损坏 / 空防御性回 `"新会话"` / `0`）。前端镜像在 `src/core/chatSessionClient.ts`（`listChatSessions()` / `deleteChatSession(sessionId)` + `ChatSessionSummary` / `ListChatSessionsResult`）。
+#### `PATCH /api/chat/session/:sessionId` — rename 一段会话（owner-only，A'）
+
+请求体（JSON）：`{ "title": "活动报名表 v2" }`。
+
+- **改到（有匹配行）：** `200`，`{ "renamed": true }`。数据层 `UPDATE chat_sessions SET title = ? WHERE owner_id = ? AND session_id = ?` 写显式标题，**不刷 `updated_at`**——rename 只改标签、不该把会话顶到列表最前（列表按 `updated_at DESC` 排，rename 不动顺序）。改名后该会话在列表里**显示新标题**（`title` 列优先于推导，§26.9 / §26.7）。
+- **无匹配行：** `404`，`{ "error": "会话不存在" }`。涵盖「该 owner 从未存过这个 sessionId」与「该 id 属于别的 owner」两种（owner 隔离，同 §26.8 / DELETE 纪律，不暴露 B 有这段对话）。
+- **空 / 纯空白 title 被拒：** `title` trim 后为空 → `400 { "error": "title 不能为空" }`，**不落库**（rename 要求一个非空显式标题；「未命名会话回退到首条 user 消息推导」走的是 `title` 列从未被写过、保持 `NULL` 的天然回退路径，不靠「rename 成空清空」）。
+- 缺 / 坏 / 过期 token：`401 { error }`。请求体非合法 JSON：`400 { "error": "invalid JSON body" }`；`title` 非 string：`400 { "error": "title 必须是字符串" }`，均不落库。
+- **rename 用独立 `PATCH`**（不复用 `PUT` 带 title）：`PUT` 是整段 turns/history 替换（§26.3），rename 只动一列；独立端点避免「改个标题要带上全量转写」的负担与覆盖风险。
+
+> **数据层契约（`workers/src/chatSessions.ts`）：** `listChatSessions(db, ownerId, projectId?)` → `ChatSessionSummary[]`（按 updatedAt DESC，零会话回 `[]`；可选 `projectId` 过滤，§26.9）；`deleteChatSession(db, ownerId, sessionId, projectId?)` → `boolean`（删到 `true`，无行 `false`，route 把 `false` 映射成 `404`）；**A' 新增** `renameChatSession(db, ownerId, sessionId, title, projectId?)` → `boolean`（改到 `true`，无行 `false` → route `404`）。`title` 列优先、缺省回退 `deriveSessionTitle(turnsJson)`；`title` / `turnCount` 各抽成可单测纯函数 `deriveSessionTitle(turnsJson)` / `countUserTurns(turnsJson)`（损坏 / 空防御性回 `"新会话"` / `0`，作为 `title` 列 NULL 时的回退）。**灰度兼容：** `loadChatSession` / `upsertChatSession` / `deleteChatSession` 的 `projectId` 参数加在签名里但**可选 / 旧重载保留一版**，旧 route 编排不带 `projectId` 仍按 `(owner_id, session_id)` 工作（PR-A 加性，PR-D 收口）。前端镜像在 `src/core/chatSessionClient.ts`（`listChatSessions(projectId?)` / `deleteChatSession` / `renameChatSession` + `ChatSessionSummary` / `ListChatSessionsResult`）。
 
 #### 新建 / 切换会话（前端编排，无新端点）
 
 - **新建会话：** 前端换一个新 `designSessionId`（`getOrCreateDesignSessionId` 之外 mint 一个新 id 并指向它），清空当前对话工作区，开始新一段——首次 `PUT` 时落新行。
 - **切换会话：** 前端把活跃 `designSessionId` 指到列表里某个已存在的 sessionId，再 `GET /api/chat/session/:sessionId` 载回该会话的两份转写、重渲染对话区 + re-seed `historyRef`（§26.6 恢复路径，复用既有 `loadChatSession`）。
 - 这两者都**不**需要新后端端点——多行能力靠 `(owner_id, sessionId)` 复合键天然支持（§26.2）。
+- **A' 起（切换会话工作区不变）：** 切对话只重渲对话 + reseed history，**不动**右侧工作区——工作区是**项目级**的（§26.10），同项目下多条会话共编同一份表单。这是 A' 的核心行为修正（旧 #76 下「切对话 = 切到另一份工作区」与产品意图相反）。该前端行为切换在 **PR-C**；PR-A 只落后端结构 + 端点。
+
+### 26.10 项目级工作区（`projects` 表，A' 重构 · PR-A 加性）
+
+> **本小节是 A' 重构 PR-A 的核心后端结构。** 把工作区从「骑在每条会话的 `turns_json`」（#76，§26 引言）上提到**项目级**：一个**项目** = 一份表单的容器，承载共享的 `meta` + `fields`；项目下多条会话（§26.7 加了 `project_id`）共编这份表单，切对话不动工作区。**PR-A 纯加性 / 灰度**：新建 `projects` 表、新增 §26.1 的四个 owner-only 端点；旧前端不受影响（不传 `project_id`、工作区仍走 #76 快照）。前端真正切到项目级工作区在 PR-C，老会话各成单对话项目的一次性数据迁移在 PR-B。详见 `docs/refactor-project-conversation.md` §2 / §3。
+
+#### keying 决策（项目层，沿用 §26.2 取舍上提）
+
+**项目按【客户端生成、localStorage 持久化的稳定 `project_id`（UUID）】绑定，键 = `(owner_id, project_id)`。** 理由同 §26.2——**草稿发布前没有稳定的表单 slug**（slug 仅 `POST /api/forms` 后才有），所以 keying 不绑表单；只是把「client-minted 稳定 id」从 session 维度**上提为 project 维度**（草稿期、还没建任何字段就 mint，写 localStorage，不依赖表单 id）。发布后再把表单 `slug` **软引用**关联到 project（`projects.form_slug`，可空、无强外键）。
+
+#### D1 表结构（`projects`，新增 migration · 0007）
+
+新增一张 `projects` 表（每个 `(owner_id, project_id)` 一行）。**migration 文件本身由 implementer / release-eng 落地**（`workers/migrations/0007_projects_and_session_project.sql`，接在 `0006_form_feishu_table.sql` 之后；同一 migration 顺带给 `chat_sessions` 加 `project_id` / `title` + `idx_chat_sessions_owner_project`，见 §26.7）。本节只给**列契约**：
+
+```sql
+CREATE TABLE IF NOT EXISTS projects (
+  project_id  TEXT NOT NULL,    -- client-minted UUID（§26.10 keying）；草稿期即生成，不依赖表单 slug
+  owner_id    TEXT NOT NULL,    -- owner 的真实 user id（users.id，§17.11）；隔离键
+  meta_json   TEXT,             -- 序列化 FormMeta（title/description）；空项目可 NULL
+  fields_json TEXT,             -- 序列化 UiField[]（项目级工作区字段）；空项目可 NULL
+  form_slug   TEXT,             -- 发布后软引用 forms.slug；未发布 NULL，可空、无强外键
+  created_at  TEXT NOT NULL,    -- ISO-8601，首次写入
+  updated_at  TEXT NOT NULL,    -- ISO-8601，每次写入刷新
+  PRIMARY KEY (owner_id, project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects (owner_id);
+```
+
+- **复合主键 `(owner_id, project_id)`：** 同 `chat_sessions`（§26.8）的隔离纪律——靠键本身隔离、不靠运行期过滤。`project_id` 是 client-minted UUID（`crypto.randomUUID`），高熵不可猜；A 即便拿到 B 的 `project_id` 也读不到 B 的工作区（`WHERE owner_id = ? AND project_id = ?`）。
+- **`meta_json` / `fields_json` 可空：** owner 进项目还没建字段就能存在一个**空项目**（对话先于表单，同 §26.2 keying 不绑表单的根本原因，只是上提到项目）。读回时 `meta` 投影 `FormMeta | null`、`fields` 投影 `UiField[]`（NULL → `[]`）。
+- **`form_slug` 软引用（从 session 上移到 project）：** 发布后填，沿用 `chat_sessions.form_slug` 的弱关联语义（可空、无强外键、slug 删了项目不连删）。**A' 注意：** `form_slug` 从 session 行**上移**到 project 行——**一个项目一份表单一个 slug**，而非每条会话各持一个。`PUT` 缺省 `formSlug` 时**不清空**已存值（同 §26.3 form_slug 纪律，COALESCE 保留）。
+- **不含凭据：** 项目只存工作区模型（`meta` / `fields`）+ 关联 slug，**绝不**存任何凭据（同 §26.6）。响应投影**不含** `owner_id`。
+
+#### API 契约（§26.1 四端点）
+
+- **`GET /api/projects/:projectId`（读项目工作区）：** 命中 `200 { project }`（`ProjectRecord`：`{ projectId, meta, fields, formSlug, createdAt, updatedAt }`，`meta`/`fields` 已 JSON-parse）；该 owner 从未存过这个 `projectId` → `200 { "project": null }`（**非 404**，同 §26.3 GET 的「没这段就回 null」纪律，前端据 `null` 走空工作区分支）。
+- **`PUT /api/projects/:projectId`（整段 upsert 工作区）：** body `{ meta, fields, formSlug? }`，按 `(owner_id, projectId)` upsert（整段替换 `meta_json` / `fields_json`，刷 `updated_at`）→ `200 { projectId, updatedAt }`。`formSlug` 缺省**不清空**已存。请求体非合法 JSON / `fields` 非数组 → `400`，不落库。**save→load round-trip：** `PUT` 后 `GET` 原样回 `meta` + `fields` + `formSlug`（§project-workspace.feature）。
+- **`GET /api/projects`（列项目）：** `200 { projects }`（`ProjectSummary[]`，按 `updated_at DESC`，仅 `WHERE owner_id = ?` 跨 owner 隔离）；零项目 → `{ "projects": [] }`。`ProjectSummary`：`{ projectId, title, fieldCount, formSlug, updatedAt }`——`title` = `meta.title`，空则回退 `"未命名表单"`（运行期推导）；`fieldCount` = `fields` 长度。
+- **`DELETE /api/projects/:projectId`（删项目，级联删会话）：** 删到 `200 { deleted: true }`，无匹配行（从未存在 / 属于别的 owner）→ **404** `{ error: "项目不存在" }`（owner 隔离，同 §26.8 纪律）。**级联删其下全部会话：** 删项目时**连带删 `chat_sessions WHERE owner_id = ? AND project_id = ?` 的全部会话行**（项目没了，挂在它下面的对话无处可归）。这是老板拍定的数据语义（A' 开放点之一，见母本附录）。
+- 四端点均缺 / 坏 / 过期 token → `401 { error }`，auth 中间件拦截（§17.6），不进入 handler。
+
+> **数据层契约（`workers/src/projects.ts`，新文件）：** `loadProject(db, ownerId, projectId)` → `ProjectRecord | null`；`upsertProject(db, ownerId, projectId, input)` → `{ projectId, updatedAt }`；`listProjects(db, ownerId)` → `ProjectSummary[]`（按 updatedAt DESC，零项目回 `[]`）；`deleteProject(db, ownerId, projectId)` → `boolean`（删到 `true` + 级联删会话，无行 `false` → route `404`）。`title` 推导（`meta.title || "未命名表单"`）抽成可单测纯函数。类型契约见 `src/core/projectClient.ts`（PR-C 落，`ProjectRecord` / `ProjectUpsertInput` / `ProjectSummary` / `ProjectWorkspace`）。
+
+#### 多租户隔离 + 横向越权（沿用 §17.9 / §26.8 纪律）
+
+- **所有读 / 写按 `(owner_id, project_id)` 隔离：** `GET` / `PUT` / `DELETE` 数据层 `WHERE owner_id = ? AND project_id = ?`，列表 `WHERE owner_id = ?`，`ownerId = c.get('session').sub`。owner 只能读 / 写 / 删 / 列自己名下的项目。
+- **A 看不到 / 读不到 B 的项目：** 即便 A 拿到 B 的 `projectId`，`GET` 按 A 自己的 `owner_id` 查 → `{ project: null }`；列表只含 A 名下项目；删 B 的 `projectId` → A 名下无此行 → `404`，B 的项目**不动**（不暴露 B 有这个项目）。
+- **限流：** 各端点 owner-only（被 §17 鉴权门挡在匿名之外），按 §25.1 **不限流**（owner 烧自己的 D1）。

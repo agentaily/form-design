@@ -20,6 +20,7 @@ import chatSessionsSchema from "../migrations/0003_chat_sessions.sql?raw";
 import ownerDisplayName from "../migrations/0004_owner_display_name.sql?raw";
 import submissionsSchema from "../migrations/0005_submissions.sql?raw";
 import formFeishuTable from "../migrations/0006_form_feishu_table.sql?raw";
+import projectsAndSession from "../migrations/0007_projects_and_session_project.sql?raw";
 
 // Schema migrations applied to the test D1, in order — mirrors what prod gets via
 // `wrangler d1 migrations apply`. Append future schema migrations to this list.
@@ -29,6 +30,7 @@ import formFeishuTable from "../migrations/0006_form_feishu_table.sql?raw";
 //   0004 — users.display_name（owner 显示名，§17 个人资料）.
 //   0005 — submissions (提交落 D1 主存 + 飞书可选同步回执，§15 / §18).
 //   0006 — forms.feishu_app_token / feishu_table_id（per-form 飞书多维表格定位，§16.9）.
+//   0007 — projects 表 + chat_sessions.project_id/title（A' 项目↔对话，§26.10 / PR-A）.
 const SCHEMA_MIGRATIONS = [
   initialSchema,
   authTokensSchema,
@@ -36,6 +38,7 @@ const SCHEMA_MIGRATIONS = [
   ownerDisplayName,
   submissionsSchema,
   formFeishuTable,
+  projectsAndSession,
 ];
 
 /** The bindings the owner-config + owner-auth features rely on, surfaced for the tests. */
@@ -180,6 +183,16 @@ export async function resetAuthTokens(): Promise<void> {
  */
 export async function resetChatSessions(): Promise<void> {
   await testEnv.DB.exec("DELETE FROM chat_sessions");
+}
+
+/**
+ * Empty the `projects` table between scenarios (§26.10 / A' 项目↔对话). The project-workspace
+ * outer-loop / api tests upsert + list + delete projects per scenario (and assert on owner
+ * isolation / cascade delete), so each must start from a clean table. `applySchema` already
+ * builds it (0007 migration).
+ */
+export async function resetProjects(): Promise<void> {
+  await testEnv.DB.exec("DELETE FROM projects");
 }
 
 /**

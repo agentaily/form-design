@@ -4,3 +4,4 @@
 - [Settings overlay history state machine](project_settings_overlay_history.md) — PR #52 route-reflected overlay (pushState /settings, no unmount); the push-guard + deep-link close logic to re-scrutinize on future settings changes
 - [PR-4 飞书 link-less 实现在未提交工作树](project_pr61-feishu-linkless.md) — 审 pr61 要 diff HEAD 不是 origin/main;分支基于 pre-#63,origin/main 的 DS 降级噪音要忽略
 - [会话恢复乱序异步串会话](project_session-restore-out-of-order-async-race.md) — switchSession/mount-restore await 后不重校验 active id → 旧会话 load 晚到污染当前会话(PR #76 实测复现)
+- [PR#81 rename 三方漂移 + stale base](project_pr81-rename-spec-feature-code-drift.md) — A' PR-A:rename updated_at/清空 title/data-layer 签名 SPEC↔feature↔code 矛盾(代码对文档错);分支基于 #82 前会复活 pr-analyst.md
