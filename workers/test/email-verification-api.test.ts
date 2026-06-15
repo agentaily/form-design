@@ -39,7 +39,7 @@ import { issueToken } from "../src/tokens";
 const REGISTER = `${AUTH_BASE}/api/auth/register`;
 const VERIFY_REQUEST = `${AUTH_BASE}/api/auth/verify-email/request`;
 const VERIFY_CONFIRM = `${AUTH_BASE}/api/auth/verify-email/confirm`;
-const APP_BASE_URL = "https://form-design.agentaily.com"; // wrangler.toml [vars] (§22.1)
+const APP_BASE_URL = "https://form-design.studio.agentaily.com"; // wrangler.toml [vars] (§22.1) — app 设计工作台新域
 
 function postRegister(body: unknown): Promise<Response> {
   return SELF.fetch(REGISTER, {

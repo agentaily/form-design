@@ -5,7 +5,8 @@ Feature: CORS 跨源访问控制 覆盖所有 /api/* 端点
 
   背景：前端（CF Pages）与后端 API（Workers）不同源，浏览器对带自定义头的跨源请求会先发 OPTIONS 预检。
   后端用 Hono 内置 cors 中间件，对所有 /api/* 统一附加 Access-Control-* 头并应答预检。
-  允许的来源是一份白名单（生产 https://form-design.agentaily.com 与本地 http://localhost:5173），
+  允许的来源是一份白名单（app 设计工作台新域 https://form-design.studio.agentaily.com、
+  过渡期保留的旧 app 域 https://form-design.agentaily.com、与本地 http://localhost:5173），
   不退化成 *；允许方法 GET/POST/PUT/PATCH/DELETE/OPTIONS、允许头 Authorization 与 Content-Type；
   （PUT 是 §21/§26.10 的整段替换写端点所用方法——PUT /api/projects/:id 存项目工作区、
   PUT /api/chat/session/:id 存对话、PUT /api/auth/profile 改显示名。少了 PUT，浏览器预检会挡掉这些跨源
@@ -26,6 +27,16 @@ Feature: CORS 跨源访问控制 覆盖所有 /api/* 端点
     When 浏览器对 /api/forms 发起 OPTIONS 预检
     Then 响应状态码为 2xx
     And 响应头 Access-Control-Allow-Origin 回显该本地 dev 来源
+
+  Scenario: app 设计工作台新域 studio 也在白名单内
+    # 域名 swap 第①步：app 从主域搬到 form-design.studio.agentaily.com，浏览器从新域
+    # 调后端必须越过预检（GET/POST/PUT/PATCH/DELETE/OPTIONS 全放行），否则全被 CORS 挡。
+    Given 一个 Origin 为 app 新域 form-design.studio.agentaily.com 的请求
+    When 浏览器对 /api/submit 发起 OPTIONS 预检
+    Then 响应状态码为 2xx
+    And 响应头 Access-Control-Allow-Origin 回显该白名单来源
+    And 响应头 Access-Control-Allow-Methods 含 GET、POST、PUT、PATCH、DELETE
+    And 响应头 Access-Control-Allow-Headers 含 Authorization 与 Content-Type
 
   Scenario: PUT 写端点（项目工作区 / 对话 / 显示名）的预检放行 PUT
     # §21/§26.10 的整段替换写端点用 PUT；预检若不回 PUT，浏览器会挡掉实际写请求 →
