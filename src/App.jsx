@@ -1338,16 +1338,29 @@ function DesignerApp({
     setPublishError("");
     setEditBaseline(editSig(loadedMeta, loadedFields));
     setTab("preview");
-    // Persist the workspace to the project so a refresh restores it (loadProject), associating the slug.
-    Promise.resolve(
-      saveProjectWorkspace(projectId, {
+    // Persist the workspace to the project BEFORE we reflect /p/:projectId in the URL — and AWAIT it
+    // (was fire-and-forget). 漏网 bug: on the mint path (no existing project for this slug) this PUT is
+    // the ONLY workspace write; if the URL advanced to /p/:id while it was still in flight, a refresh
+    // navigated to /p/:id and ABORTED the pending PUT → the project row was never written → loadProject
+    // read back null → 工作台空. Awaiting here means the URL only ever exposes /p/:id AFTER the row is
+    // durable, so any refresh into /p/:id restores the workspace. A 401 routes into login; other
+    // failures stay best-effort (the next turn-end save re-establishes the row) but we still tried
+    // synchronously before exposing the URL.
+    try {
+      await saveProjectWorkspace(projectId, {
         meta: loadedMeta,
         fields: loadedFields.map(({ _new, ...rest }) => rest),
         formSlug: form.slug,
-      }),
-    ).catch(() => {
+      });
+    } catch (e) {
+      if (loadSeqRef.current !== myLoad) return; // superseded mid-flight → drop the stale error too
+      if (e instanceof ApiError && e.status === 401) {
+        needLogin(L("登录后继续编辑你的表单", "Sign in to continue editing your form"));
+        return;
+      }
       /* best-effort — the next turn-end save re-establishes the project row */
-    });
+    }
+    if (loadSeqRef.current !== myLoad) return; // a newer load superseded us during the save
     // Load the project's most-recent conversation as the REAL chat (no synthetic「已载入」note).
     try {
       const { sessions: list } = await listChatSessions(projectId);

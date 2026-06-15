@@ -85,9 +85,11 @@ describe("CORS /api/* (workers/features/cors.feature)", () => {
     // And 响应头 Access-Control-Allow-Origin 回显该白名单来源
     expect(res.headers.get("access-control-allow-origin")).toBe(PROD_ORIGIN);
 
-    // And 响应头 Access-Control-Allow-Methods 含 GET、POST、PATCH、DELETE
+    // And 响应头 Access-Control-Allow-Methods 含 GET、POST、PUT、PATCH、DELETE
+    // PUT 是 §21/§26.10 的整段替换写端点(PUT /api/projects|chat/session|auth/profile)所用方法；
+    // 漏掉它会让浏览器预检挡掉那些跨源写 → 工作区/对话刷新即丢（本回归根因）。
     const allowMethods = (res.headers.get("access-control-allow-methods") ?? "").toUpperCase();
-    for (const m of ["GET", "POST", "PATCH", "DELETE"]) {
+    for (const m of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
       expect(allowMethods).toContain(m);
     }
 
@@ -120,6 +122,31 @@ describe("CORS /api/* (workers/features/cors.feature)", () => {
     expect(res.status).toBeLessThan(300);
     // And 响应头带有 Access-Control-Allow-Origin
     expect(res.headers.get("access-control-allow-origin")).toBe(PROD_ORIGIN);
+  });
+
+  it("Scenario: PUT 写端点（项目工作区 / 对话 / 显示名）的预检放行 PUT", async () => {
+    // §21/§26.10 的整段替换写端点用 PUT。预检若不在 Allow-Methods 回 PUT,浏览器就会挡掉实际的
+    // 跨源 PUT(工作区 saveProjectWorkspace / 对话 saveChatTurns / 显示名 updateProfile)→ 这些写
+    // 全部「Failed to fetch」被前端 best-effort 吞掉 → 刷新即丢。这正是「继续编辑已发布表单 → 刷新 →
+    // 工作台空」的真实根因(用真实浏览器 PUT 才暴露;curl 种数据 + 浏览器 GET 的旧验收测不出)。
+    for (const path of [
+      "/api/projects/some-project-id",
+      "/api/chat/session/some-session-id",
+      "/api/auth/profile",
+    ] as const) {
+      const res = await preflight(path, PROD_ORIGIN, {
+        method: "PUT",
+        requestHeaders: "authorization,content-type",
+      });
+      // 预检越过 owner-only guard(不带 token 也 2xx,§19.1)。
+      expect(res.status, `PUT ${path} preflight must not 401`).not.toBe(401);
+      expect(res.status).toBeGreaterThanOrEqual(200);
+      expect(res.status).toBeLessThan(300);
+      expect(res.headers.get("access-control-allow-origin")).toBe(PROD_ORIGIN);
+      // 关键:Allow-Methods 必须含 PUT,否则浏览器挡掉实际写请求。
+      const allowMethods = (res.headers.get("access-control-allow-methods") ?? "").toUpperCase();
+      expect(allowMethods, `PUT ${path} must be allowed cross-origin`).toContain("PUT");
+    }
   });
 
   it("Scenario: owner-only 写端点（PATCH/DELETE）的预检无需 token 也返回 CORS 头", async () => {
