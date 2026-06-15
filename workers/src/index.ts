@@ -101,6 +101,11 @@ import {
 } from "./chatSessions";
 import { loadProject, upsertProject, listProjects, deleteProject } from "./projects";
 import {
+  migrateSessionsToProjects,
+  rollbackProjectMigration,
+  MIGRATE_CONFIRM,
+} from "./migrateProjects";
+import {
   rateLimit,
   SUBMIT_RATE_LIMITS,
   REGISTER_RATE_LIMIT,
@@ -356,6 +361,10 @@ app.put("/api/projects/:projectId", guard);
 app.delete("/api/projects/:projectId", guard);
 // PATCH /api/chat/session/:sessionId → owner 重命名自己的一段会话（写 title 列，§26.10）。
 app.patch("/api/chat/session/:sessionId", guard);
+// POST /api/admin/migrate-projects → 一次性数据迁移（A' 项目↔对话，PR-B），owner-only + owner-scoped。
+// 只迁调用者自己 project_id IS NULL 的老会话；dry-run 默认只读，apply / rollback 需 confirm。
+// **一次性端点**：PR-D 收口随快照逻辑一并删（见 workers/runbooks/0007-migrate-projects.md）。
+app.post("/api/admin/migrate-projects", guard);
 // POST /api/auth/verify-email/request → owner-only 重发验证邮件（§23.3）。其它三个邮件端点
 // （verify-email/confirm、password-reset/request、password-reset/confirm）是**公开**，不挂 guard。
 app.post("/api/auth/verify-email/request", guard);
@@ -1273,6 +1282,42 @@ app.patch("/api/chat/session/:sessionId", async (c) => {
   // 2) 写 title 列，按 (owner_id, sessionId) 隔离。无匹配行 → 404。
   const renamed = await renameChatSession(c.env.DB, ownerId, sessionId, title);
   return renamed ? c.json({ renamed: true }, 200) : c.json({ error: "会话不存在" }, 404);
+});
+
+// POST /api/admin/migrate-projects — A' 一次性数据迁移（PR-B，owner-only 已挂 guard）。**owner-scoped**：
+// 只处理调用者自己 `project_id IS NULL` 的老会话（A 动不了 B 的数据）。幂等（只碰 NULL-project 行）。
+//   body.mode:
+//     - "dry-run"（缺省 / 任何非 apply|rollback 值）→ 只读 + 报告、零写。
+//     - "apply"   → 先备份再迁；**需** body.confirm === MIGRATE_CONFIRM（不可逆写，防误触）。
+//     - "rollback"→ 从库内备份表还原；同样**需** confirm。
+// 成功 → 200 { mode, migrated, withSnapshot, withoutSnapshot, backedUp, restored?, samples }。
+// ⚠️ apply 生产是不可逆数据迁移，由老板手动触发（见 runbook），CI / 自动部署绝不调它。
+app.post("/api/admin/migrate-projects", async (c) => {
+  const ownerId = c.get("session").sub;
+
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    raw = {};
+  }
+  const body = (raw ?? {}) as { mode?: unknown; confirm?: unknown };
+  const mode = body.mode === "apply" || body.mode === "rollback" ? body.mode : "dry-run";
+
+  // apply / rollback 是不可逆写 → 要求显式 confirm 串，防误触。
+  if ((mode === "apply" || mode === "rollback") && body.confirm !== MIGRATE_CONFIRM) {
+    return c.json({ error: `${mode} 需要 confirm: "${MIGRATE_CONFIRM}"` }, 400);
+  }
+
+  if (mode === "rollback") {
+    const report = await rollbackProjectMigration(c.env.DB, { ownerId });
+    return c.json(report, 200);
+  }
+  const report = await migrateSessionsToProjects(c.env.DB, {
+    dryRun: mode === "dry-run",
+    ownerId,
+  });
+  return c.json(report, 200);
 });
 
 export default app;
