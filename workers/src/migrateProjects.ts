@@ -259,7 +259,8 @@ export async function migrateSessionsToProjects(
   const statements: D1PreparedStatement[] = [];
   plans.forEach((p, i) => {
     const original = rows[i];
-    // ① 备份原始行（OR IGNORE：重跑保住首迁的 pristine turns_json / 原 project id）。
+    // ① 备份原始行。OR IGNORE 是防御性冗余（正常路径不可达：已迁行 project_id 非 NULL → 永不
+    //    被重选为候选 → 永不重插）；保留它兜「备份行已存在」的意外，绝不覆盖首迁的 pristine 原值。
     statements.push(
       db
         .prepare(

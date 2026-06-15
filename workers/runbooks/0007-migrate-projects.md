@@ -80,8 +80,9 @@ curl -s -X POST https://form-design-api.agentaily.workers.dev/api/admin/migrate-
 ```
 
 报告字段:`migrated`(会迁多少行)、`withSnapshot` / `withoutSnapshot`(有/无快照各几行)、
-`samples[]`(前若干条:`sessionId` / `projectId`(本次会 mint 的) / `hadSnapshot` / `fieldCount` /
-`title`)。**肉眼核对** samples 的 `title` / `fieldCount` 跟你印象里的表单对得上。dry-run **零写**。
+`samples[]`(前若干条:`sessionId` / `projectId`(**示意值**——dry-run 每跑一次都另 mint,apply 时
+会重新 mint、**不复用**这里看到的 id)/ `hadSnapshot` / `fieldCount` / `title`)。**肉眼核对** samples
+的 `title` / `fieldCount` 跟你印象里的表单对得上。dry-run **零写**。
 
 ### 3. Apply(不可逆 · 老板拍板后才跑)
 
@@ -117,7 +118,13 @@ curl -s -X POST https://form-design-api.agentaily.workers.dev/api/admin/migrate-
   -d '{"mode":"rollback","confirm":"MIGRATE-A-PROJECTS"}' | jq   # → restored:N
 ```
 
-**全量回滚**(连库翻车 / 备份表也丢了 → 用第 1 步的导出):见 [RELEASE.md §7 回滚](../../RELEASE.md)。
+> ⚠️ **精准回滚只在「项目尚未被使用」的紧窗口内安全。** 它**盲目**把 `turns_json` 倒回旧值、删掉
+> mint 的项目——若此时 PR-C 已上线、owner 已在那个项目里编辑过工作区 / 新开过对话,这些**迁移后
+> 的新数据会被静默丢弃**。所以:apply 后**马上发现不对**→ 精准回滚安全;**已经用了一段**(PR-C 上线
+> 且动过项目)→ **别用精准回滚**,改用下面的全量回滚按 §7 处理。
+
+**全量回滚**(连库翻车 / 备份表也丢了 / 已过精准回滚安全窗 → 用第 1 步的导出):见
+[RELEASE.md §7 回滚](../../RELEASE.md)。
 
 ---
 
