@@ -20,6 +20,8 @@ const BASE = "https://api.local";
 
 // 白名单（§19.2，单一真相，与 src/index.ts 的 ALLOWED_ORIGINS 对齐）。
 const PROD_ORIGIN = "https://form-design.agentaily.com";
+// app（设计工作台）新域 —— 域名 swap 第①步把 app 从主域搬来这里（过渡期与 PROD_ORIGIN 并存）。
+const STUDIO_ORIGIN = "https://form-design.studio.agentaily.com";
 const DEV_ORIGIN = "http://localhost:5173";
 // 一个明确不在白名单里的来源。
 const EVIL_ORIGIN = "https://evil.example.com";
@@ -109,6 +111,33 @@ describe("CORS /api/* (workers/features/cors.feature)", () => {
     expect(res.status).toBeLessThan(300);
     // And 响应头 Access-Control-Allow-Origin 回显该本地 dev 来源
     expect(res.headers.get("access-control-allow-origin")).toBe(DEV_ORIGIN);
+  });
+
+  it("Scenario: app 设计工作台新域 studio 也在白名单内", async () => {
+    // 域名 swap 第①步：app 从主域搬到 form-design.studio.agentaily.com。浏览器从新域调后端
+    // 必须越过预检（含 PUT 等所有写方法），否则全被 CORS 挡（参 #86 的 PUT 回归教训）。
+    const res = await preflight("/api/submit", STUDIO_ORIGIN, {
+      method: "POST",
+      requestHeaders: "authorization,content-type",
+    });
+
+    // Then 响应状态码为 2xx
+    expect(res.status).toBeGreaterThanOrEqual(200);
+    expect(res.status).toBeLessThan(300);
+
+    // And 响应头 Access-Control-Allow-Origin 回显 studio 新域（不退化成 '*'、不是别的域）
+    expect(res.headers.get("access-control-allow-origin")).toBe(STUDIO_ORIGIN);
+
+    // And 响应头 Access-Control-Allow-Methods 含 GET、POST、PUT、PATCH、DELETE（PUT 见 #86 回归）
+    const allowMethods = (res.headers.get("access-control-allow-methods") ?? "").toUpperCase();
+    for (const m of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
+      expect(allowMethods, `studio origin must allow ${m}`).toContain(m);
+    }
+
+    // And 响应头 Access-Control-Allow-Headers 含 Authorization 与 Content-Type
+    const allowHeaders = (res.headers.get("access-control-allow-headers") ?? "").toLowerCase();
+    expect(allowHeaders).toContain("authorization");
+    expect(allowHeaders).toContain("content-type");
   });
 
   it("Scenario: owner-only 端点的预检无需 token 即返回 CORS 头", async () => {

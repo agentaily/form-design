@@ -127,8 +127,8 @@ interface Env {
    */
   EMAIL_FROM: string;
   /**
-   * 前端站点根（§22.1），= `https://form-design.agentaily.com`。用于拼邮件里的落地页链接
-   * （验证确认 / 找回密码 `${APP_BASE_URL}/reset-password?token=...`，§23.3 / §24.2）。非敏感。
+   * app 设计工作台站点根（§22.1），= `https://form-design.studio.agentaily.com`。用于拼邮件里的
+   * 落地页链接（验证确认 / 找回密码 `${APP_BASE_URL}/reset-password?token=...`，§23.3 / §24.2）。非敏感。
    */
   APP_BASE_URL: string;
   /**
@@ -153,11 +153,12 @@ const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 
 // --- CORS (§19) ------------------------------------------------------------
 //
-// 允许的前端来源白名单（§19.2，单一真相）：生产 CF Pages + 本地 Vite dev。命中列表才回显
-// Access-Control-Allow-Origin；不退化成 `*`，不开 credentials（token 走 Authorization 头、
-// 非 cookie，§19.5）。如需从 env 读额外 origin（PR 预览域名）可在合约内扩展，但默认须含这两个。
+// 允许的前端来源白名单（§19.2，单一真相）：app 设计工作台新域 studio + 过渡期保留的旧 app 域
+// + 本地 Vite dev。命中列表才回显 Access-Control-Allow-Origin；不退化成 `*`，不开 credentials
+// （token 走 Authorization 头、非 cookie，§19.5）。如需从 env 读额外 origin（PR 预览域名）可在合约内扩展。
 const ALLOWED_ORIGINS = [
-  "https://form-design.agentaily.com", // 生产前端（CF Pages）
+  "https://form-design.studio.agentaily.com", // app 设计工作台新域（域名 swap 后 app 调后端从此域发起）
+  "https://form-design.agentaily.com", // 旧 app 域；swap 过渡期保留（以后官网占该域、不调 API，清理另说）
   "http://localhost:5173", // 本地 dev（Vite 默认端口）
 ] as const;
 

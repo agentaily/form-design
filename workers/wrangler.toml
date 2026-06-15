@@ -40,4 +40,4 @@ id = "c0deecf24a7446fb8a3ad196ce853133" # form-design RATE_LIMIT KV（yarnbcoder
 # （release-eng 负责），测试由 vitest.config.ts 注入 throwaway 值（不真发信，外环 mock fetch）。
 [vars]
 EMAIL_FROM = "Agentaily Forms <noreply@mail.agentaily.com>"
-APP_BASE_URL = "https://form-design.agentaily.com"
+APP_BASE_URL = "https://form-design.studio.agentaily.com"
