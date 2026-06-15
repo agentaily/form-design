@@ -1,0 +1,1 @@
+- [Chat-session keying decision](chat-session-keying-decision.md) — 设计对话持久化按客户端生成的稳定 design session id 绑定(owner_id, session_id),不按表单 id(SPEC §26 / PR #48)
