@@ -1,3 +1,6 @@
 - [PR-2 D1 submissions turn + frontend handoff](project_d1-submissions-architecture-turn.md) — submit 主存翻 D1，飞书降可选同步；wire shape 改了但前端故意没改，留给 PR-6
 - [D1 列表排序时间戳打平 flake](project_d1-list-ordering-timestamp-tie-flake.md) — ORDER BY updated_at 无次级 tiebreak，同毫秒写入排序未定义 → 负载相关假红
 - [conn-test SPEC vs feature 漂移](project_conn-test-spec-vs-feature-drift.md) — 改后端端点契约的 PR 易只改 feature 漏改 SPEC；审查必 grep SPEC 对应小节(PR #72 实例，已同 PR 修复)
+- [Settings overlay history state machine](project_settings_overlay_history.md) — PR #52 route-reflected overlay (pushState /settings, no unmount); the push-guard + deep-link close logic to re-scrutinize on future settings changes
+- [PR-4 飞书 link-less 实现在未提交工作树](project_pr61-feishu-linkless.md) — 审 pr61 要 diff HEAD 不是 origin/main;分支基于 pre-#63,origin/main 的 DS 降级噪音要忽略
+- [会话恢复乱序异步串会话](project_session-restore-out-of-order-async-race.md) — switchSession/mount-restore await 后不重校验 active id → 旧会话 load 晚到污染当前会话(PR #76 实测复现)
