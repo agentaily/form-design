@@ -816,6 +816,22 @@ function DesignerApp({
     reserveUidsFrom(loadedFields.map((f) => f && f.id).filter(Boolean));
     publishedSlugRef.current = project.formSlug || null;
     setPublished(!!project.formSlug);
+    // 刷新/进项目恢复『编辑态』(#87, #86 follow-up): 项目行带 formSlug ⇒ 它是对一份已发布表单的编辑,
+    // 故同步重建 editingForm —— 顶栏 EDITING 横幅 + 主按钮『更新』(updateLiveForm → PATCH 原 slug)。
+    // 不重建会让刷新后 editingForm 丢失 → 主按钮回『发布』(doPublish → POST 新表单),点击把这份已发布
+    // 表单当新表单重发(新 slug)。项目行不存 form status(只有 formSlug),故 owner 可见态默认 published
+    // (主流场景:继续编辑 / 刚发布的 LIVE 表单;更新 PATCH 不分 status);baseline = 刚载入的工作区(与
+    // loadFormForEdit 同语义:刚载入即未脏,更新按钮到下一次改动才点亮)。无 formSlug ⇒ 草稿,清掉编辑态。
+    if (project.formSlug) {
+      const ef = { slug: project.formSlug, status: "published", meta: modelRef.current.meta };
+      editingFormRef.current = ef;
+      setEditingForm(ef);
+      setEditBaseline(editSig(modelRef.current.meta, modelRef.current.fields));
+      setUpdateDone(false);
+    } else {
+      editingFormRef.current = null;
+      setEditingForm(null);
+    }
     syncModel();
   };
 
