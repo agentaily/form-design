@@ -168,7 +168,11 @@ app.use(
   "/api/*",
   cors({
     origin: [...ALLOWED_ORIGINS],
-    allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"], // §19.3（含 §21 CRUD 方法）
+    // §19.3（含 §21/§26.10 CRUD 方法）。PUT 是整段替换写端点所用方法——PUT /api/projects/:id 存
+    // 工作区、PUT /api/chat/session/:id 存对话、PUT /api/auth/profile 改显示名。漏掉 PUT 时浏览器预检
+    // 会挡掉这些跨源写 → saveProjectWorkspace/saveChatTurns 全「Failed to fetch」被吞 → 工作区/对话
+    // 刷新即丢（「继续编辑已发布表单 → 刷新 → 工作台空」根因；curl 种数据 + 浏览器 GET 的旧验收漏检）。
+    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: ["Authorization", "Content-Type"], // §19.3
     maxAge: 86400, // 预检缓存一天，减少预检次数（§19.3，值可调）
   }),

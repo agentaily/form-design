@@ -289,6 +289,115 @@ describe("回归 · BUG #2 继续编辑后刷新对话不丢 (real persist→rel
   });
 });
 
+describe("回归 · BUG #3 继续编辑(无既存项目→mint)后刷新工作台不丢 (real save→refresh→load round-trip)", () => {
+  // 老板线上一步复现的「PR-C 漏网路径」:进入一份**已发布**表单 →「继续编辑」→ 进工作台(看得到字段)
+  // → URL 变 /p/:projectId?s= → 刷新 → 右侧工作台 meta + fields 空了。
+  //
+  // ROOT CAUSE: loadFormForEdit 反查项目(listProjects 找 formSlug===slug),**找不到就 mint 一个全新
+  // project_id**(老表单 / 迁移表单没现成项目行)。它随后 `saveProjectWorkspace` 把工作区写到这个新
+  // project_id —— 但**原来是 fire-and-forget(不 await),且在 reflectDesignerUrl 把 URL 推到 /p/:id
+  // 之前就让页面渲染完**。于是「URL 已指向 /p/<新id>、但那行工作区还没落库」这个不一致窗口被暴露:
+  // 用户看到字段后立刻刷新 → 刷新导航 ABORT 掉仍在飞行的 PUT → 项目行从未写入 → loadProject 读回
+  // null → 工作台空。这是 mock 测不出的真实数据盲区(microtask 会让 fire-and-forget 在测里"恰好"完成)。
+  //
+  // FIX 契约(本测钉死):**新项目的 /p/:id URL 只在其工作区已持久化之后才暴露** —— 这样任何刷新进
+  // /p/:id 都能 loadProject 读回工作区。下面用一个**门控**的 saveProjectWorkspace(commit 只在 release
+  // 后发生)精确复现「PUT 仍在飞行」的那一刻:fire-and-forget 旧码会在 save 未落库时就把 URL 推到
+  // /p/<新id>(违约 → RED);await 修复后 URL 在 release 前不前进(GREEN),release 后 URL 前进且刷新可恢复。
+  it("save 未落库前不暴露 /p/<新id>;落库后刷新恢复工作台 meta + fields", async () => {
+    asLoggedIn();
+    // mint 路径:owner 没有任何项目(listProjects→[]),且这份已发布表单也没有现成项目行 → 反查未命中
+    // → loadFormForEdit mint 一个全新 project_id(这正是漏网路径)。
+    const projects = new Map(); // projectId -> { meta, fields, formSlug }
+    let releaseSave = null;
+    const saveGate = new Promise((r) => {
+      releaseSave = r;
+    });
+    const saveProjectWorkspace = vi.fn(async (projectId, input) => {
+      await saveGate; // 门控:模拟「PUT 仍在飞行」——commit 只在 release 之后才发生
+      projects.set(projectId, {
+        meta: input.meta,
+        fields: input.fields,
+        formSlug: input.formSlug ?? null,
+      });
+      return { projectId, updatedAt: "t" };
+    });
+    const loadProject = vi.fn(async (projectId) => {
+      const row = projects.get(projectId);
+      return { project: row ? { projectId, ...row, createdAt: "t", updatedAt: "t" } : null };
+    });
+    const FORM = {
+      slug: "pubFormX1",
+      status: "published",
+      meta: { title: "线下沙龙报名" },
+      fields: [
+        { id: "fld_name", type: "text", label: "姓名", required: true },
+        { id: "fld_city", type: "text", label: "工作台恢复字段-唯一标记" },
+      ],
+    };
+    const props = baseProps({
+      loadProject,
+      saveProjectWorkspace,
+      listProjects: vi.fn(async () => ({ projects: [] })), // 反查未命中 → mint
+      listChatSessions: vi.fn(async () => ({ sessions: [] })),
+      loadChatSession: vi.fn(async () => ({ session: null })),
+      listForms: vi.fn(async () => [
+        {
+          slug: "pubFormX1",
+          meta: { title: "线下沙龙报名" },
+          status: "published",
+          createdAt: "2026-06-11T08:00:00.000Z",
+        },
+      ]),
+      getFormForEdit: vi.fn(async () => FORM),
+    });
+    const { unmount } = render(<App {...props} pathname="/" search="" />);
+
+    // 进「我的表单」→ 点「继续编辑」→ 进编辑态(同步 setState,横幅立刻出现)。
+    await openMyForms();
+    fireEvent.click(await screen.findByRole("button", { name: /继续编辑/ }));
+    await screen.findByTestId("edit-banner");
+    // 右侧工作台字段当场可见(渲染走同步 setFields,不等 save)。
+    expect(await screen.findByText("工作台恢复字段-唯一标记")).toBeInTheDocument();
+    // save 已发起,但被门控卡住(模拟 PUT 在飞行)。
+    await waitFor(() => expect(saveProjectWorkspace).toHaveBeenCalled());
+    const mintedProjectId = saveProjectWorkspace.mock.calls[0][0];
+    expect(mintedProjectId).toBeTruthy();
+
+    // 给一切立即结算的 in-memory 异步腿(对话载入)留出充足结算窗口 —— fire-and-forget 旧码会在此期间
+    // 把 URL 推到 /p/<新id>;await 修复码因 save 仍门控、不会前进。这是上界等待(非竞态),in-memory
+    // 依赖都是即时 microtask,50ms 足矣。
+    await new Promise((r) => setTimeout(r, 50));
+
+    // ── 修复契约:save 落库前,URL 不得暴露这个新项目 ──
+    // 旧码(fire-and-forget):URL 已 = /p/<mintedProjectId> 而 projects 仍空 → 此断言 FAIL(RED,复现 bug)。
+    // 修复码(await):URL 仍未指向新项目 → 通过(GREEN)。
+    expect(projects.has(mintedProjectId)).toBe(false); // 门控未放 → 还没落库
+    expect(window.location.pathname).not.toContain(mintedProjectId);
+
+    // 放行 save → 落库 → URL 这才前进到 /p/<新id>?s=。
+    releaseSave();
+    await waitFor(() => expect(projects.has(mintedProjectId)).toBe(true));
+    await waitFor(() => expect(window.location.pathname).toBe(`/p/${mintedProjectId}`));
+
+    // ── 真实刷新(在 /p/<新id>?s= 处重挂同后端)→ 工作台 meta + fields 完整恢复(非空) ──
+    const url = window.location.pathname + window.location.search;
+    unmount();
+    cleanup();
+    window.history.replaceState({}, "", url);
+    render(
+      <App
+        {...baseProps({ loadProject, saveProjectWorkspace, listProjects: props.listProjects })}
+        pathname={window.location.pathname}
+        search={window.location.search}
+      />,
+    );
+    // 刷新后右侧工作台从 loadProject 恢复 —— 字段 + 标题都回来了,不是空工作台(bug)。
+    expect(await screen.findByText("工作台恢复字段-唯一标记")).toBeInTheDocument();
+    expect(await screen.findByText("姓名")).toBeInTheDocument();
+  });
+});
+
 describe("回归 · A' 核心:切换对话只换聊天,右侧工作区不变", () => {
   it("切到另一段对话后聊天变了,但工作区字段与 /p/:id 不变(只 ?s= 改)", async () => {
     asLoggedIn();
