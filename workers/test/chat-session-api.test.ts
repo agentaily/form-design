@@ -420,3 +420,83 @@ describe("chat-session API · delete a session (§26.9)", () => {
     expect(res.status).toBe(401);
   });
 });
+
+// —— A' (§26.10): the session routes honour an optional ?projectId= to scope the row to a project ——
+// PR-C wires the route layer to read c.req.query("projectId") and pass it to the data layer (which
+// adds AND project_id=? / binds project_id on INSERT). This pins that wire end-to-end: a session
+// written under project A is visible only when reading/listing with that same projectId.
+describe("chat-session API · ?projectId= scopes the session to a project (A', §26.10)", () => {
+  const PJ_A = "pj-aaaa-1111";
+  const PJ_B = "pj-bbbb-2222";
+
+  function pathP(sessionId: string, projectId: string): string {
+    return `${path(sessionId)}?projectId=${encodeURIComponent(projectId)}`;
+  }
+
+  it("a session written under project A is found only when read/listed with projectId=A", async () => {
+    const { token } = await registerOwner();
+    // write under project A
+    const put = await SELF.fetch(pathP(SESSION_ID, PJ_A), {
+      method: "PUT",
+      headers: { "content-type": "application/json", ...authHeader(token) },
+      body: JSON.stringify({ turns: turnsWith("项目A的会话-唯一标记"), history: HISTORY }),
+    });
+    expect(put.status).toBe(200);
+
+    // GET with the SAME project → hit
+    const hitA = (await (
+      await SELF.fetch(pathP(SESSION_ID, PJ_A), { headers: authHeader(token) })
+    ).json()) as { session: unknown };
+    expect(hitA.session).not.toBeNull();
+
+    // GET with a DIFFERENT project → empty (scoped out), NOT a leak
+    const missB = (await (
+      await SELF.fetch(pathP(SESSION_ID, PJ_B), { headers: authHeader(token) })
+    ).json()) as { session: unknown };
+    expect(missB.session).toBeNull();
+
+    // LIST with project A → contains it; LIST with project B → empty
+    const listA = (await (
+      await SELF.fetch(`${BASE}/api/chat/sessions?projectId=${PJ_A}`, {
+        headers: authHeader(token),
+      })
+    ).json()) as { sessions: SessionSummary[] };
+    expect(listA.sessions.map((s) => s.sessionId)).toEqual([SESSION_ID]);
+
+    const listB = (await (
+      await SELF.fetch(`${BASE}/api/chat/sessions?projectId=${PJ_B}`, {
+        headers: authHeader(token),
+      })
+    ).json()) as { sessions: SessionSummary[] };
+    expect(listB.sessions).toEqual([]);
+  });
+
+  it("rename under the right project succeeds; under a foreign project → 404 (scoped out)", async () => {
+    const { token } = await registerOwner();
+    await SELF.fetch(pathP(SESSION_ID, PJ_A), {
+      method: "PUT",
+      headers: { "content-type": "application/json", ...authHeader(token) },
+      body: JSON.stringify({ turns: turnsWith("待重命名"), history: HISTORY }),
+    });
+    // PATCH with the wrong project → 404 (the WHERE adds AND project_id=PJ_B, no row)
+    const wrong = await SELF.fetch(pathP(SESSION_ID, PJ_B), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...authHeader(token) },
+      body: JSON.stringify({ title: "新标题" }),
+    });
+    expect(wrong.status).toBe(404);
+    // PATCH with the right project → 200, and the list reflects the new title
+    const ok = await SELF.fetch(pathP(SESSION_ID, PJ_A), {
+      method: "PATCH",
+      headers: { "content-type": "application/json", ...authHeader(token) },
+      body: JSON.stringify({ title: "客户回访-新标题" }),
+    });
+    expect(ok.status).toBe(200);
+    const listA = (await (
+      await SELF.fetch(`${BASE}/api/chat/sessions?projectId=${PJ_A}`, {
+        headers: authHeader(token),
+      })
+    ).json()) as { sessions: SessionSummary[] };
+    expect(listA.sessions[0].title).toBe("客户回访-新标题");
+  });
+});

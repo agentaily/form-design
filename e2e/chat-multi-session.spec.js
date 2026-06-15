@@ -67,8 +67,39 @@ const SESSIONS = [
 async function mockSessions(page, { sessions = SESSIONS, transcripts = {} } = {}) {
   const store = { sessions: sessions.map((s) => ({ ...s })) };
 
-  // GET /api/chat/sessions — the owner's list, most-recent-first.
-  await page.route("**/api/chat/sessions", async (route) => {
+  // A' (§26.10): the App restores the project workspace via loadProject + (re)scopes the conversation
+  // list by projectId. These tests don't exercise the workspace, so back the project seams with empty
+  // state (GET :id → { project: null }, PUT → ok, GET list → []) — just enough that enterProject /
+  // refreshSessions don't hit the real network.
+  await page.route("**/api/projects/**", async (route) => {
+    const req = route.request();
+    if (req.method() === "PUT") {
+      const url = new URL(req.url());
+      const projectId = decodeURIComponent((url.pathname.split("/").pop() || "").split("?")[0]);
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, updatedAt: "t" }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project: null }),
+    });
+  });
+  await page.route("**/api/projects", async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projects: [] }),
+    });
+  });
+
+  // GET /api/chat/sessions?projectId= — the project's conversation list, most-recent-first. The
+  // trailing `**` tolerates the A' ?projectId= query (disjoint from the per-session `session/**`).
+  await page.route("**/api/chat/sessions**", async (route) => {
     await route.fulfill({
       status: 200,
       headers: { "content-type": "application/json" },
@@ -126,7 +157,9 @@ test.describe("Agentaily Forms · 多会话管理 + 对话级模型 (§26.9 / §
   // Scenario: owner 列出自己的全部会话(最近更新在前)— the SessionMenu lists them.
   test("会话菜单列出 owner 的会话(标题 + N 轮 + 当前打勾)", async ({ page }) => {
     await mockSessions(page);
-    await page.goto("/");
+    // A': enter a known project with an active session id NOT in the list, so neither list row is
+    // the active one → both are non-active (0 checks, 2 delete buttons) — the original invariant.
+    await page.goto("/p/pj-e2e?s=ds-mount-active");
 
     await openSessionMenu(page);
 
@@ -142,9 +175,11 @@ test.describe("Agentaily Forms · 多会话管理 + 对话级模型 (§26.9 / §
     await expect(page.getByRole("button", { name: "删除会话" })).toHaveCount(2);
   });
 
-  // Scenario: 新建会话清空当前对话工作区并开新 session.
-  test("新会话清空工作区(对话区回空态、预览字段清空)", async ({ page }) => {
-    await mockSessions(page);
+  // Scenario (A' 反转): 新对话只清【对话】、保留【工作区】(继续编同一份表单). The old behavior cleared
+  // the workspace too; under A' the workspace belongs to the PROJECT, and 新对话 mints a new
+  // conversation under the SAME project — so the right-pane form fields stay put.
+  test("新会话只清对话、保留工作区(对话区回空态、预览字段不变)", async ({ page }) => {
+    await mockSessions(page, { sessions: [] });
     await page.goto("/");
 
     // 先建一份表单:对话区非空(空态标题消失)+ 预览有 9 个字段。
@@ -159,9 +194,9 @@ test.describe("Agentaily Forms · 多会话管理 + 对话级模型 (§26.9 / §
     await openSessionMenu(page);
     await page.getByRole("menu").getByText("新会话").click();
 
-    // Then 对话线程回初始空态(emptyTitle 重新可见)+ 预览字段清空。
+    // Then 对话线程回初始空态(emptyTitle 重新可见)…但工作区字段 KEEP(切对话/新对话工作区不变)。
     await expect(page.getByText("描述你想要的表单")).toBeVisible();
-    await expect(page.locator(".pv-fields > div")).toHaveCount(0);
+    await expect(page.locator(".pv-fields > div")).toHaveCount(9);
   });
 
   // Scenario: 切换到另一段会话载回该会话的转写.
@@ -180,7 +215,7 @@ test.describe("Agentaily Forms · 多会话管理 + 对话级模型 (§26.9 / §
         },
       },
     });
-    await page.goto("/");
+    await page.goto("/p/pj-e2e?s=ds-mount-active");
 
     await openSessionMenu(page);
     // 切到客户满意度问卷(ds-survey)。
@@ -194,7 +229,7 @@ test.describe("Agentaily Forms · 多会话管理 + 对话级模型 (§26.9 / §
   // Scenario: owner 删除自己的一段会话 — 该会话不再出现在列表里.
   test("删除一段会话后该行从列表消失", async ({ page }) => {
     const store = await mockSessions(page);
-    await page.goto("/");
+    await page.goto("/p/pj-e2e?s=ds-mount-active");
 
     await openSessionMenu(page);
     await expect(page.getByText("客户满意度问卷", { exact: true })).toBeVisible();

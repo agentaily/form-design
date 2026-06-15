@@ -27,6 +27,23 @@ import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/re
 import App from "../../src/App.jsx";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
 import { DESIGN_SESSION_ID_KEY } from "../../src/core/chatSessionClient";
+import { DESIGN_PROJECT_ID_KEY } from "../../src/core/projectClient";
+
+// A' 项目↔对话 (§26.10): the App now also consumes project-level seams (loadProject /
+// saveProjectWorkspace / listProjects) + renameChatSession. A harness that omits them hits the REAL
+// clients → real fetch (undefined in jsdom) → flaky/hung restore. Inject empty-state fakes so the
+// project leg of restore resolves deterministically; the §26 conversation half is what these
+// scenarios actually assert. Per-test overrides win (spread last).
+function withProjectClients(props = {}) {
+  return {
+    loadProject: vi.fn(async () => ({ project: null })),
+    saveProjectWorkspace: vi.fn(async () => ({ projectId: "pj", updatedAt: "t" })),
+    listProjects: vi.fn(async () => ({ projects: [] })),
+    renameChatSession: vi.fn(async () => ({ renamed: true })),
+    listChatSessions: vi.fn(async () => ({ sessions: [] })),
+    ...props,
+  };
+}
 
 // loggedIn 取自 token store (authIsLoggedIn) —— 设计对话持久化是 owner-only (§26.5),持久化/恢复
 // 只在登录态发生。种一个 throwaway token 进入登录态,afterEach 清掉。
@@ -63,6 +80,7 @@ afterEach(() => {
   clearToken();
   try {
     localStorage.removeItem(DESIGN_SESSION_ID_KEY);
+    localStorage.removeItem(DESIGN_PROJECT_ID_KEY);
   } catch {
     /* ignore */
   }
@@ -89,13 +107,27 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     const loadChatSession = vi.fn(async () => ({ session: RESTORED }));
     const saveChatTurns = vi.fn(async () => ({ sessionId: "ds-restored", updatedAt: "t" }));
 
-    // When owner 重新加载设计器页面(= 一次新的挂载,登录态触发 restore useEffect)。
+    // When owner 重新加载设计器页面(= 一次新的挂载,登录态触发 restore useEffect)。该项目最近会话
+    // = ds-restored,故 listProjects 空、listChatSessions 列出它,restore 据此载该对话。
     render(
       <App
-        chat={makeStreamingChat("继续")}
-        getCurrentUser={verifiedMe}
-        loadChatSession={loadChatSession}
-        saveChatTurns={saveChatTurns}
+        {...withProjectClients({
+          chat: makeStreamingChat("继续"),
+          getCurrentUser: verifiedMe,
+          loadChatSession,
+          saveChatTurns,
+          listChatSessions: vi.fn(async () => ({
+            sessions: [
+              {
+                sessionId: "ds-restored",
+                title: "客户回访",
+                turnCount: 1,
+                formSlug: null,
+                updatedAt: "2026-06-13T10:00:00.000Z",
+              },
+            ],
+          })),
+        })}
       />,
     );
 
@@ -129,10 +161,23 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     const chat = makeStreamingChat("收到");
     render(
       <App
-        chat={chat}
-        getCurrentUser={verifiedMe}
-        loadChatSession={loadChatSession}
-        saveChatTurns={vi.fn(async () => ({ sessionId: "ds-ctx", updatedAt: "t" }))}
+        {...withProjectClients({
+          chat,
+          getCurrentUser: verifiedMe,
+          loadChatSession,
+          saveChatTurns: vi.fn(async () => ({ sessionId: "ds-ctx", updatedAt: "t" })),
+          listChatSessions: vi.fn(async () => ({
+            sessions: [
+              {
+                sessionId: "ds-ctx",
+                title: PRIOR,
+                turnCount: 1,
+                formSlug: null,
+                updatedAt: "2026-06-13T10:00:00.000Z",
+              },
+            ],
+          })),
+        })}
       />,
     );
     // 等历史恢复完成(historyRef 已被重新 seed)。
@@ -162,10 +207,23 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     const loadChatSession = vi.fn(async () => ({ session: A_DEVICE_SESSION }));
     render(
       <App
-        chat={makeStreamingChat("继续")}
-        getCurrentUser={verifiedMe}
-        loadChatSession={loadChatSession}
-        saveChatTurns={vi.fn(async () => ({ sessionId: "ds-shared", updatedAt: "t" }))}
+        {...withProjectClients({
+          chat: makeStreamingChat("继续"),
+          getCurrentUser: verifiedMe,
+          loadChatSession,
+          saveChatTurns: vi.fn(async () => ({ sessionId: "ds-shared", updatedAt: "t" })),
+          listChatSessions: vi.fn(async () => ({
+            sessions: [
+              {
+                sessionId: "ds-shared",
+                title: "报名表",
+                turnCount: 1,
+                formSlug: null,
+                updatedAt: "2026-06-13T10:00:00.000Z",
+              },
+            ],
+          })),
+        })}
       />,
     );
     await waitFor(() => expect(loadChatSession).toHaveBeenCalled());
@@ -182,10 +240,12 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     const saveChatTurns = vi.fn(async () => ({ sessionId: "x", updatedAt: "t" }));
     render(
       <App
-        chat={makeStreamingChat("搭好了")}
-        getCurrentUser={verifiedMe}
-        loadChatSession={loadChatSession}
-        saveChatTurns={saveChatTurns}
+        {...withProjectClients({
+          chat: makeStreamingChat("搭好了"),
+          getCurrentUser: verifiedMe,
+          loadChatSession,
+          saveChatTurns,
+        })}
       />,
     );
     await waitFor(() => expect(loadChatSession).toHaveBeenCalled());
@@ -194,8 +254,10 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     fireEvent.click(screen.getByText("做一个线下活动报名表"));
 
     // Then 这一回合随该 session id 写入后端,且为回合结束一次性批量(恰好一次),带 turns + history。
+    // A' (§26.10): the conversation write is now keyed (projectId, sessionId, input) — the batch
+    // snapshot lives in the 3rd arg (the workspace goes to saveProjectWorkspace, a separate write).
     await waitFor(() => expect(saveChatTurns).toHaveBeenCalledTimes(1));
-    const [, input] = saveChatTurns.mock.calls[0];
+    const [, , input] = saveChatTurns.mock.calls[0];
     expect(Array.isArray(input.turns)).toBe(true);
     expect(input.turns.length).toBeGreaterThan(0);
     expect(Array.isArray(input.history)).toBe(true);
@@ -214,10 +276,12 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     );
     render(
       <App
-        chat={chat}
-        getCurrentUser={verifiedMe}
-        loadChatSession={vi.fn(async () => ({ session: null }))}
-        saveChatTurns={saveChatTurns}
+        {...withProjectClients({
+          chat,
+          getCurrentUser: verifiedMe,
+          loadChatSession: vi.fn(async () => ({ session: null })),
+          saveChatTurns,
+        })}
       />,
     );
 
@@ -256,14 +320,18 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
       onText?.("搭好了");
       return { text: "搭好了", toolCalls: [] };
     });
+    const saveProjectWorkspace = vi.fn(async () => ({ projectId: "pj", updatedAt: "t" }));
     render(
       <App
-        chat={chat}
-        getCurrentUser={verifiedMe}
-        loadChatSession={vi.fn(async () => ({ session: null }))}
-        saveChatTurns={saveChatTurns}
-        publishForm={publishForm}
-        publicFormUrl={(slug) => `/f/${slug}`}
+        {...withProjectClients({
+          chat,
+          getCurrentUser: verifiedMe,
+          loadChatSession: vi.fn(async () => ({ session: null })),
+          saveChatTurns,
+          saveProjectWorkspace,
+          publishForm,
+          publicFormUrl: (slug) => `/f/${slug}`,
+        })}
       />,
     );
 
@@ -275,13 +343,23 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     fireEvent.click(publishBtn);
     await waitFor(() => expect(publishForm).toHaveBeenCalled());
 
-    // Then 对话仍按同一个 design session id 恢复(发布前后两次写用同一 sessionId),
-    // And 该会话被关联到刚发布表单的 slug(发布后那次写带上 formSlug)。
+    // Then 对话仍按同一个 design session id 恢复(发布前后两次写用同一 (projectId, sessionId)),
+    // And 该项目被关联到刚发布表单的 slug。A' (§4.1):发布把 slug 软关联到 PROJECT 行(saveProjectWorkspace
+    // 带 formSlug),会话写同样带上 formSlug 以便 cross-ref;两者的 (projectId, sessionId) 都不随发布改变。
     await waitFor(() => expect(saveChatTurns.mock.calls.length).toBeGreaterThanOrEqual(2));
-    const turnEndSessionId = saveChatTurns.mock.calls[0][0];
-    const publishSave = saveChatTurns.mock.calls.find(([, input]) => input.formSlug === "f8Kq2pXa");
+    const [turnEndProjectId, turnEndSessionId] = saveChatTurns.mock.calls[0];
+    const publishSave = saveChatTurns.mock.calls.find(
+      ([, , input]) => input.formSlug === "f8Kq2pXa",
+    );
     expect(publishSave).toBeTruthy();
-    expect(publishSave[0]).toBe(turnEndSessionId); // session id 不随发布改变
+    expect(publishSave[0]).toBe(turnEndProjectId); // project id 不随发布改变
+    expect(publishSave[1]).toBe(turnEndSessionId); // session id 不随发布改变
+    // 发布把 slug 软关联到 PROJECT 行(A' §4.1 的核心落点)。
+    await waitFor(() =>
+      expect(
+        saveProjectWorkspace.mock.calls.some(([, input]) => input.formSlug === "f8Kq2pXa"),
+      ).toBe(true),
+    );
   });
 
   // —— 未登录态:不持久化 + 401 引导登录(明确定义,无未定义态)————————————
@@ -296,10 +374,12 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     });
     render(
       <App
-        chat={chat}
-        loadChatSession={loadChatSession}
-        saveChatTurns={saveChatTurns}
-        navigate={navigate}
+        {...withProjectClients({
+          chat,
+          loadChatSession,
+          saveChatTurns,
+          navigate,
+        })}
       />,
     );
 
@@ -318,11 +398,15 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     const loadChatSession = vi.fn(async () => ({
       session: { sessionId: "x", turns: [], history: [] },
     }));
+    const loadProject = vi.fn(async () => ({ project: null }));
     render(
       <App
-        chat={makeStreamingChat("x")}
-        loadChatSession={loadChatSession}
-        saveChatTurns={vi.fn()}
+        {...withProjectClients({
+          chat: makeStreamingChat("x"),
+          loadChatSession,
+          saveChatTurns: vi.fn(),
+          loadProject,
+        })}
       />,
     );
 
@@ -331,7 +415,9 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     await screen.findByText("描述你想要的表单");
     // 给 restore useEffect 充分机会(若它会错误触发的话)。
     await waitFor(() => expect(screen.getByText("描述你想要的表单")).toBeInTheDocument());
+    // 未登录不恢复:既不拉对话,也不拉项目工作区(§26.5)。
     expect(loadChatSession).not.toHaveBeenCalled();
+    expect(loadProject).not.toHaveBeenCalled();
   });
 
   // —— 鉴权门控 / 失效 ——————————————————————————————————————————————————
@@ -345,11 +431,13 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     });
     render(
       <App
-        chat={makeStreamingChat("x")}
-        getCurrentUser={verifiedMe}
-        loadChatSession={loadChatSession}
-        saveChatTurns={vi.fn()}
-        navigate={navigate}
+        {...withProjectClients({
+          chat: makeStreamingChat("x"),
+          getCurrentUser: verifiedMe,
+          loadChatSession,
+          saveChatTurns: vi.fn(),
+          navigate,
+        })}
       />,
     );
 
@@ -370,10 +458,12 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     const loadChatSession = vi.fn(async () => ({ session: null }));
     render(
       <App
-        chat={makeStreamingChat("x")}
-        getCurrentUser={verifiedMe}
-        loadChatSession={loadChatSession}
-        saveChatTurns={vi.fn()}
+        {...withProjectClients({
+          chat: makeStreamingChat("x"),
+          getCurrentUser: verifiedMe,
+          loadChatSession,
+          saveChatTurns: vi.fn(),
+        })}
       />,
     );
 
@@ -403,10 +493,23 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
     render(
       <React.StrictMode>
         <App
-          chat={makeStreamingChat("x")}
-          getCurrentUser={verifiedMe}
-          loadChatSession={loadChatSession}
-          saveChatTurns={vi.fn(async () => ({ sessionId: "ds-strict", updatedAt: "t" }))}
+          {...withProjectClients({
+            chat: makeStreamingChat("x"),
+            getCurrentUser: verifiedMe,
+            loadChatSession,
+            saveChatTurns: vi.fn(async () => ({ sessionId: "ds-strict", updatedAt: "t" })),
+            listChatSessions: vi.fn(async () => ({
+              sessions: [
+                {
+                  sessionId: "ds-strict",
+                  title: "strict",
+                  turnCount: 1,
+                  formSlug: null,
+                  updatedAt: "2026-06-13T10:00:00.000Z",
+                },
+              ],
+            })),
+          })}
         />
       </React.StrictMode>,
     );

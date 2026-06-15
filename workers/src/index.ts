@@ -1120,7 +1120,9 @@ app.get("/api/forms/:slug/submissions", async (c) => {
 app.get("/api/chat/session/:sessionId", async (c) => {
   const ownerId = c.get("session").sub;
   const sessionId = c.req.param("sessionId");
-  const session = await loadChatSession(c.env.DB, ownerId, sessionId);
+  // A'（§26.10）：可选 ?projectId= 把读取收窄到该项目下；缺省 = 旧 owner-global 路径（灰度兼容）。
+  const projectId = c.req.query("projectId");
+  const session = await loadChatSession(c.env.DB, ownerId, sessionId, projectId);
   // null（未命中 / 越权）回 { session: null }，与「该 id 自己从没写过」同结果，不暴露 B 有这段对话。
   return c.json({ session }, 200);
 });
@@ -1147,13 +1149,21 @@ app.put("/api/chat/session/:sessionId", async (c) => {
   }
   // formSlug 可选：未传 → undefined（保留原值）；显式 string → 关联；其它（含 null）→ 不更新关联。
   const formSlug = typeof body.formSlug === "string" ? body.formSlug : undefined;
+  // A'（§26.10）：可选 ?projectId= 把会话绑到该项目下；缺省 = 旧路径（绑 / 保留 NULL，灰度兼容）。
+  const projectId = c.req.query("projectId");
 
-  // 2) 整段 upsert（last-write-wins），按 (owner_id, sessionId) 隔离。
-  const result = await upsertChatSession(c.env.DB, ownerId, sessionId, {
-    turns: body.turns,
-    history: body.history,
-    formSlug,
-  });
+  // 2) 整段 upsert（last-write-wins），按 (owner_id, [projectId,] sessionId) 隔离。
+  const result = await upsertChatSession(
+    c.env.DB,
+    ownerId,
+    sessionId,
+    {
+      turns: body.turns,
+      history: body.history,
+      formSlug,
+    },
+    projectId,
+  );
 
   return c.json(result, 200);
 });
@@ -1163,7 +1173,8 @@ app.put("/api/chat/session/:sessionId", async (c) => {
 // turnCount（从该行 turns_json 运行期推导）+ formSlug + updatedAt，不含两份完整转写、不含 owner_id /
 // 凭据（§26.8）。owner 名下零会话 → 200 { sessions: [] }（正常空态，非错误）。
 app.get("/api/chat/sessions", async (c) => {
-  const sessions = await listChatSessions(c.env.DB, c.get("session").sub);
+  // A'（§26.10）：可选 ?projectId= 只列本项目的会话；缺省 = 旧 owner-global 全部列表（灰度兼容）。
+  const sessions = await listChatSessions(c.env.DB, c.get("session").sub, c.req.query("projectId"));
   return c.json({ sessions }, 200);
 });
 
@@ -1172,7 +1183,13 @@ app.get("/api/chat/sessions", async (c) => {
 // 无匹配行（从未存过 / 属于别的 owner）→ 404 { error: "会话不存在" }——A 删 B 的 id → A 名下无此行
 // → false → 404，B 的行不动、不暴露 B 有这段对话（与 GET 空态同纪律）。
 app.delete("/api/chat/session/:sessionId", async (c) => {
-  const ok = await deleteChatSession(c.env.DB, c.get("session").sub, c.req.param("sessionId"));
+  // A'（§26.10）：可选 ?projectId= 把删除收窄到该项目下；缺省 = 旧路径（灰度兼容）。
+  const ok = await deleteChatSession(
+    c.env.DB,
+    c.get("session").sub,
+    c.req.param("sessionId"),
+    c.req.query("projectId"),
+  );
   return ok ? c.json({ deleted: true }, 200) : c.json({ error: "会话不存在" }, 404);
 });
 
@@ -1279,8 +1296,15 @@ app.patch("/api/chat/session/:sessionId", async (c) => {
     return c.json({ error: "title 不能为空" }, 400);
   }
 
-  // 2) 写 title 列，按 (owner_id, sessionId) 隔离。无匹配行 → 404。
-  const renamed = await renameChatSession(c.env.DB, ownerId, sessionId, title);
+  // 2) 写 title 列，按 (owner_id, [projectId,] sessionId) 隔离。无匹配行 → 404。
+  // A'（§26.10）：可选 ?projectId= 把重命名收窄到该项目下；缺省 = 旧路径（灰度兼容）。
+  const renamed = await renameChatSession(
+    c.env.DB,
+    ownerId,
+    sessionId,
+    title,
+    c.req.query("projectId"),
+  );
   return renamed ? c.json({ renamed: true }, 200) : c.json({ error: "会话不存在" }, 404);
 });
 

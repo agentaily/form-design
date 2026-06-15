@@ -30,7 +30,6 @@
 
 import { apiFetch } from "./apiClient";
 import type { ChatMessage } from "./designerLoop";
-import type { FormMeta, UiField } from "./designerTools";
 
 /** localStorage key holding the client-minted stable design-session id (SPEC §26.2). */
 export const DESIGN_SESSION_ID_KEY = "agentaily_forms_design_session";
@@ -53,6 +52,19 @@ let memSessionId: string | null = null;
 /** Build the per-session endpoint path (`/api/chat/session/:sessionId`, §26.3). */
 function sessionPath(sessionId: string): string {
   return `${CHAT_SESSION_PATH}/${encodeURIComponent(sessionId)}`;
+}
+
+/**
+ * Append the active project id as a `?projectId=` query so the backend scopes the session under it
+ * (A' 项目↔对话, §26.10): the route reads the query and passes it to the data layer (WHERE adds
+ * `AND project_id = ?` / INSERT binds it). A blank/absent projectId yields the path unchanged — the
+ * backend then falls back to its owner-global (pre-A') behavior (gray-compatible). Pure.
+ */
+function withProjectQuery(path: string, projectId: string | null | undefined): string {
+  const id = (projectId ?? "").trim();
+  if (!id) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}projectId=${encodeURIComponent(id)}`;
 }
 
 /** Mint a fresh high-entropy design-session id (crypto.randomUUID with a fallback, §26.2). */
@@ -299,114 +311,48 @@ export function toPersistedTurns(messages: readonly LiveChatMessage[]): Persiste
   });
 }
 
-// ---------------------------------------------------------------------------
-// Workspace snapshot (PR #76) — restore the FORM PREVIEW MODEL on refresh, not just the chat
-// ---------------------------------------------------------------------------
-//
-// §26 persists only the CONVERSATION (turns + history); the form preview model (meta + fields)
-// the right pane renders is NOT stored, so a refresh resumes the chat but the workspace comes back
-// EMPTY. The model can't be faithfully replayed from the persisted tool turns either — uid()s for
-// field ids interleave with message ids, so a fresh replay reassigns ids and breaks the
-// update/remove/reorder references. So we ride a single SNAPSHOT of the model inside the OPAQUE
-// turns_json blob (the backend stores it verbatim — no D1 migration, "接 #48"): one synthetic turn
-// carrying { meta, fields }. It is role:"assistant" so the server-derived list title/turnCount
-// (which count role:"user" turns, §26.9) are unaffected, and it is filtered out of the visible
-// thread on restore via {@link splitWorkspaceSnapshot} (never rendered as a chat bubble).
-
-/** Sentinel id of the synthetic workspace-snapshot turn (PR #76). Stable + unlikely to collide. */
-export const WORKSPACE_SNAPSHOT_ID = "__agentaily_workspace_snapshot__";
-
-/** The form preview model captured for restore (PR #76): meta + fields, no transient flags. */
-export interface WorkspaceSnapshot {
-  meta: FormMeta | null;
-  fields: UiField[];
-}
-
-/**
- * The synthetic turn that rides {@link WorkspaceSnapshot} inside turns_json (PR #76). role
- * "assistant" + a sentinel id so it is invisible to the server title/turnCount projection and is
- * stripped from the visible thread on restore.
- */
-export interface WorkspaceSnapshotTurn extends WorkspaceSnapshot {
-  id: typeof WORKSPACE_SNAPSHOT_ID;
-  role: "assistant";
-  kind: "workspace";
-}
-
-/**
- * Build the snapshot turn from the live form model (PR #76), stripping the transient `_new` flag so
- * the persisted JSON is stable. Returns `null` for an empty model (no meta AND no fields) — there is
- * nothing to restore, so no snapshot turn is written. Pure.
- */
-export function buildWorkspaceSnapshotTurn(
-  meta: FormMeta | null | undefined,
-  fields: readonly UiField[] | null | undefined,
-): WorkspaceSnapshotTurn | null {
-  const cleanFields = (fields ?? []).map(({ _new, ...rest }) => rest as UiField);
-  if (!meta && cleanFields.length === 0) return null;
-  return {
-    id: WORKSPACE_SNAPSHOT_ID,
-    role: "assistant",
-    kind: "workspace",
-    meta: meta ?? null,
-    fields: cleanFields,
-  };
-}
-
-/**
- * Split a persisted turns array (PR #76) into the REAL conversation turns (snapshot removed) and the
- * extracted {@link WorkspaceSnapshot} (null when absent). Used on restore so the snapshot rebuilds
- * the form preview model while the conversation renders without the synthetic turn. Pure; tolerant
- * of empty/null/corrupt input (never throws — one bad row must not break restore).
- */
-export function splitWorkspaceSnapshot(turns: readonly unknown[] | null | undefined): {
-  turns: PersistedTurn[];
-  workspace: WorkspaceSnapshot | null;
-} {
-  const real: PersistedTurn[] = [];
-  let workspace: WorkspaceSnapshot | null = null;
-  for (const t of turns ?? []) {
-    if (t && typeof t === "object" && (t as { id?: unknown }).id === WORKSPACE_SNAPSHOT_ID) {
-      const w = t as Partial<WorkspaceSnapshotTurn>;
-      workspace = {
-        meta: (w.meta as FormMeta) ?? null,
-        fields: Array.isArray(w.fields) ? (w.fields as UiField[]) : [],
-      };
-      continue;
-    }
-    real.push(t as PersistedTurn);
-  }
-  return { turns: real, workspace };
-}
-
 /**
  * Load a persisted design conversation by session id (SPEC §26.3, owner-only §17).
  * Resolves to {@link LoadChatSessionResult}: `{ session }` on hit, `{ session: null }`
  * when this owner has never persisted that id (normal first-visit empty state). A
  * 401 surfaces as a 401 ApiError for the caller to route into /signin. Carries `auth:true`.
  *
+ * A' (§26.10): `projectId` scopes the load to the session's project (`?projectId=` query). A blank
+ * id falls back to the owner-global lookup (gray-compatible).
+ *
+ * @param projectId the active design-project id (from projectClient).
  * @param sessionId the stable design-session id (from {@link getOrCreateDesignSessionId}).
  */
-export function loadChatSession(sessionId: string): Promise<LoadChatSessionResult> {
-  return apiFetch<LoadChatSessionResult>(sessionPath(sessionId), { auth: true });
+export function loadChatSession(
+  projectId: string,
+  sessionId: string,
+): Promise<LoadChatSessionResult> {
+  return apiFetch<LoadChatSessionResult>(withProjectQuery(sessionPath(sessionId), projectId), {
+    auth: true,
+  });
 }
 
 /**
  * Persist (replace) the design conversation for a session id (SPEC §26.3/§26.4,
  * owner-only §17). Called in BATCHES at turn end — never per streamed token (§26.4) —
  * with the turns + LLM history accumulated so far; the backend stores them under
- * (owner, sessionId), upserting the row (last-write-wins). Resolves to
+ * (owner, projectId, sessionId), upserting the row (last-write-wins). Resolves to
  * {@link SaveChatSessionResult}. A 401 surfaces as a 401 ApiError for the caller to
  * route into /signin. Carries `auth:true`.
  *
+ * A' (§26.10): `projectId` binds the session to its project (`?projectId=` query) so the project-
+ * scoped list/load find it. A blank id falls back to the owner-global write (gray-compatible).
+ *
+ * @param projectId the active design-project id.
  * @param sessionId the stable design-session id.
  * @param input the batch snapshot to persist ({@link SaveChatSessionInput}).
  */
 export function saveChatTurns(
+  projectId: string,
   sessionId: string,
   input: SaveChatSessionInput,
 ): Promise<SaveChatSessionResult> {
-  return apiFetch<SaveChatSessionResult>(sessionPath(sessionId), {
+  return apiFetch<SaveChatSessionResult>(withProjectQuery(sessionPath(sessionId), projectId), {
     method: "PUT",
     auth: true,
     body: input,
@@ -452,15 +398,27 @@ export interface DeleteChatSessionResult {
   deleted: boolean;
 }
 
+/** Response of `PATCH /api/chat/session/:sessionId` (SPEC §26.10, A' rename) on a hit. */
+export interface RenameChatSessionResult {
+  renamed: boolean;
+}
+
 /**
  * List the current owner's chat sessions (SPEC §26.9, owner-only §17). Resolves to
  * {@link ListChatSessionsResult} — `{ sessions }` most-recent-first, `{ sessions: [] }`
  * when the owner has none. A 401 surfaces as a 401 ApiError for the caller to route into
  * /signin. Carries `auth:true`. GETs {@link CHAT_SESSIONS_PATH} (note: `/sessions`, no id —
  * distinct from the per-session {@link CHAT_SESSION_PATH}).
+ *
+ * A' (§26.10): `projectId` lists ONLY that project's conversations (`?projectId=` query). A blank id
+ * falls back to the owner-global list (gray-compatible).
+ *
+ * @param projectId the active design-project id (only list this project's sessions).
  */
-export function listChatSessions(): Promise<ListChatSessionsResult> {
-  return apiFetch<ListChatSessionsResult>(CHAT_SESSIONS_PATH, { auth: true });
+export function listChatSessions(projectId: string): Promise<ListChatSessionsResult> {
+  return apiFetch<ListChatSessionsResult>(withProjectQuery(CHAT_SESSIONS_PATH, projectId), {
+    auth: true,
+  });
 }
 
 /**
@@ -471,11 +429,39 @@ export function listChatSessions(): Promise<ListChatSessionsResult> {
  * A 401 likewise surfaces for routing into /signin. Carries `auth:true`. DELETEs
  * {@link CHAT_SESSION_PATH}/:sessionId (the per-session path, with id).
  *
+ * A' (§26.10): `projectId` scopes the delete to that project (`?projectId=` query).
+ *
+ * @param projectId the active design-project id.
  * @param sessionId the design-session id to delete.
  */
-export function deleteChatSession(sessionId: string): Promise<DeleteChatSessionResult> {
-  return apiFetch<DeleteChatSessionResult>(sessionPath(sessionId), {
+export function deleteChatSession(
+  projectId: string,
+  sessionId: string,
+): Promise<DeleteChatSessionResult> {
+  return apiFetch<DeleteChatSessionResult>(withProjectQuery(sessionPath(sessionId), projectId), {
     method: "DELETE",
     auth: true,
+  });
+}
+
+/**
+ * Rename one of the current owner's chat sessions (SPEC §26.10, A'). PATCHes the `title` of the
+ * session row; resolves to `{ renamed: true }` on a hit. A session that never existed under this
+ * owner — or belongs to another — surfaces as a **404 ApiError** (owner isolation §26.8) for the
+ * caller to handle. A 401 surfaces for routing into /signin. Carries `auth:true`.
+ *
+ * @param projectId the active design-project id.
+ * @param sessionId the design-session id to rename.
+ * @param title the new display title (the backend trims + rejects blank with 400).
+ */
+export function renameChatSession(
+  projectId: string,
+  sessionId: string,
+  title: string,
+): Promise<RenameChatSessionResult> {
+  return apiFetch<RenameChatSessionResult>(withProjectQuery(sessionPath(sessionId), projectId), {
+    method: "PATCH",
+    auth: true,
+    body: { title },
   });
 }

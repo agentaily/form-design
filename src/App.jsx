@@ -44,6 +44,8 @@ import {
   settingsPath,
   readSessionId,
   withSessionId,
+  readProjectId,
+  projectBasePath,
   currentPathname,
   currentSearch,
   SIGNIN_PATH,
@@ -73,10 +75,17 @@ import {
   saveChatTurns as saveChatTurnsClient,
   listChatSessions as listChatSessionsClient,
   deleteChatSession as deleteChatSessionClient,
+  renameChatSession as renameChatSessionClient,
   toPersistedTurns,
-  buildWorkspaceSnapshotTurn,
-  splitWorkspaceSnapshot,
 } from "./core/chatSessionClient";
+import {
+  getOrCreateProjectId,
+  setActiveProjectId,
+  newProjectId,
+  loadProject as loadProjectClient,
+  saveProjectWorkspace as saveProjectWorkspaceClient,
+  listProjects as listProjectsClient,
+} from "./core/projectClient";
 import {
   CHAT_MODELS,
   DEFAULT_CHAT_MODEL,
@@ -254,10 +263,18 @@ function DesignerApp({
   // the load-on-mount / save-at-turn-end wiring is driven deterministically in tests.
   loadChatSession = loadChatSessionClient,
   saveChatTurns = saveChatTurnsClient,
-  // 多会话列表 + 删除 (§26.9, owner-only). Same injection pattern: default to the real client;
-  // injectable so the SessionMenu (list / new / switch / delete) wiring is driven by fakes.
+  // 多会话列表 + 删除 + 重命名 (§26.9/§26.10, owner-only). Same injection pattern: default to the
+  // real client; injectable so the SessionMenu (list / new / switch / delete / rename) wiring是 driven
+  // by fakes.
   listChatSessions = listChatSessionsClient,
   deleteChatSession = deleteChatSessionClient,
+  renameChatSession = renameChatSessionClient,
+  // 项目级工作区 (A' 项目↔对话, §26.10, owner-only). The form workspace (meta + fields) belongs to
+  // the PROJECT, loaded/saved independently of the conversation (replaces #76's snapshot turn).
+  // Injectable so the「载项目填工作区 / 切对话工作区不变 / 刷新恢复」wiring is driven deterministically.
+  loadProject = loadProjectClient,
+  saveProjectWorkspace = saveProjectWorkspaceClient,
+  listProjects = listProjectsClient,
   // 邮箱未验证 banner 的「重新发送」(§23.3 owner-only). Defaults to the real
   // core/auth.requestEmailVerification (POST with Bearer); injectable for tests.
   requestEmailVerification = authRequestEmailVerification,
@@ -387,13 +404,32 @@ function DesignerApp({
   const historyRef = useRef(null);
   if (!historyRef.current) historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
 
-  // 设计对话持久化 (§26) + 会话进 URL (PR #76). The stable, client-minted design session id
-  // (keyed (owner_id, sessionId)). Resolution order on first mount:
+  // 项目进 URL (A' 项目↔对话, §26.10). The stable, client-minted design PROJECT id (keyed
+  // (owner_id, projectId)) — the container for the shared form workspace. Resolution order on mount,
+  // mirroring the session-id resolution below:
+  //   1. the URL's /p/:projectId path (a refresh / deep-link / shared link names the project) — make
+  //      it active (localStorage + mirror) so a subsequent reload without touching the URL resumes it.
+  //   2. else getOrCreate (the localStorage-backed default, minted on first ever entry into设计器).
+  // A blank/malformed /p/ falls through to getOrCreate (degrade, never throw, §A'.1).
+  const projectIdRef = useRef(null);
+  if (!projectIdRef.current) {
+    const fromUrl = readProjectId(pathname);
+    if (fromUrl) {
+      setActiveProjectId(fromUrl);
+      projectIdRef.current = fromUrl;
+    } else {
+      projectIdRef.current = getOrCreateProjectId();
+    }
+  }
+
+  // 设计对话持久化 (§26) + 会话进 URL (PR #76 + A'). The stable, client-minted design session id
+  // (keyed (owner_id, projectId, sessionId)) — a conversation thread UNDER the active project.
+  // Resolution order on first mount:
   //   1. the URL's ?s=<id> (a refresh / deep-link / shared link names the conversation) — make it
   //      active (localStorage + mirror) so a subsequent reload without touching the URL still resumes.
-  //   2. else getOrCreate (the localStorage-backed default, minted on first ever entry).
-  // A blank/invalid ?s= falls through to getOrCreate (degrade, never throw). Mirrors the existing
-  // in-render storage write of getOrCreateDesignSessionId (idempotent, runs once via the ref guard).
+  //   2. else getOrCreate (a localStorage-backed PLACEHOLDER until the mount restore resolves the
+  //      project's most-recent conversation — A':「进项目载最近对话」, see the restore effect).
+  // A blank/invalid ?s= falls through to getOrCreate (degrade, never throw).
   const sessionIdRef = useRef(null);
   if (!sessionIdRef.current) {
     const fromUrl = readSessionId(search);
@@ -497,10 +533,11 @@ function DesignerApp({
     navigate(SIGNIN_PATH + "?" + qs.toString());
   };
 
-  // ── 会话进 URL (?s=<id>, PR #76) ────────────────────────────────────────────────
+  // ── 会话进 URL (?s=<id>, PR #76 + A') ───────────────────────────────────────────
   // Reflect the active design-session id in the URL, PRESERVING the rest of the query and the
-  // current path (so opening settings over a session keeps ?s=). pushState by default (so Back
-  // returns to the prior conversation); replaceState for the mount-time normalization (not a nav).
+  // current path (so the /p/:id project path + any /settings overlay are kept). pushState by default
+  // (so Back returns to the prior conversation); replaceState for normalizations (not a nav). This is
+  // the SESSION-only reflect — switching conversations changes only ?s= (A': workspace/path unchanged).
   const reflectSessionUrl = useCallback((id, { replace = false } = {}) => {
     if (typeof window === "undefined" || !window.history) return;
     const target = currentPathname() + withSessionId(currentSearch(), id);
@@ -512,14 +549,44 @@ function DesignerApp({
     }
   }, []);
 
-  // On first mount, normalize the URL to carry the resolved session id if it isn't already there,
-  // so a fresh "/" load (or a localStorage-resumed session) becomes shareable/bookmarkable. A
-  // deep-link that already names this session (?s= matches) is left untouched. replaceState — a
-  // normalization, not a navigation. The path (e.g. /settings/:tab) is preserved by reflectSessionUrl.
+  // ── 项目 + 会话进 URL (/p/:projectId?s=<sessionId>, A') ───────────────────────────
+  // Reflect BOTH the active project (path /p/:id) AND the active conversation (?s=) in one history
+  // op, preserving the rest of the query. Used when ENTERING a project (mount restore / popstate /
+  // 继续编辑) — switching projects reloads the workspace, so the path changes. pushState by default;
+  // replaceState for mount-time normalization. A blank projectId keeps the current path (degrade).
+  const reflectDesignerUrl = useCallback((projectId, sessionId, { replace = false } = {}) => {
+    if (typeof window === "undefined" || !window.history) return;
+    // Re-anchor the project in the path WITHOUT clobbering an open /settings/:tab overlay: when the
+    // current path is a settings route, rebuild it nested under this project (/p/:id/settings/:tab);
+    // otherwise the bare designer base (/p/:id). A blank projectId keeps the current path (degrade).
+    let base;
+    if (!projectId) base = currentPathname();
+    else {
+      const settingsRoute = matchSettings(currentPathname());
+      base = settingsRoute
+        ? settingsPath(settingsRoute.section, projectId)
+        : projectBasePath(projectId);
+    }
+    const target = base + withSessionId(currentSearch(), sessionId);
+    try {
+      if (replace) window.history.replaceState(window.history.state, "", target);
+      else window.history.pushState({}, "", target);
+    } catch {
+      /* history unavailable — projectIdRef/sessionIdRef still drive this page */
+    }
+  }, []);
+
+  // On first mount, normalize the URL to /p/:projectId?s=:sessionId so a fresh "/" load (or a
+  // localStorage-resumed project/session) becomes shareable/bookmarkable. A deep-link that already
+  // names both (path + ?s= match) is left untouched. replaceState — a normalization, not a nav.
+  // (When logged in, the restore effect re-reflects after resolving the project's most-recent
+  // conversation; this initial pass covers the signed-out case + the first paint.)
   useEffect(() => {
     if (typeof window === "undefined" || !window.history) return;
-    if (readSessionId(currentSearch()) !== sessionIdRef.current) {
-      reflectSessionUrl(sessionIdRef.current, { replace: true });
+    const pathHasProject = readProjectId(currentPathname()) === projectIdRef.current;
+    const queryHasSession = readSessionId(currentSearch()) === sessionIdRef.current;
+    if (!pathHasProject || !queryHasSession) {
+      reflectDesignerUrl(projectIdRef.current, sessionIdRef.current, { replace: true });
     }
     // run once on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -534,7 +601,9 @@ function DesignerApp({
   // already in settings replaces in place (a tab toggle isn't a navigation).
   const reflectSettingsUrl = useCallback((section) => {
     if (typeof window === "undefined" || !window.history) return;
-    const target = settingsPath(section) + currentSearch(); // currentSearch keeps ?s=
+    // A': nest settings under the active project (/p/:id/settings/:tab) so the project stays in the
+    // URL while the overlay is open; currentSearch keeps ?s=.
+    const target = settingsPath(section, projectIdRef.current) + currentSearch();
     try {
       if (!matchSettings(currentPathname())) {
         window.history.pushState({ settings: true }, "", target);
@@ -571,15 +640,17 @@ function DesignerApp({
       settingsPushedRef.current = false;
       window.history.back(); // restore the pre-overlay URL (the designer never unmounted; ?s= returns)
     } else if (matchSettings(currentPathname())) {
-      // Deep-linked straight to /settings/:tab (no prior entry to pop) → normalize to the designer,
-      // preserving the active session in the URL.
-      window.history.pushState({}, "", "/" + currentSearch());
+      // Deep-linked straight to /settings/:tab (no prior entry to pop) → normalize to the designer at
+      // /p/:projectId, preserving the active session in the URL (A').
+      window.history.pushState({}, "", projectBasePath(projectIdRef.current) + currentSearch());
     }
   }, []);
-  // Keep the overlay AND the active session in sync with the URL for Back/Forward (PR #76): the
-  // overlay follows /settings/:tab (Back while open → closes + restores the designer); the active
-  // conversation follows ?s= (Back/Forward between conversations switches + reloads that one — and
-  // never crosses transcripts, since switchSession loads + applies the target session's own turns).
+  // Keep the overlay, the active PROJECT, AND the active conversation in sync with the URL for
+  // Back/Forward (PR #76 + A'): the overlay follows /settings/:tab; the project follows the /p/:id
+  // path (Back/Forward between projects reloads the workspace + that project's conversation); the
+  // conversation follows ?s= (Back/Forward between conversations reloads only the thread — workspace
+  // unchanged). PROJECT change takes precedence (it subsumes the conversation reload). Neither ever
+  // crosses transcripts: each load applies its OWN target's turns under the load-sequence token.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onPop = () => {
@@ -587,15 +658,21 @@ function DesignerApp({
       setSettingsOpen(!!route);
       if (route) setSettingsSection(route.section);
       else settingsPushedRef.current = false;
+      const urlProject = readProjectId(currentPathname());
       const urlSession = readSessionId(currentSearch());
-      if (urlSession && urlSession !== sessionIdRef.current) {
-        // The URL already changed (this IS the popstate) → switch without re-pushing.
+      if (urlProject && urlProject !== projectIdRef.current) {
+        // The project changed (this IS the popstate) → reload workspace + the named/recent
+        // conversation, without re-pushing the entry we just navigated to.
+        enterProject(urlProject, { preferredSessionId: urlSession, urlMode: "none" });
+      } else if (urlSession && urlSession !== sessionIdRef.current) {
+        // Same project, different conversation → switch the thread only (workspace unchanged).
         switchSession(urlSession, { fromPopstate: true });
       }
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-    // switchSession is the first-render closure (stable seams/refs), mirroring the queue consumer.
+    // enterProject / switchSession are first-render closures (stable seams/refs), mirroring the queue
+    // consumer.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -694,84 +771,131 @@ function DesignerApp({
     if (loggedIn) refreshMe();
   }, [loggedIn, refreshMe]);
 
-  // Apply a loaded persisted session onto the live workspace: rebuild the visible thread
-  // (`messages`) AND re-seed the loop's LLM history (`historyRef`, incl. the leading system
-  // prompt) so the owner resumes the same thread and the Agent keeps the prior context
-  // (§26.6). Empty/null → reset to the初始空态. Shared by the load-on-mount restore effect and
-  // the SessionMenu 切换 path (switchSession below).
+  // Apply a loaded persisted CONVERSATION onto the live thread (A'): rebuild the visible thread
+  // (`messages`) AND re-seed the loop's LLM history (`historyRef`, incl. the leading system prompt)
+  // so the owner resumes the same thread AND the Agent keeps the prior context (§26.6). Under A' this
+  // touches ONLY the conversation — the form workspace (meta + fields) belongs to the PROJECT and is
+  // restored separately by {@link applyProjectWorkspace}, so switching conversations never disturbs
+  // the right pane (切对话工作区不变). Null/empty turns → an empty thread. Shared by the mount restore,
+  // switchSession, and 继续编辑.
   const applyRestoredSession = (session) => {
     if (!session) return;
-    // §26 持久化的 turns 里可能搭着一条工作区快照合成 turn (PR #76):把它摘出来重建右侧预览模型,
-    // 其余才是要渲染的真实对话回合 (合成 turn 绝不渲染成气泡)。
-    const { turns: realTurns, workspace } = splitWorkspaceSnapshot(session.turns);
-    if (realTurns.length > 0) {
-      setMessagesTracked(realTurns.map((tn) => ({ ...tn })));
-    } else {
-      setMessagesTracked([]);
-    }
+    const realTurns = Array.isArray(session.turns) ? session.turns : [];
+    setMessagesTracked(realTurns.map((tn) => ({ ...tn })));
     historyRef.current =
       Array.isArray(session.history) && session.history.length > 0
         ? session.history.map((h) => ({ ...h }))
         : [{ role: "system", content: DESIGNER_SYSTEM }];
-    publishedSlugRef.current = session.formSlug || null;
-    // 恢复工作区表单模型 (PR #76):有快照 → 重建 meta/fields + 预览 (并推进 uid 计数器越过载入的
-    // 字段 id,后续新增不撞号);无快照 → 复位为空模型 (切到一段没有工作区的会话时绝不残留上一段的表单)。
-    if (workspace && (workspace.meta || workspace.fields.length > 0)) {
-      modelRef.current.meta = workspace.meta ? { ...workspace.meta } : null;
-      modelRef.current.fields = workspace.fields.map((f) => ({ ...f }));
-      reserveUidsFrom(workspace.fields.map((f) => f.id).filter(Boolean));
-    } else {
-      modelRef.current = createFormModel();
-    }
+  };
+
+  // Apply a loaded PROJECT workspace onto the live form model (A', §26.10): rebuild the right-pane
+  // meta + fields from the project row, advance the uid counter past the loaded field ids (so a
+  // freshly added field never collides with them), and carry the project's published slug. This is
+  // the workspace half of restore — decoupled from the conversation, so 进项目载工作区 / 刷新恢复 /
+  // 切项目换工作区 all flow through here while switchSession leaves it untouched. Tolerant of a
+  // null/absent project (leaves the current model). Field shapes are defensively guarded (a stored
+  // field may be malformed; never throw on restore).
+  const applyProjectWorkspace = (project) => {
+    if (!project) return;
+    const loadedFields = Array.isArray(project.fields) ? project.fields : [];
+    modelRef.current.meta = project.meta ? { ...project.meta } : null;
+    modelRef.current.fields = loadedFields.map((f) => ({ ...f }));
+    reserveUidsFrom(loadedFields.map((f) => f && f.id).filter(Boolean));
+    publishedSlugRef.current = project.formSlug || null;
+    setPublished(!!project.formSlug);
     syncModel();
   };
 
-  // 设计对话恢复 (§26 restore): when logged in, load this session's persisted conversation
-  // ONCE and rebuild both transcripts — the visible thread (`messages`) and the loop's LLM
-  // history (`historyRef`, incl. the leading system prompt) — so the owner resumes the same
-  // thread AND the Agent keeps the prior context. A never-persisted id → { session: null } →
-  // stay in the初始空态 (current behavior). Signed-out owners never load (§26.5). A 401 means
-  // the session lapsed → route into /signin. best-effort: any other failure leaves the empty
-  // thread intact (the next turn-end save re-establishes the row).
+  // Reset ONLY the conversation to a clean, empty thread (A'): empty thread + fresh LLM history. Does
+  // NOT touch the form workspace (it belongs to the project — 新对话 / 切到空对话 keep编同一份表单) nor
+  // editingForm/published. Used by 新对话, by switching to a never-persisted session, and by deleting
+  // the active conversation.
+  const resetConversation = () => {
+    historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
+    setMessagesTracked([]);
+  };
+
+  // Resolve the active conversation for a project and load it onto the thread (A'「进项目载最近对话」):
+  // a deep-linked ?s= names it; else the project's MOST-RECENT conversation; else a fresh empty one.
+  // Guarded by the caller's load-sequence token (`myLoad`) so an out-of-order arrival across the
+  // project + conversation async chain can never clobber a newer load (§4.3 乱序防护覆盖两路异步).
+  // Returns the resolved session id, or null if superseded mid-flight.
+  const resolveAndLoadConversation = async (projectId, preferredSessionId, myLoad) => {
+    let sid = (preferredSessionId || "").trim();
+    if (!sid) {
+      const { sessions: list } = await listChatSessions(projectId);
+      if (loadSeqRef.current !== myLoad) return null;
+      sid = Array.isArray(list) && list.length > 0 ? list[0].sessionId : newDesignSessionId();
+    }
+    sessionIdRef.current = sid;
+    setActiveDesignSessionId(sid);
+    const { session } = await loadChatSession(projectId, sid);
+    if (loadSeqRef.current !== myLoad) return null;
+    if (session) applyRestoredSession(session);
+    else resetConversation();
+    return sid;
+  };
+
+  // 进项目 (A' core): make `projectId` active, load its workspace, resolve + load its active
+  // conversation, and reflect /p/:id?s= in the URL. Used by the mount restore, by Back/Forward
+  // between projects (popstate), and as the shared spine of restore. The whole flow shares ONE
+  // load-sequence token so a superseding enter/switch/restore can't apply a stale workspace OR
+  // conversation (covers both async legs). best-effort: a 401 routes into login; other failures
+  // leave the prior state.
+  //   urlMode: "replace" (mount normalization) | "push" (an explicit navigation) | "none" (popstate,
+  //   the URL already changed → don't re-write it).
+  const enterProject = async (projectId, { preferredSessionId = "", urlMode = "replace" } = {}) => {
+    setActiveProjectId(projectId);
+    projectIdRef.current = projectId;
+    restoredRef.current = true; // we restore explicitly here, not via the mount effect
+    const myLoad = ++loadSeqRef.current;
+    try {
+      const { project } = await loadProject(projectId);
+      if (loadSeqRef.current !== myLoad || projectIdRef.current !== projectId) return;
+      // Hit → rebuild the workspace; miss ({ project: null }) → a fresh empty workspace (a brand-new
+      // or never-persisted project), NOT the prior one.
+      if (project) applyProjectWorkspace(project);
+      else {
+        modelRef.current = createFormModel();
+        publishedSlugRef.current = null;
+        setPublished(false);
+        syncModel();
+      }
+      const sid = await resolveAndLoadConversation(projectId, preferredSessionId, myLoad);
+      if (sid == null) return; // superseded mid-flight
+      if (urlMode !== "none")
+        reflectDesignerUrl(projectId, sid, { replace: urlMode === "replace" });
+      refreshSessions();
+    } catch (e) {
+      if (loadSeqRef.current !== myLoad) return; // superseded → ignore the stale error too
+      if (e instanceof ApiError && e.status === 401)
+        needLogin(L("登录后恢复你的设计项目", "Sign in to restore your design project"));
+      // else: best-effort — leave the prior state; the next turn-end save re-establishes the rows.
+    }
+  };
+
+  // 设计项目 + 对话恢复 (A' restore): when logged in, ENTER the active project ONCE — load its
+  // workspace (right pane) AND its active conversation (left pane, named by ?s= or the most-recent),
+  // then normalize the URL to /p/:id?s=. A never-persisted project → empty workspace; a never-
+  // persisted conversation → empty thread. Signed-out owners never load (§26.5). A 401 routes into
+  // /signin. restoredRef (set inside enterProject) keeps StrictMode's double-invoke + the empty-deps
+  // effect from re-entering.
   useEffect(() => {
     if (!loggedIn || restoredRef.current) return;
-    let cancelled = false;
-    const myLoad = ++loadSeqRef.current;
-    const id = sessionIdRef.current;
-    (async () => {
-      try {
-        const { session } = await loadChatSession(id);
-        // Bail if unmounted, SUPERSEDED by a newer load (loadSeqRef moved), or the active session
-        // changed out from under us (a switch landed during the await) — never apply a stale load
-        // (PR #76 不串会话).
-        if (cancelled || loadSeqRef.current !== myLoad || sessionIdRef.current !== id || !session)
-          return;
-        // StrictMode-safe: only mark as restored once the async result actually
-        // applies (success + not cancelled). Marking eagerly in the effect body would
-        // let StrictMode's cancelled first run "consume" the flag, so the second run
-        // early-returns and setMessages never fires. StrictMode dev double-fires the
-        // GET (intentional); production runs it once.
-        restoredRef.current = true;
-        applyRestoredSession(session);
-      } catch (e) {
-        if (cancelled || loadSeqRef.current !== myLoad) return; // superseded → ignore the stale error too
-        if (e instanceof ApiError && e.status === 401)
-          needLogin(L("登录后恢复你的设计对话", "Sign in to restore your design conversation"));
-        // else: best-effort — leave the empty thread; the next save re-establishes the row.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    enterProject(projectIdRef.current, {
+      preferredSessionId: readSessionId(search),
+      urlMode: "replace",
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loggedIn]);
 
-  // 会话列表 (§26.9): pull the owner's other conversations for the SessionMenu. best-effort —
-  // a load failure (incl. transient) just keeps the prior list; a 401 routes into /signin.
+  // 会话列表 (§26.9 + A'): pull THIS PROJECT's conversations for the SessionMenu (project-scoped).
+  // best-effort — a load failure (incl. transient) just keeps the prior list; a 401 routes into
+  // /signin.
   const refreshSessions = useCallback(async () => {
     if (!loggedIn) return;
     try {
-      const { sessions: list } = await listChatSessions();
+      const { sessions: list } = await listChatSessions(projectIdRef.current);
       if (Array.isArray(list)) setSessions(list);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401)
@@ -786,13 +910,12 @@ function DesignerApp({
     if (loggedIn) refreshSessions();
   }, [loggedIn, refreshSessions]);
 
-  // ── 多会话 新建 / 切换 / 删除 (§26.9) ───────────────────────────────────────────
-  // Reset the live workspace to a clean, empty designer (mirrors doExit's cleanup, minus the
-  // edit-mode-only bits): empty thread, fresh LLM history, no published slug, cleared form model
-  // + preview. Used by 新会话 and by deleting the active session. `restoredRef` is set so the
-  // mount-restore effect never re-fires against the new id.
+  // ── 多会话 新建 / 切换 / 删除 / 重命名 (§26.9 + A') ──────────────────────────────
+  // Reset the WHOLE live workspace to a clean, empty designer (form model + conversation): used by
+  // logout (drop the prior owner's everything) and by doExit's fresh-draft start. `restoredRef` is
+  // set so the mount-restore effect never re-fires.
   const resetWorkspace = () => {
-    restoredRef.current = true; // a fresh session has nothing to restore
+    restoredRef.current = true; // a fresh project has nothing to restore
     editingFormRef.current = null;
     setEditingForm(null);
     historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
@@ -805,56 +928,56 @@ function DesignerApp({
     setPublished(false);
   };
 
-  // 新会话: mint + activate a brand-new design session id (so subsequent turn-end saves write a
-  // NEW row, never overwriting the prior conversation), clear the workspace, reflect it in the URL
-  // (pushState → Back returns to the prior conversation), refresh the list.
+  // 新对话 (A'): mint + activate a brand-new conversation id UNDER the current project (so turn-end
+  // saves write a NEW session row), clear ONLY the conversation — the form workspace stays (继续编同一
+  //份表单). Reflect the new ?s= in the URL (pushState → Back returns to the prior conversation),
+  // refresh the list.
   const newChat = () => {
     sessionIdRef.current = newDesignSessionId();
-    resetWorkspace();
+    restoredRef.current = true;
+    resetConversation();
     reflectSessionUrl(sessionIdRef.current);
     refreshSessions();
   };
 
-  // 切换: make `id` the active session, load + apply its transcript (reusing the same restore
-  // path as mount), reflect it in the URL, and refresh the list so the menu highlight follows. A
-  // 401 routes into login; any other failure leaves the prior workspace (best-effort).
-  // `fromPopstate`: when the switch is DRIVEN by Back/Forward the URL already names `id`, so we
-  // must NOT re-push (that would clobber the history entry we just navigated to).
+  // 切换对话 (A' core): make `id` the active conversation, load + apply ITS transcript, reflect ?s=,
+  // refresh the list. The workspace is UNTOUCHED — switching conversations only swaps the left pane
+  // (切对话工作区不变). A 401 routes into login; any other failure leaves the prior thread.
+  // `fromPopstate`: the URL already names `id` → don't re-push (would clobber the navigated entry).
   const switchSession = async (id, { fromPopstate = false } = {}) => {
     if (!id || id === sessionIdRef.current) return;
     setActiveDesignSessionId(id);
     sessionIdRef.current = id;
     restoredRef.current = true; // we restore explicitly here, not via the mount effect
-    const myLoad = ++loadSeqRef.current; // claim the latest-load slot (PR #76 不串会话)
+    const myLoad = ++loadSeqRef.current; // claim the latest-load slot (不串会话)
     if (!fromPopstate) reflectSessionUrl(id);
     try {
-      const { session } = await loadChatSession(id);
+      const { session } = await loadChatSession(projectIdRef.current, id);
       // Bail if a NEWER switch/restore superseded this one while we awaited — applying a stale load
-      // here would render (and then persist via persistTurn) this session's transcript+workspace
-      // under whatever session is now active, crossing conversations (the exact 不串会话 race).
+      // would render (then persist) this conversation's turns under whatever session is now active.
       if (loadSeqRef.current !== myLoad) return;
-      // Hit → rebuild that conversation. Miss ({ session: null }, e.g. a stale list row whose
-      // row vanished) → reset to an EMPTY workspace, NOT a no-op: sessionIdRef already moved to
-      // `id`, so leaving the prior conversation visible would let the next turn-end save write
-      // the OLD transcript under the new id. A fresh empty workspace is the safe state.
+      // Hit → rebuild that conversation. Miss ({ session: null }, e.g. a stale list row) → reset to
+      // an EMPTY conversation (NOT the workspace): sessionIdRef already moved to `id`, so leaving the
+      // prior thread visible would let the next save write the OLD transcript under the new id.
       if (session) applyRestoredSession(session);
-      else resetWorkspace();
+      else resetConversation();
     } catch (e) {
       if (loadSeqRef.current !== myLoad) return; // superseded → ignore the stale error too
       if (e instanceof ApiError && e.status === 401)
         needLogin(L("登录后切换你的设计对话", "Sign in to switch your design conversation"));
-      // else: best-effort — leave the prior workspace.
+      // else: best-effort — leave the prior thread.
     }
     refreshSessions();
   };
 
-  // 删除: remove the session server-side; if it was the ACTIVE one, behave like 新会话 (open a
-  // fresh empty conversation). Refresh the list either way. A 404 (foreign / never-existed) is
-  // swallowed for the menu's purposes (the row just disappears on refresh); a 401 routes into login.
+  // 删除对话 (A'): remove the conversation server-side (project-scoped); if it was the ACTIVE one,
+  // open a fresh empty conversation IN THE SAME PROJECT (workspace stays). Refresh the list either
+  // way. A 404 (foreign / never-existed) is swallowed (the row drops off on refresh); a 401 routes
+  // into login.
   const removeSession = async (id) => {
     if (!id) return;
     try {
-      await deleteChatSession(id);
+      await deleteChatSession(projectIdRef.current, id);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         needLogin(L("登录后管理你的设计对话", "Sign in to manage your design conversations"));
@@ -863,12 +986,28 @@ function DesignerApp({
       // 404 / other: best-effort — fall through to a list refresh (the row drops off).
     }
     if (id === sessionIdRef.current) {
-      // deleting the open conversation → start a fresh one (no orphaned empty workspace). Reflect
-      // the fresh id in the URL via replaceState (the deleted session shouldn't linger as a
-      // forward-navigable entry pointing at a now-gone conversation).
+      // deleting the open conversation → start a fresh one (workspace stays). replaceState so the
+      // deleted conversation doesn't linger as a forward-navigable entry.
       sessionIdRef.current = newDesignSessionId();
-      resetWorkspace();
+      resetConversation();
       reflectSessionUrl(sessionIdRef.current, { replace: true });
+    }
+    refreshSessions();
+  };
+
+  // 重命名对话 (§26.10 A'): PATCH the conversation's title, then refresh the list so the new label
+  // shows. best-effort — a 404 (foreign / never-existed) is swallowed; a 401 routes into login.
+  const renameSession = async (id, title) => {
+    const next = (title || "").trim();
+    if (!id || !next) return;
+    try {
+      await renameChatSession(projectIdRef.current, id, next);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        needLogin(L("登录后重命名你的设计对话", "Sign in to rename your design conversation"));
+        return;
+      }
+      // 404 / other: best-effort — fall through to a list refresh.
     }
     refreshSessions();
   };
@@ -998,34 +1137,47 @@ function DesignerApp({
     persistTurn();
   };
 
-  // Persist the current full conversation snapshot for this session (§26.3/§26.4): the
-  // complete UI thread (serialized to PersistedTurn[], `streaming` stripped) + the loop's
-  // LLM history (`historyRef`, incl. system) + the published slug (once published). Reads
-  // the latest thread from `messagesRef` (kept current by setMessagesTracked) so a
-  // just-settled turn is included. best-effort: a non-401 failure does NOT break the
-  // conversation (the next turn's full PUT overwrites idempotently); a 401 routes into
-  // /signin (§26.4 失败不阻断 + 401 例外).
+  // Persist the current turn-end snapshot (A', §26.3/§26.4 + §26.10) as TWO decoupled writes:
+  //   1) the CONVERSATION → the project-scoped session row: the complete UI thread (serialized to
+  //      PersistedTurn[], `streaming` stripped) + the loop's LLM history (incl. system). Reads the
+  //      latest thread from `messagesRef` so a just-settled turn is included.
+  //   2) the WORKSPACE → the PROJECT row: the current form model (meta + fields, `_new` stripped) +
+  //      the published slug. This REPLACES PR #76's snapshot-turn-on-turns_json — the workspace now
+  //      lives on its own project row so 切对话 leaves it untouched and 刷新 restores it via loadProject.
+  // Under A' editing is NO LONGER skipped: an edit conversation IS the project's conversation, so it
+  // persists like any other (this fixes the「继续编辑后刷新对话丢」bug — the old editingFormRef skip
+  // dropped every edit-mode turn). best-effort: a non-401 failure does NOT break the page (the next
+  // turn's full PUT overwrites idempotently); a 401 routes into /signin (§26.4 失败不阻断 + 401 例外).
   const persistTurn = () => {
     if (!loggedIn) return; // 未登录不持久化 (§26.5)
-    // 编辑态不写 §26 设计会话 (PR-7): an edit conversation is ephemeral (the form definition is
-    // saved server-side via 更新/PATCH, not the design session). Persisting it would overwrite the
-    // form's own design-session row with a foreign transcript. Read the REF, not `editingForm` —
-    // this closure is the first-render one captured by the queue consumer (state would be stale).
-    if (editingFormRef.current) return;
-    // 工作区快照 (PR #76):把当前表单预览模型 (meta + fields) 作为一条合成 turn 搭进 §26 既有的
-    // 不透明 turns_json，使刷新/跨设备恢复时右侧工作区也能重建 (不止对话)。空模型 → 不写快照。
-    const baseTurns = toPersistedTurns(messagesRef.current);
-    const snapshot = buildWorkspaceSnapshotTurn(modelRef.current.meta, modelRef.current.fields);
-    const input = {
-      turns: snapshot ? [...baseTurns, snapshot] : baseTurns,
-      history: historyRef.current,
-      ...(publishedSlugRef.current ? { formSlug: publishedSlugRef.current } : {}),
-    };
-    Promise.resolve(saveChatTurns(sessionIdRef.current, input)).catch((e) => {
+    const projectId = projectIdRef.current;
+    const sessionId = sessionIdRef.current;
+    const slug = publishedSlugRef.current;
+    const onError = (e) => {
       if (e instanceof ApiError && e.status === 401)
         needLogin(L("登录后继续对话设计", "Sign in to continue conversational design"));
       // else: best-effort, swallow — the next turn-end PUT overwrites (§26.4).
-    });
+    };
+    // 1) conversation → session row (project-scoped).
+    const convoInput = {
+      turns: toPersistedTurns(messagesRef.current),
+      history: historyRef.current,
+      ...(slug ? { formSlug: slug } : {}),
+    };
+    Promise.resolve(saveChatTurns(projectId, sessionId, convoInput)).catch(onError);
+    // 2) workspace → project row (only when non-empty — an empty model has nothing to restore, mirrors
+    // #76's「空模型不写快照」; strip the transient `_new` animation flag so persisted JSON is stable).
+    const meta = modelRef.current.meta ?? null;
+    const cleanFields = (modelRef.current.fields ?? []).map(({ _new, ...rest }) => rest);
+    if (meta || cleanFields.length > 0) {
+      Promise.resolve(
+        saveProjectWorkspace(projectId, {
+          meta,
+          fields: cleanFields,
+          ...(slug ? { formSlug: slug } : {}),
+        }),
+      ).catch(onError);
+    }
   };
 
   // One message queue for the whole session (§4.1): connect-send N times → exactly one
@@ -1080,52 +1232,91 @@ function DesignerApp({
     reset: () => {},
   };
 
-  // ── 表单编辑入口 (PR-7) ─────────────────────────────────────────────────────────
-  // Load a stored form's full definition (from FormsPanel → getFormForEdit) back into the
-  // designer for editing. The canonical model is replaced (so the agent's tool calls mutate
-  // THIS form), the React mirror is synced, and the edit baseline is captured for dirty
-  // detection. reserveUidsFrom advances the session id counter past the loaded field ids —
-  // those ids are kept verbatim (the write-back round-trips them so the backend matches a
-  // changed label as a rename, not a delete+add), so a freshly added field must not collide
-  // with them. A status-aware 载入 note seeds the thread (closed forms aren't "online").
-  const loadFormForEdit = (form) => {
+  // ── 表单编辑入口 (PR-7 + A' 进项目) ──────────────────────────────────────────────
+  // 「继续编辑」a stored form = ENTER that form's PROJECT (A', §4.4). Resolve the project by reverse-
+  // looking the published slug up in listProjects; if none exists (a form published BEFORE A', no
+  // project yet) mint a fresh project and associate the slug. Then: load the form's current
+  // definition into the project workspace (authoritative for editing) + persist it to the project,
+  // and load the project's MOST-RECENT conversation as the real chat (A':「去掉合成『已载入』开场白」).
+  // The edit-mode UI (banner + 更新/重新发布 button + dirty baseline) is kept; what's GONE under A' is
+  // the persistence skip — an edit conversation IS the project's conversation now (fixes the「继续编辑
+  // 后刷新对话丢」bug). The canonical model is replaced so agent tool calls mutate THIS form; field
+  // ids are kept verbatim (so a write-back matches a changed label as a rename, not delete+add).
+  const loadFormForEdit = async (form) => {
     if (!form) return;
     setFormsOpen(false);
     const loadedMeta = form.meta ? { ...form.meta } : null;
     const loadedFields = (form.fields || []).map((f) => ({ ...f }));
-    reserveUidsFrom(loadedFields.map((f) => f.id));
-    // replace the canonical model so subsequent agent edits operate on the loaded form
+    reserveUidsFrom(loadedFields.map((f) => f.id).filter(Boolean));
+    // Resolve the project for this form (reverse-lookup by slug; else mint + associate, §4.4 兜底).
+    let projectId = null;
+    try {
+      const { projects } = await listProjects();
+      projectId = (Array.isArray(projects) ? projects : []).find(
+        (p) => p.formSlug === form.slug,
+      )?.projectId;
+    } catch {
+      /* best-effort — fall through to mint a fresh project for this form */
+    }
+    if (projectId) setActiveProjectId(projectId);
+    else projectId = newProjectId();
+    projectIdRef.current = projectId;
+    restoredRef.current = true; // we set the project up explicitly, not via the mount restore
+    const myLoad = ++loadSeqRef.current; // claim the latest-load slot (covers the conversation load)
+    // Workspace = the form's current definition (authoritative). Replace the canonical model + mirror.
     modelRef.current.meta = loadedMeta ? { ...loadedMeta } : null;
     modelRef.current.fields = loadedFields.map((f) => ({ ...f }));
-    // Start the edit on a CLEAN agent context: reset the LLM history to just the system prompt
-    // so the prior (new-form) conversation can't bleed into edits of a different form, and mark
-    // the editing ref so turn-end §26 persistence is skipped (an edit conversation is ephemeral
-    // and must not overwrite this or any form's design session). The visible thread is reseeded
-    // below; the agent reads the loaded fields via get_form_schema, so history needs no fields.
-    editingFormRef.current = { slug: form.slug, status: form.status, meta: loadedMeta };
-    historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
+    publishedSlugRef.current = form.slug;
+    // Edit-mode UI (banner + 更新 button + dirty baseline) — NO persistence skip under A'.
+    const ef = { slug: form.slug, status: form.status, meta: loadedMeta };
+    editingFormRef.current = ef;
+    setEditingForm(ef);
     setMeta(loadedMeta);
     setFields(loadedFields);
     setValuesState({});
-    setEditingForm({ slug: form.slug, status: form.status, meta: loadedMeta });
     setPublished(form.status === "published");
     setUpdateDone(false);
     setDiscardOpen(false);
     setPublishError("");
     setEditBaseline(editSig(loadedMeta, loadedFields));
     setTab("preview");
-    const title = loadedMeta?.title || L("这份表单", "this form");
-    const note =
-      form.status === "closed"
-        ? L(
-            `已载入《${title}》的当前版本，共 ${loadedFields.length} 个字段。这份表单当前已关闭、未在收集；直接告诉我要改什么，改好点「更新」保存，需要时再「重新发布」让访问者看到新版本。不想保留这次改动就点「退出」。`,
-            `Loaded the current version of “${title}” — ${loadedFields.length} fields. This form is currently closed and not collecting; just tell me what to change, click “Update” to save, and “Republish” when ready so visitors see the new version. Click “Exit” if you don't want to keep these changes.`,
-          )
-        : L(
-            `已载入《${title}》的当前版本，共 ${loadedFields.length} 个字段。直接告诉我要改什么，或在右侧预览里「指向修改」。改好后点「更新」即可对新访问者生效；不想保留这次改动就点「退出」。`,
-            `Loaded the current version of “${title}” — ${loadedFields.length} fields. Just tell me what to change, or use “Point to edit” in the preview on the right. Click “Update” to apply it to new visitors; click “Exit” if you don't want to keep these changes.`,
-          );
-    setMessagesTracked([{ id: uid("msg"), role: "assistant", kind: "text", text: note }]);
+    // Persist the workspace to the project so a refresh restores it (loadProject), associating the slug.
+    Promise.resolve(
+      saveProjectWorkspace(projectId, {
+        meta: loadedMeta,
+        fields: loadedFields.map(({ _new, ...rest }) => rest),
+        formSlug: form.slug,
+      }),
+    ).catch(() => {
+      /* best-effort — the next turn-end save re-establishes the project row */
+    });
+    // Load the project's most-recent conversation as the REAL chat (no synthetic「已载入」note).
+    try {
+      const { sessions: list } = await listChatSessions(projectId);
+      if (loadSeqRef.current !== myLoad) return; // superseded
+      if (Array.isArray(list) && list.length > 0) {
+        sessionIdRef.current = list[0].sessionId;
+        setActiveDesignSessionId(sessionIdRef.current);
+        const { session } = await loadChatSession(projectId, sessionIdRef.current);
+        if (loadSeqRef.current !== myLoad) return;
+        if (session) applyRestoredSession(session);
+        else resetConversation();
+      } else {
+        sessionIdRef.current = newDesignSessionId();
+        resetConversation();
+      }
+    } catch (e) {
+      if (loadSeqRef.current !== myLoad) return;
+      if (e instanceof ApiError && e.status === 401) {
+        needLogin(L("登录后继续编辑你的表单", "Sign in to continue editing your form"));
+        return;
+      }
+      // best-effort — fall back to a fresh empty conversation in this project.
+      sessionIdRef.current = newDesignSessionId();
+      resetConversation();
+    }
+    reflectDesignerUrl(projectId, sessionIdRef.current); // push /p/:id?s= (Back returns to my-forms)
+    refreshSessions();
   };
 
   // Write the edited form back via PATCH /api/forms/:slug (整块替换 meta+fields, §21.3).
@@ -1168,8 +1359,9 @@ function DesignerApp({
       const res = await publishForm(m, fs);
       setPublished(true);
       const url = (res && res.url) || publicFormUrl(res.slug);
-      // §26.2: 把 slug 关联进当前设计会话行并持久化一次 —— 必须在进入「编辑态」之前做,因为
-      // persistTurn 在 editingFormRef 非空时会跳过持久化(编辑态会话是临时的,见 persistTurn)。
+      // A' (§4.1): associate the slug onto the active PROJECT (+ its conversation) and persist once.
+      // persistTurn now writes BOTH the conversation row AND the project workspace row carrying the
+      // slug, so「我的表单 → 继续编辑」reverse-resolves back to this project by slug.
       publishedSlugRef.current = res.slug;
       persistTurn();
       // 接上既有 编辑/更新 机制:把刚发布的表单设为当前编辑目标(已发布态),记下内容基线 →
@@ -1210,25 +1402,31 @@ function DesignerApp({
     setShareOpen(true);
   };
 
-  // Leave edit mode and reset to a clean draft designer (the stored form is safe in 我的表单).
-  // Mirror loadFormForEdit's ref hygiene: clear the editing ref (re-enables §26 persistence) and
-  // reset the LLM history + published-slug association so the next new-form session starts clean
-  // and doesn't carry the edited form's context/slug.
+  // 退出编辑 (A'): leave the edited form's project and start a FRESH DRAFT project (the edited form is
+  // safe in 我的表单). Mint a new project + conversation, clear the workspace + thread, and reflect the
+  // new /p/:id?s= in the URL. Clearing the editing ref re-arms the (now always-on) persistence for
+  // the fresh draft; resetting history + slug keeps the new project clean of the edited form's context.
   const doExit = () => {
     editingFormRef.current = null;
-    historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
-    publishedSlugRef.current = null;
     setEditingForm(null);
     setUpdateDone(false);
     setDiscardOpen(false);
     setEditBaseline("");
     setPublishError("");
+    // Start a fresh draft PROJECT + conversation (new ids → next saves write new rows).
+    projectIdRef.current = newProjectId();
+    sessionIdRef.current = newDesignSessionId();
+    restoredRef.current = true; // a fresh project has nothing to restore
+    publishedSlugRef.current = null;
+    historyRef.current = [{ role: "system", content: DESIGNER_SYSTEM }];
     modelRef.current = createFormModel();
     setMeta(null);
     setFields([]);
     setValuesState({});
     setPublished(false);
     setMessagesTracked([]);
+    reflectDesignerUrl(projectIdRef.current, sessionIdRef.current);
+    refreshSessions();
   };
 
   // 退出: with unsaved changes confirm first (放弃本次编辑); otherwise leave directly.
@@ -1440,7 +1638,12 @@ function DesignerApp({
               // `pill` 反映当前选择。
               <div className="cm-wrap">
                 <ConversationThread
-                  title={L("对话", "Chat")}
+                  title={
+                    // A' (§5): the header title is the ACTIVE conversation's name (rename-able via the
+                    // SessionMenu row). Falls back to「对话」for an unnamed/never-listed thread.
+                    sessions.find((s) => s.sessionId === sessionIdRef.current)?.title ||
+                    L("对话", "Chat")
+                  }
                   model={chatModelPill(chatModel)}
                   onModelClick={() => setModelMenuOpen((o) => !o)}
                   actions={
@@ -1450,6 +1653,7 @@ function DesignerApp({
                       onNewChat={newChat}
                       onSelect={switchSession}
                       onDelete={removeSession}
+                      onRename={renameSession}
                     />
                   }
                   messages={messages}

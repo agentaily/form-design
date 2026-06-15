@@ -21,9 +21,12 @@ import {
   settingsPath,
   readSessionId,
   withSessionId,
+  readProjectId,
+  projectBasePath,
   currentPathname,
   currentSearch,
   PUBLIC_FORM_PREFIX,
+  PROJECT_PREFIX,
   RESET_PASSWORD_PATH,
   VERIFY_EMAIL_PATH,
   SETTINGS_PATH,
@@ -172,15 +175,81 @@ describe("router · matchSettings — recognises /settings/:tab (SPEC §12 + §1
   });
 });
 
-describe("router · settingsPath — build /settings/:tab for a tab (PR #76)", () => {
-  it("builds the path for each tab", () => {
+describe("router · PROJECT_PREFIX / readProjectId / projectBasePath (A' §26.10)", () => {
+  it("PROJECT_PREFIX is the contract-fixed /p/ prefix", () => {
+    expect(PROJECT_PREFIX).toBe("/p/");
+  });
+
+  it("reads the project id out of /p/:id", () => {
+    expect(readProjectId("/p/pj-1aaaa-uuid")).toBe("pj-1aaaa-uuid");
+  });
+
+  it("reads the project id even when the settings overlay nests under it (/p/:id/settings/:tab)", () => {
+    expect(readProjectId("/p/pj-x/settings/account")).toBe("pj-x");
+    expect(readProjectId("/p/pj-x/settings")).toBe("pj-x");
+  });
+
+  it("URL-decodes the project-id segment", () => {
+    expect(readProjectId("/p/a%2Fb")).toBe("a/b");
+  });
+
+  it("returns '' for non-project paths (bare /, legacy /settings, public, malformed)", () => {
+    expect(readProjectId("/")).toBe("");
+    expect(readProjectId("/settings/account")).toBe("");
+    expect(readProjectId("/f/abc")).toBe("");
+    expect(readProjectId("/p/")).toBe("");
+    expect(readProjectId("/p/%")).toBe(""); // malformed percent-encoding → degrade to ""
+  });
+
+  it("projectBasePath builds /p/:id and round-trips through readProjectId", () => {
+    expect(projectBasePath("pj-1")).toBe("/p/pj-1");
+    expect(readProjectId(projectBasePath("pj-1aaaa-uuid"))).toBe("pj-1aaaa-uuid");
+    // an id needing encoding round-trips too.
+    expect(readProjectId(projectBasePath("a/b"))).toBe("a/b");
+  });
+});
+
+describe("router · matchSettings nests under the project (/p/:id/settings/:tab, A')", () => {
+  it("recognises settings nested under a project path", () => {
+    expect(matchSettings("/p/pj-1/settings")).toEqual({ section: "integrations" });
+    expect(matchSettings("/p/pj-1/settings/account")).toEqual({ section: "account" });
+    expect(matchSettings("/p/pj-1/settings/integrations")).toEqual({ section: "integrations" });
+  });
+
+  it("a bare /p/:id (no settings sub-path) is the designer, NOT a settings route", () => {
+    expect(matchSettings("/p/pj-1")).toBeNull();
+    expect(matchSettings("/p/pj-1/")).toBeNull();
+  });
+
+  it("still recognises the legacy bare /settings/:tab (backward-compatible)", () => {
+    expect(matchSettings("/settings")).toEqual({ section: "integrations" });
+    expect(matchSettings("/settings/account")).toEqual({ section: "account" });
+  });
+
+  it("an unknown sub-segment under the project is not a settings route", () => {
+    expect(matchSettings("/p/pj-1/settings/extra")).toBeNull();
+    expect(matchSettings("/p/pj-1/foo")).toBeNull();
+  });
+});
+
+describe("router · settingsPath — build the settings path for a tab (PR #76 + A')", () => {
+  it("builds the bare /settings/:tab when no project is given (legacy fallback)", () => {
     expect(settingsPath("account")).toBe("/settings/account");
     expect(settingsPath("integrations")).toBe("/settings/integrations");
   });
 
-  it("round-trips through matchSettings", () => {
+  it("nests under the project when a projectId is given (A': /p/:id/settings/:tab)", () => {
+    expect(settingsPath("account", "pj-1")).toBe("/p/pj-1/settings/account");
+    expect(settingsPath("integrations", "pj-1")).toBe("/p/pj-1/settings/integrations");
+  });
+
+  it("round-trips through matchSettings (both bare and project-nested)", () => {
     expect(matchSettings(settingsPath("account"))).toEqual({ section: "account" });
     expect(matchSettings(settingsPath("integrations"))).toEqual({ section: "integrations" });
+    expect(matchSettings(settingsPath("account", "pj-1"))).toEqual({ section: "account" });
+    expect(matchSettings(settingsPath("integrations", "pj-1"))).toEqual({
+      section: "integrations",
+    });
   });
 });
 

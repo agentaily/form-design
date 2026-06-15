@@ -12,15 +12,39 @@
 import React from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-library/react/pure";
+
+// Scope a query to the open SessionMenu panel: under A' the ACTIVE conversation's title ALSO renders
+// as the ConversationThread header (§5 rename-able title), so a bare getByText("活动报名表单") is
+// ambiguous (menu row + thread title). Query inside the menu to assert the LIST, unambiguously.
+function inSessionMenu() {
+  const panel = document.querySelector(".cs-menu__panel");
+  if (!panel) throw new Error("SessionMenu panel not open");
+  return within(panel);
+}
 import App from "../../src/App.jsx";
 import { setToken, clearToken } from "../../src/core/apiClient";
 import { DESIGN_SESSION_ID_KEY } from "../../src/core/chatSessionClient";
+import { DESIGN_PROJECT_ID_KEY } from "../../src/core/projectClient";
 import { CHAT_MODEL_STORAGE_KEY as MODEL_KEY } from "../../src/core/chatModels";
 
 function asLoggedIn() {
   setToken("test.session.jwt-not-decoded");
 }
 const verifiedMe = async () => ({ email: "owner@example.com", emailVerified: true });
+
+// A' 项目↔对话 (§26.10): the App now also consumes loadProject / saveProjectWorkspace / listProjects
+// + renameChatSession. A harness omitting them hits the REAL clients → real fetch (undefined in
+// jsdom) → flaky. Inject empty-state fakes; the per-project session list (listChatSessions) is what
+// these multi-session scenarios assert. Per-test overrides win (spread last).
+function withProjectClients(props = {}) {
+  return {
+    loadProject: vi.fn(async () => ({ project: null })),
+    saveProjectWorkspace: vi.fn(async () => ({ projectId: "pj", updatedAt: "t" })),
+    listProjects: vi.fn(async () => ({ projects: [] })),
+    renameChatSession: vi.fn(async () => ({ renamed: true })),
+    ...props,
+  };
+}
 
 function makeStreamingChat(text) {
   return vi.fn(async ({ onText }) => {
@@ -51,6 +75,7 @@ afterEach(() => {
   clearToken();
   try {
     localStorage.removeItem(DESIGN_SESSION_ID_KEY);
+    localStorage.removeItem(DESIGN_PROJECT_ID_KEY);
     localStorage.removeItem(MODEL_KEY);
   } catch {
     /* ignore */
@@ -67,19 +92,23 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
     const listChatSessions = vi.fn(async () => ({ sessions: SESSIONS }));
     render(
       <App
-        chat={makeStreamingChat("ok")}
-        getCurrentUser={verifiedMe}
-        loadChatSession={vi.fn(async () => ({ session: null }))}
-        saveChatTurns={vi.fn(async () => ({ sessionId: "x", updatedAt: "t" }))}
-        listChatSessions={listChatSessions}
-        deleteChatSession={vi.fn(async () => ({ deleted: true }))}
+        {...withProjectClients({
+          chat: makeStreamingChat("ok"),
+          getCurrentUser: verifiedMe,
+          loadChatSession: vi.fn(async () => ({ session: null })),
+          saveChatTurns: vi.fn(async () => ({ sessionId: "x", updatedAt: "t" })),
+          listChatSessions,
+          deleteChatSession: vi.fn(async () => ({ deleted: true })),
+        })}
       />,
     );
-    // App loads the list on mount (logged in).
+    // App loads the list on mount (logged in). A' (§4.2): the list is now project-scoped — the
+    // SessionMenu shows THIS project's conversations (observable behavior here is unchanged).
     await waitFor(() => expect(listChatSessions).toHaveBeenCalled());
     openSessionMenu();
-    expect(await screen.findByText("活动报名表单")).toBeInTheDocument();
-    expect(screen.getByText("客户满意度问卷")).toBeInTheDocument();
+    // Both sessions appear in the menu list (scoped — the active one's title also shows in the header).
+    expect(await inSessionMenu().findByText("活动报名表单")).toBeInTheDocument();
+    expect(inSessionMenu().getByText("客户满意度问卷")).toBeInTheDocument();
   });
 
   it("Scenario: 新建会话清空当前对话工作区并开新 session", async () => {
@@ -87,12 +116,14 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
     const listChatSessions = vi.fn(async () => ({ sessions: SESSIONS }));
     render(
       <App
-        chat={makeStreamingChat("好的")}
-        getCurrentUser={verifiedMe}
-        loadChatSession={vi.fn(async () => ({ session: null }))}
-        saveChatTurns={vi.fn(async () => ({ sessionId: "x", updatedAt: "t" }))}
-        listChatSessions={listChatSessions}
-        deleteChatSession={vi.fn(async () => ({ deleted: true }))}
+        {...withProjectClients({
+          chat: makeStreamingChat("好的"),
+          getCurrentUser: verifiedMe,
+          loadChatSession: vi.fn(async () => ({ session: null })),
+          saveChatTurns: vi.fn(async () => ({ sessionId: "x", updatedAt: "t" })),
+          listChatSessions,
+          deleteChatSession: vi.fn(async () => ({ deleted: true })),
+        })}
       />,
     );
     await waitFor(() => expect(listChatSessions).toHaveBeenCalled());
@@ -122,17 +153,19 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
       ],
       history: [{ role: "system", content: "你是设计助手" }],
     };
-    const loadChatSession = vi.fn(async (id) =>
+    const loadChatSession = vi.fn(async (_projectId, id) =>
       id === "ds-other" ? { session: OTHER } : { session: null },
     );
     render(
       <App
-        chat={makeStreamingChat("ok")}
-        getCurrentUser={verifiedMe}
-        loadChatSession={loadChatSession}
-        saveChatTurns={vi.fn(async () => ({ sessionId: "x", updatedAt: "t" }))}
-        listChatSessions={listChatSessions}
-        deleteChatSession={vi.fn(async () => ({ deleted: true }))}
+        {...withProjectClients({
+          chat: makeStreamingChat("ok"),
+          getCurrentUser: verifiedMe,
+          loadChatSession,
+          saveChatTurns: vi.fn(async () => ({ sessionId: "x", updatedAt: "t" })),
+          listChatSessions,
+          deleteChatSession: vi.fn(async () => ({ deleted: true })),
+        })}
       />,
     );
     await waitFor(() => expect(listChatSessions).toHaveBeenCalled());
@@ -141,8 +174,11 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
     openSessionMenu();
     fireEvent.click(screen.getByText("客户满意度问卷"));
 
-    // Then 该会话的对话历史按原顺序重新出现在对话区。
-    await waitFor(() => expect(loadChatSession).toHaveBeenCalledWith("ds-other"));
+    // Then 该会话的对话历史按原顺序重新出现在对话区。A' (§26.10): the load is keyed
+    // (projectId, sessionId) — the conversation id is the 2nd arg.
+    await waitFor(() =>
+      expect(loadChatSession).toHaveBeenCalledWith(expect.any(String), "ds-other"),
+    );
     expect(await screen.findByText("切换载回的历史-唯一标记")).toBeInTheDocument();
     expect(screen.getByText("另一段会话的回复")).toBeInTheDocument();
   });
@@ -153,26 +189,30 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
     const deleteChatSession = vi.fn(async () => ({ deleted: true }));
     render(
       <App
-        chat={makeStreamingChat("ok")}
-        getCurrentUser={verifiedMe}
-        loadChatSession={vi.fn(async () => ({ session: null }))}
-        saveChatTurns={vi.fn(async () => ({ sessionId: "x", updatedAt: "t" }))}
-        listChatSessions={listChatSessions}
-        deleteChatSession={deleteChatSession}
+        {...withProjectClients({
+          chat: makeStreamingChat("ok"),
+          getCurrentUser: verifiedMe,
+          loadChatSession: vi.fn(async () => ({ session: null })),
+          saveChatTurns: vi.fn(async () => ({ sessionId: "x", updatedAt: "t" })),
+          listChatSessions,
+          deleteChatSession,
+        })}
       />,
     );
     await waitFor(() => expect(listChatSessions).toHaveBeenCalled());
     openSessionMenu();
 
     // 删除一段非当前会话:非当前项才有删除按钮(当前项打勾)。取第一个有删除按钮的行,
-    // 删它(避免依赖哪段恰好是当前活跃会话——模块级 mirror 跨用例会变)。
-    await screen.findByText("客户满意度问卷");
+    // 删它(避免依赖哪段恰好是当前活跃会话——模块级 mirror 跨用例会变)。query 进菜单面板,因为活跃
+    // 会话标题在 A' 下也会显示在 ConversationThread header(§5),裸 findByText 会有歧义。
+    await inSessionMenu().findByText("客户满意度问卷");
     const delBtn = screen.getAllByRole("button", { name: "删除会话" })[0];
     const row = delBtn.closest("[data-session-id]");
     const id = row.getAttribute("data-session-id");
     fireEvent.click(delBtn);
 
-    await waitFor(() => expect(deleteChatSession).toHaveBeenCalledWith(id));
+    // A' (§26.10): delete is keyed (projectId, sessionId) — the conversation id is the 2nd arg.
+    await waitFor(() => expect(deleteChatSession).toHaveBeenCalledWith(expect.any(String), id));
     // 删除后列表刷新。
     await waitFor(() => expect(listChatSessions.mock.calls.length).toBeGreaterThanOrEqual(2));
   });
@@ -182,12 +222,14 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
     const chat = makeStreamingChat("收到");
     render(
       <App
-        chat={chat}
-        getCurrentUser={verifiedMe}
-        loadChatSession={vi.fn(async () => ({ session: null }))}
-        saveChatTurns={vi.fn(async () => ({ sessionId: "x", updatedAt: "t" }))}
-        listChatSessions={vi.fn(async () => ({ sessions: [] }))}
-        deleteChatSession={vi.fn(async () => ({ deleted: true }))}
+        {...withProjectClients({
+          chat,
+          getCurrentUser: verifiedMe,
+          loadChatSession: vi.fn(async () => ({ session: null })),
+          saveChatTurns: vi.fn(async () => ({ sessionId: "x", updatedAt: "t" })),
+          listChatSessions: vi.fn(async () => ({ sessions: [] })),
+          deleteChatSession: vi.fn(async () => ({ deleted: true })),
+        })}
       />,
     );
 
@@ -211,12 +253,14 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
     const chat = makeStreamingChat("收到");
     render(
       <App
-        chat={chat}
-        getCurrentUser={verifiedMe}
-        loadChatSession={vi.fn(async () => ({ session: null }))}
-        saveChatTurns={vi.fn(async () => ({ sessionId: "x", updatedAt: "t" }))}
-        listChatSessions={vi.fn(async () => ({ sessions: [] }))}
-        deleteChatSession={vi.fn(async () => ({ deleted: true }))}
+        {...withProjectClients({
+          chat,
+          getCurrentUser: verifiedMe,
+          loadChatSession: vi.fn(async () => ({ session: null })),
+          saveChatTurns: vi.fn(async () => ({ sessionId: "x", updatedAt: "t" })),
+          listChatSessions: vi.fn(async () => ({ sessions: [] })),
+          deleteChatSession: vi.fn(async () => ({ deleted: true })),
+        })}
       />,
     );
     // 默认芯片显示 V4-Flash 的 pill(DS 在头部 + composer 两处都渲染 model,故用 getAllByText)。

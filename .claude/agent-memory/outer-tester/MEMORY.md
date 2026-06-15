@@ -1,1 +1,2 @@
 - [提交数据工具栏只在有提交时渲染](feedback_submissions-toolbar-needs-rows.md) — 测「导出 CSV / 飞书表格」工具栏的场景必须注入 ≥1 条提交,否则走空态、无工具栏
+- [App harness 要注入 project 客户端 + A' 测试连带改](feedback_app-harness-needs-project-clients.md) — A' 后 <App> 测试必注 loadProject 等否则真 fetch 假红;URL `/p/:id?s=`;活跃会话标题两处渲染要 scope 菜单

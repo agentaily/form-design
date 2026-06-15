@@ -1415,6 +1415,49 @@ body {
   color: var(--danger);
   background: var(--surface-card);
 }
+/* 重命名会话 (A' §26.10): a pen side-action mirroring __del — hidden until row hover. */
+.cs-item__rename {
+  flex: none;
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-faint);
+  padding: 4px;
+  border-radius: var(--radius-1);
+  display: inline-flex;
+  opacity: 0;
+  transition:
+    opacity var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out),
+    background var(--dur-1) var(--ease-out);
+}
+.cs-item:hover .cs-item__rename {
+  opacity: 1;
+}
+.cs-item__rename:hover {
+  color: var(--text-body);
+  background: var(--surface-card);
+}
+/* Inline rename input — app-level, styled with DS tokens (the panel is app-composed). */
+.cs-item.is-renaming {
+  cursor: default;
+}
+.cs-item__input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  font-size: var(--text-sm);
+  color: var(--text-body);
+  background: var(--surface-card);
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: var(--radius-1);
+  padding: 4px 8px;
+  outline: none;
+}
+.cs-item__input:focus {
+  border-color: var(--accent, var(--text-muted));
+}
 
 /* ── DEVIATION (老板拍板;P9-DW3zm 设计里其实有) — 隐藏「对话」标题旁的模型 pill ──────────
    DS ConversationThread 用同一个 `model` prop 同时渲染 ① 头部标题旁的 Badge(variant="outline")
