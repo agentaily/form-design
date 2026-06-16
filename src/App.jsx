@@ -25,6 +25,7 @@ import {
   BrandMark,
 } from "@agentaily/design-system";
 
+import { ThemeProvider, useTheme } from "@agentaily/web-kit";
 import { L, getLocale, setLocale } from "./core/i18n";
 import { Icon, renderChatTurn } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
@@ -119,10 +120,10 @@ const FOLLOWUPS = [
 ];
 
 // UI state for the designer. In the design prototype these were exposed through a
-// Tweaks panel; here they're plain app state — theme + split are user-driven, the
-// rest are fixed product defaults.
+// Tweaks panel; here they're plain app state — split is the only user-driven one, the
+// rest are fixed product defaults. NOTE: theme is NOT here — it's owned by web-kit's
+// <ThemeProvider> (cross-subdomain persistence + FOUC), read/written via useTheme().
 const UI_DEFAULTS = {
-  theme: "dark",
   split: 46,
   density: "compact",
   formStyle: "minimal",
@@ -206,7 +207,21 @@ function schemaFor(meta, fields) {
 // Zero protected-content flash for unauthorized users. The public/auth routes above are NOT
 // gated (they ARE the login / public surfaces). 行为级 401 兜底 (会话中途失效) 仍由 DesignerApp 的
 // guard()/needLogin 处理 (bounce to /signin → re-login → 守卫原地重跑); the entry guard is additive.
-export default function App({
+// App shell entry. Wrap the whole route tree in web-kit's <ThemeProvider> so the persisted
+// theme (cross-subdomain cookie `agentaily:theme`, default dark; localhost falls back to
+// localStorage) drives `data-theme` on EVERY route, and the designer's theme toggle (useTheme)
+// has its context. The matching FOUC inline script is injected into index.html at build/dev
+// (vite.config themeInitScript({defaultTheme:"dark"})), byte-identical to the marketing site —
+// so first paint is already correct and ThemeProvider only re-affirms it (no flash).
+export default function App(props) {
+  return (
+    <ThemeProvider defaultTheme="dark">
+      <AppRoutes {...props} />
+    </ThemeProvider>
+  );
+}
+
+function AppRoutes({
   pathname = currentPathname(),
   search = currentSearch(),
   // PublicFormPage I/O seams, injected straight through on the public route.
@@ -327,6 +342,9 @@ function DesignerApp({
   },
 } = {}) {
   const [t, setTweak] = useUiState(UI_DEFAULTS);
+  // Theme is owned by web-kit's <ThemeProvider> (cross-subdomain persistence + FOUC); the
+  // header toggle reads/writes it here. resolvedTheme is the concrete light|dark in effect.
+  const { resolvedTheme, setTheme } = useTheme();
   const [messages, setMessages] = useState([]);
   const [meta, setMeta] = useState(null);
   const [fields, setFields] = useState([]);
@@ -497,9 +515,7 @@ function DesignerApp({
   // must NOT overwrite the form's design session — kept in sync by loadFormForEdit / doExit).
   const editingFormRef = useRef(null);
 
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", t.theme === "light" ? "light" : "dark");
-  }, [t.theme]);
+  // (theme → data-theme is applied by web-kit's ThemeProvider; no local useEffect needed.)
 
   const setValue = useCallback((id, v) => setValuesState((s) => ({ ...s, [id]: v })), []);
   // All thread mutations go through setMessagesTracked. We compute `next` synchronously off
@@ -1655,9 +1671,9 @@ function DesignerApp({
                 </IconButton>
                 <IconButton
                   label={L("切换主题", "Toggle theme")}
-                  onClick={() => setTweak("theme", t.theme === "dark" ? "light" : "dark")}
+                  onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
                 >
-                  <Icon name={t.theme === "dark" ? "sun" : "moon"} size={15} />
+                  <Icon name={resolvedTheme === "dark" ? "sun" : "moon"} size={15} />
                 </IconButton>
                 {editingForm ? (
                   // 分享 = 只读 (N-_ayo8x): 仅在已发布/编辑态出现,取当前表单的公开链接弹分享浮层,

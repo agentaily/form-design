@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@agentaily/design-system": "^0.13.0",
+    "@agentaily/web-kit": "^0.1.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
