@@ -21,6 +21,7 @@ import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-li
 import App from "../../src/App.jsx";
 import { FormsPanel } from "../../src/forms-panel.jsx";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/form-publish-mgmt.feature"));
@@ -121,10 +122,11 @@ function makeBuildChat() {
 
 // Mount the real App in a logged-in owner session with the publish seams injected. §26
 // persistence + auth/me are stubbed deterministic so a turn never reaches the network.
-function renderApp(seams = {}) {
+async function renderApp(seams = {}) {
   setToken("owner-jwt");
   render(
     <App
+      checkSession={seams.checkSession ?? authedCheck}
       chat={seams.chat ?? makeBuildChat()}
       getCurrentUser={verifiedMe}
       loadChatSession={async () => ({ session: null })}
@@ -136,6 +138,9 @@ function renderApp(seams = {}) {
       navigate={seams.navigate}
     />,
   );
+  // Designer mounts behind the async <AuthGate>; wait for the empty-state composer anchor
+  // so the gate has settled (authed → designer) before any sync designer assertion.
+  await screen.findByText("描述你想要的表单");
 }
 
 // Drive the build to completion: clicking the starter hint runs the build turn; it settles
@@ -159,8 +164,8 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   // ── 发布 (直接动作 → ShareDialog) ─────────────────────────────────────────────
   Scenario("发布当前表单拿到公开填写链接", ({ Given, And, When, Then }) => {
     const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
-    Given("owner 已登录", () => {
-      renderApp({ publishForm });
+    Given("owner 已登录", async () => {
+      await renderApp({ publishForm });
     });
     And("设计器里已有一份带标题和至少一个字段的表单", async () => {
       await buildForm();
@@ -191,7 +196,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     const writeText = vi.fn(async () => {});
     Object.assign(navigator, { clipboard: { writeText } });
     Given("owner 刚发布了一份表单并看到公开填写链接", async () => {
-      renderApp({ publishForm: vi.fn(async () => ({ slug: "f8Kq2pXa" })) });
+      await renderApp({ publishForm: vi.fn(async () => ({ slug: "f8Kq2pXa" })) });
       await buildForm();
       clickPublish();
       await screen.findByText("/f/f8Kq2pXa", { exact: false });
@@ -209,8 +214,8 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
 
   Scenario("空表单无法发布", ({ Given, And, Then }) => {
     const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
-    Given("owner 已登录", () => {
-      renderApp({ publishForm });
+    Given("owner 已登录", async () => {
+      await renderApp({ publishForm });
     });
     And("设计器里还没有任何字段", () => {
       // No build → the designer is empty.
@@ -228,8 +233,8 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     const publishForm = vi.fn(async () => {
       throw new ApiError(400, "meta.title 必填");
     });
-    Given("owner 已登录", () => {
-      renderApp({ publishForm });
+    Given("owner 已登录", async () => {
+      await renderApp({ publishForm });
     });
     And("设计器里有字段但表单缺少标题", async () => {
       // 建出一份可点发布的表单;缺标题是后端拒绝的【原因】,前端只负责把后端的拒绝原话透出来。
@@ -255,8 +260,8 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   // ── 发布是直接动作 + 分享只读 (N-_ayo8x) ──────────────────────────────────────
   Scenario("发布是直接动作并弹出分享浮层", ({ Given, And, When, Then }) => {
     const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
-    Given("owner 已登录", () => {
-      renderApp({ publishForm });
+    Given("owner 已登录", async () => {
+      await renderApp({ publishForm });
     });
     And("设计器里已有一份带标题和至少一个字段的表单", async () => {
       await buildForm();
@@ -283,7 +288,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   Scenario("分享已发布的表单只读取链接", ({ Given, When, Then, And }) => {
     const updateFormDefinition = vi.fn(async () => ({ slug: "f8Kq2pXa", status: "published" }));
     Given("owner 刚发布了一份表单", async () => {
-      renderApp({
+      await renderApp({
         publishForm: vi.fn(async () => ({ slug: "f8Kq2pXa" })),
         updateFormDefinition,
       });
@@ -491,7 +496,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       throw new ApiError(401, "未授权");
     });
     Given("设计器里已有一份可发布的表单", async () => {
-      renderApp({ publishForm, navigate });
+      await renderApp({ publishForm, navigate });
       await buildForm();
     });
     When("owner 点击发布", () => {

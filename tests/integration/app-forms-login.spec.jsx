@@ -19,6 +19,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 
 afterEach(() => {
   cleanup();
@@ -29,6 +30,8 @@ afterEach(() => {
 // opens the panel instead of bouncing straight to /signin. me resolves verified.
 function baseStubs() {
   return {
+    // Entry guard seam: authed so the designer (+ its 我的表单 entry) mounts behind the page-level 守卫.
+    checkSession: authedCheck,
     chat: vi.fn(),
     getCurrentUser: async () => ({ email: "owner@example.com", emailVerified: true }),
   };

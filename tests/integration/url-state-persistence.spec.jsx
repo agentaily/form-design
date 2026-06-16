@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { setToken, clearToken } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 import { DESIGN_SESSION_ID_KEY } from "../../src/core/chatSessionClient";
 import { DESIGN_PROJECT_ID_KEY } from "../../src/core/projectClient";
 import { readProjectId } from "../../src/core/router";
@@ -61,6 +62,8 @@ function projectWorkspace({ projectId, fieldLabel }) {
 
 function baseProps(overrides = {}) {
   return {
+    // Entry guard seam: authed by default so the designer mounts (per-test overrides win, spread last).
+    checkSession: authedCheck,
     chat: makeStreamingChat("ok"),
     getCurrentUser: verifiedMe,
     loadChatSession: vi.fn(async () => ({ session: null })),

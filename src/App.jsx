@@ -100,7 +100,9 @@ import {
   requestEmailVerification as authRequestEmailVerification,
   getCurrentUser as authGetCurrentUser,
   updateProfile as authUpdateProfile,
+  validateSession as authValidateSession,
 } from "./core/auth";
+import { AuthGate } from "./auth-gate.jsx";
 
 // gated actions resumed after a round-trip to the standalone /signin page, keyed by a
 // serializable id (a function can't survive a full-page navigation).
@@ -186,15 +188,24 @@ function schemaFor(meta, fields) {
 //   • /signin              → <SignInScreen>     — the standalone owner login page (§17).
 //   • /reset-password?token= → <ResetPasswordPage> — set a new password (§24.5).
 //   • /verify-email?status=  → <VerifyEmailPage>    — show the verify result (§23.6).
-//   • anything else (incl. /settings) → the full designer (<DesignerApp>) below.
+//   • anything else (incl. /settings) → the full designer, BEHIND the entry guard (<AuthGate>).
 // Each landing page is chrome-less: NO chat / preview / publish frame, and NO token held on
 // the page (reset/verify I/O is public). 集成/账户设置 (§12 + §14 + §17) is NO LONGER a bare
 // route page since DS 0.8.0 — it is a FLOATING OVERLAY (<SettingsOverlay>) that DesignerApp
 // opens over itself, reflecting a /settings URL via history WITHOUT unmounting the designer.
-// So /settings falls through to <DesignerApp>, which opens the overlay on that path (deep-link)
-// and restores the prior page on close. This wrapper decides with no hooks before the branch,
-// so routes never share hook order. Tests drive the split by passing explicit `pathname` /
-// `search` (and may inject per-route seams).
+// So /settings falls through to the gated designer, which opens the overlay on that path
+// (deep-link) and restores the prior page on close. This wrapper decides with no hooks before
+// the branch, so routes never share hook order. Tests drive the split by passing explicit
+// `pathname` / `search` (and may inject per-route seams).
+//
+// 未登录守卫 (设计源 _QB7NM8v, SPEC §17/§23.6): the designer is a PROTECTED page, so it mounts
+// behind <AuthGate> — a single client-side guard that runs a real GET /api/auth/me (via
+// {@link checkSession}) BEFORE instantiating any designer content, and routes on the result:
+// 401/无 token → in-place 登录视图 (reuse <SignInScreen>, no white-flash redirect); 5xx/网络
+// → neutral 重试 placeholder; 200 → the designer (其内 emailVerified 决定软提醒条,§23.6 不硬墙).
+// Zero protected-content flash for unauthorized users. The public/auth routes above are NOT
+// gated (they ARE the login / public surfaces). 行为级 401 兜底 (会话中途失效) 仍由 DesignerApp 的
+// guard()/needLogin 处理 (bounce to /signin → re-login → 守卫原地重跑); the entry guard is additive.
 export default function App({
   pathname = currentPathname(),
   search = currentSearch(),
@@ -206,6 +217,10 @@ export default function App({
   // Landing-page navigation seams (§23.6 / §24.5), injectable for tests.
   onBackToLogin,
   onBackToApp,
+  // 入口守卫的会话校验 seam (未登录守卫): default = the real discriminated validateSession
+  // (真 GET /api/auth/me → authed | unauthed | error). Injectable so outer-loop specs drive the
+  // three entry paths deterministically without mocking the network layer.
+  checkSession = authValidateSession,
   ...rest
 } = {}) {
   const publicRoute = matchPublicForm(pathname);
@@ -238,8 +253,17 @@ export default function App({
   // /settings (and /settings/:tab) fall through here: DesignerApp opens the settings overlay when
   // the path is a settings route (deep-link) and reflects it via history on open/close/switch.
   // `pathname` + `search` are threaded so the overlay's initial tab AND the active design session
-  // (?s=<id>) both match the URL on mount (PR #76).
-  return <DesignerApp pathname={pathname} search={search} {...rest} />;
+  // (?s=<id>) both match the URL on mount (PR #76). Mounted behind the entry guard: a signed-out /
+  // expired owner never sees the designer (zero-flash), only the in-place 登录视图; a check error
+  // shows the neutral 重试 placeholder. On 登录成功 the guard re-validates IN PLACE (no full reload).
+  return (
+    <AuthGate
+      check={checkSession}
+      renderSignIn={(onSignedIn) => <SignInScreen search="" navigate={() => onSignedIn()} />}
+    >
+      {() => <DesignerApp pathname={pathname} search={search} {...rest} />}
+    </AuthGate>
+  );
 }
 
 function DesignerApp({

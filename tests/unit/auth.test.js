@@ -8,6 +8,7 @@ import {
   confirmPasswordReset,
   requestEmailVerification,
   getCurrentUser,
+  validateSession,
   updateProfile,
 } from "../../src/core/auth";
 import { getToken, setToken, clearToken } from "../../src/core/apiClient";
@@ -323,6 +324,91 @@ describe("auth · getCurrentUser (§23.6 — 读真实验证状态)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(getCurrentUser()).resolves.toBeNull();
+  });
+});
+
+describe("auth · validateSession (入口守卫 AuthGate 的判别式裁决, §17/§23.6)", () => {
+  // Unlike getCurrentUser (fail-soft to null for BOTH 401 and errors), validateSession
+  // returns a discriminated state so the entry guard can route distinctly:
+  //   authed   → 进设计器(带 emailVerified → 软提醒条)
+  //   unauthed → 登录视图(401 / 无 token)
+  //   error    → 中性「重试」占位(5xx / 网络异常)
+  it("short-circuits to unauthed WITHOUT fetching when no token is held (无凭证必未登录)", async () => {
+    clearToken();
+    const fetchMock = vi.fn(async () => jsonResponse({ email: "owner@example.com" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(validateSession()).resolves.toEqual({ status: "unauthed" });
+    // no round-trip — a missing credential is definitively not authenticated.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns authed + the user (with emailVerified) on a 200 (token present)", async () => {
+    setToken("owner-jwt");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ email: "owner@example.com", emailVerified: false, displayName: "陈伟" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const r = await validateSession();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/auth/me");
+    expect(init.headers.authorization).toBe("Bearer owner-jwt");
+    expect(r).toEqual({
+      status: "authed",
+      user: { email: "owner@example.com", emailVerified: false, displayName: "陈伟" },
+    });
+  });
+
+  it("coerces emailVerified to a strict boolean (backend may send 0/1)", async () => {
+    setToken("owner-jwt");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ email: "o@e.com", emailVerified: 1 })),
+    );
+    const r = await validateSession();
+    expect(r).toEqual({
+      status: "authed",
+      user: { email: "o@e.com", emailVerified: true, displayName: null },
+    });
+  });
+
+  it("returns unauthed on a 401 (会话失效 → 登录视图)", async () => {
+    setToken("stale-jwt");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: "未授权" }, { status: 401 })),
+    );
+    await expect(validateSession()).resolves.toEqual({ status: "unauthed" });
+  });
+
+  it("returns error on a 5xx (校验服务异常 → 重试占位, NOT login)", async () => {
+    setToken("owner-jwt");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: "boom" }, { status: 500 })),
+    );
+    await expect(validateSession()).resolves.toEqual({ status: "error" });
+  });
+
+  it("returns error on a network failure (offline → 重试占位, NOT login)", async () => {
+    setToken("owner-jwt");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+    await expect(validateSession()).resolves.toEqual({ status: "error" });
+  });
+
+  it("returns unauthed on a malformed 2xx (no email → degrade to login, never throw)", async () => {
+    setToken("owner-jwt");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({})),
+    );
+    await expect(validateSession()).resolves.toEqual({ status: "unauthed" });
   });
 });
 

@@ -19,6 +19,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/re
 import App from "../../src/App.jsx";
 import { setToken, clearToken } from "../../src/core/apiClient";
 import { ApiError } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/form-editing.feature"));
@@ -85,10 +86,11 @@ function chatAddsField() {
 // (loadProject / saveProjectWorkspace / listProjects + renameChatSession) are injected with empty-
 // state fakes so「继续编辑」(= 进项目) doesn't hit the real clients (real fetch → undefined in jsdom).
 // A saveChatTurns / saveProjectWorkspace spy can be injected to assert what an edit turn persists.
-function renderApp(seams = {}) {
+async function renderApp(seams = {}) {
   setToken("owner-jwt");
   render(
     <App
+      checkSession={seams.checkSession ?? authedCheck}
       chat={seams.chat ?? vi.fn(async () => ({ text: "", toolCalls: [] }))}
       getCurrentUser={verifiedMe}
       loadChatSession={seams.loadChatSession ?? (async () => ({ session: null }))}
@@ -108,6 +110,9 @@ function renderApp(seams = {}) {
       navigate={seams.navigate}
     />,
   );
+  // The designer mounts behind the async <AuthGate>; wait for the empty-state composer
+  // anchor so the gate has settled (authed → designer) before any sync designer assertion.
+  await screen.findByText("描述你想要的表单");
 }
 
 // 「我的表单」 lives in the AccountControl avatar menu (logged-in). Open the menu, click it.
@@ -126,7 +131,7 @@ function sendViaComposer(text) {
 
 // Load a published form into the designer for editing: open 我的表单 → 继续编辑 → banner up.
 async function enterEditPublished(updateFormDefinition) {
-  renderApp({
+  await renderApp({
     listForms: vi.fn(async () => [PUBLISHED_SUMMARY]),
     getFormForEdit: vi.fn(async () => PUBLISHED_FULL),
     updateFormDefinition,
@@ -153,7 +158,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   Scenario("把一份已发布表单载回设计器编辑", ({ Given, When, And, Then }) => {
     const getFormForEdit = vi.fn(async () => PUBLISHED_FULL);
     Given("owner 打开「我的表单」且其中一份已发布表单", async () => {
-      renderApp({ listForms: vi.fn(async () => [PUBLISHED_SUMMARY]), getFormForEdit });
+      await renderApp({ listForms: vi.fn(async () => [PUBLISHED_SUMMARY]), getFormForEdit });
       await openMyForms();
       await screen.findByText("活动报名表");
     });
@@ -180,7 +185,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   Scenario("编辑已关闭的表单不按在线态展示", ({ Given, When, And, Then }) => {
     const getFormForEdit = vi.fn(async () => CLOSED_FULL);
     Given("owner 打开「我的表单」且其中一份已关闭表单", async () => {
-      renderApp({ listForms: vi.fn(async () => [CLOSED_SUMMARY]), getFormForEdit });
+      await renderApp({ listForms: vi.fn(async () => [CLOSED_SUMMARY]), getFormForEdit });
       await openMyForms();
       await screen.findByText("已结束的问卷");
     });
@@ -326,7 +331,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     const saveChatTurns = vi.fn(async () => ({}));
     const saveProjectWorkspace = vi.fn(async () => ({ projectId: "pj", updatedAt: "t" }));
     Given("owner 已把一份已发布表单载回设计器编辑", async () => {
-      renderApp({
+      await renderApp({
         listForms: vi.fn(async () => [PUBLISHED_SUMMARY]),
         getFormForEdit: vi.fn(async () => PUBLISHED_FULL),
         updateFormDefinition: vi.fn(),
@@ -370,7 +375,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
       throw new ApiError(401, "未授权");
     });
     Given("owner 已把一份已发布表单载回设计器编辑并做了改动", async () => {
-      renderApp({
+      await renderApp({
         listForms: vi.fn(async () => [PUBLISHED_SUMMARY]),
         getFormForEdit: vi.fn(async () => PUBLISHED_FULL),
         updateFormDefinition,
