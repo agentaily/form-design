@@ -9,6 +9,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/re
 import { MarkupLayer } from "@agentaily/design-system";
 import App from "../../src/App.jsx";
 import { FormPreview } from "../../src/preview.jsx";
+import { authedCheck } from "../helpers/authGate.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/markup-targeting.feature"));
@@ -61,8 +62,10 @@ function fakeBuildChat() {
 // the 预览 tab with fields present (the feature Background). Resolves once the
 // agent turn settles (指向修改 enabled ⇒ building false + fields present).
 async function buildSeededApp() {
-  render(<App chat={fakeBuildChat()} />);
-  fireEvent.click(screen.getByText("做一个线下活动报名表"));
+  render(<App checkSession={authedCheck} chat={fakeBuildChat()} />);
+  // The designer mounts behind the async <AuthGate>; wait for the empty-state composer anchor
+  // (gate settled → designer up) before clicking the starter hint.
+  fireEvent.click(await screen.findByText("做一个线下活动报名表"));
   await waitFor(() => expect(screen.getByRole("button", { name: "指向修改" })).toBeEnabled());
 }
 
@@ -133,8 +136,10 @@ describeFeature(
     });
 
     Scenario("空表单时「指向修改」入口禁用", ({ Given, Then }) => {
-      Given("一份没有任何字段的表单", () => {
-        render(<App />);
+      Given("一份没有任何字段的表单", async () => {
+        render(<App checkSession={authedCheck} />);
+        // Wait for the designer to mount behind the async <AuthGate> before the next step queries it.
+        await screen.findByText("描述你想要的表单");
       });
       Then("预览工具栏的「指向修改」处于禁用态", () => {
         expect(screen.getByRole("button", { name: "指向修改" })).toBeDisabled();

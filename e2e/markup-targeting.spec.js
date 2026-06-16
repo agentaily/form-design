@@ -6,8 +6,32 @@ import { mockChat } from "./chatMock.js";
 // Build a form (via the mocked /api/chat agent) → enter targeting mode → hover a
 // field (highlight + identity tag) → click → type → send → the tagged user message
 // lands in the LEFT chat → targeting mode auto-exits.
+//
+// The designer is now an owner-only protected page behind the entry guard (<AuthGate>),
+// so a signed-in session is the precondition for the designer to mount at all: seed a
+// token + mock GET /api/auth/me (200) so the guard admits the owner and the designer renders.
+const TOKEN = "fake.jwt.token";
+
+async function seedSession(page) {
+  await page.route("**/api/auth/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "owner@example.com", emailVerified: true }),
+    });
+  });
+  await page.addInitScript((token) => {
+    try {
+      localStorage.setItem("agentaily_forms_token", token);
+    } catch {
+      /* private mode — token mirror still set in-app */
+    }
+  }, TOKEN);
+}
+
 test.describe("Agentaily Forms · 指向修改", () => {
   test.beforeEach(async ({ page }) => {
+    await seedSession(page);
     await mockChat(page);
     await page.goto("/");
   });

@@ -17,6 +17,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/re
 import App from "../../src/App.jsx";
 import { FormPreview } from "../../src/preview.jsx";
 import { setToken, clearToken } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 import { DESIGN_SESSION_ID_KEY } from "../../src/core/chatSessionClient";
 import { DESIGN_PROJECT_ID_KEY } from "../../src/core/projectClient";
 import { CHAT_MODEL_STORAGE_KEY as MODEL_KEY } from "../../src/core/chatModels";
@@ -35,6 +36,8 @@ function makeStreamingChat(text) {
 // Default App props with the A' project clients injected (empty-state fakes; per-test overrides).
 function baseProps(overrides = {}) {
   return {
+    // Entry guard seam: authed by default so the designer mounts (per-test overrides win, spread last).
+    checkSession: authedCheck,
     chat: makeStreamingChat("ok"),
     getCurrentUser: verifiedMe,
     loadChatSession: vi.fn(async () => ({ session: null })),

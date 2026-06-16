@@ -23,6 +23,7 @@ function inSessionMenu() {
 }
 import App from "../../src/App.jsx";
 import { setToken, clearToken } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 import { DESIGN_SESSION_ID_KEY } from "../../src/core/chatSessionClient";
 import { DESIGN_PROJECT_ID_KEY } from "../../src/core/projectClient";
 import { CHAT_MODEL_STORAGE_KEY as MODEL_KEY } from "../../src/core/chatModels";
@@ -38,6 +39,9 @@ const verifiedMe = async () => ({ email: "owner@example.com", emailVerified: tru
 // these multi-session scenarios assert. Per-test overrides win (spread last).
 function withProjectClients(props = {}) {
   return {
+    // Entry guard seam: authed by default so the designer mounts behind the page-level 守卫.
+    // Per-test overrides win (spread last).
+    checkSession: authedCheck,
     loadProject: vi.fn(async () => ({ project: null })),
     saveProjectWorkspace: vi.fn(async () => ({ projectId: "pj", updatedAt: "t" })),
     listProjects: vi.fn(async () => ({ projects: [] })),
@@ -233,6 +237,8 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
       />,
     );
 
+    // 等设计器越过入口守卫挂载(空态 composer 出现)后再操作模型芯片。
+    await screen.findByText("描述你想要的表单");
     // When owner 为当前对话选用模型 "DeepSeek-V4-Pro":点 composer 的模型芯片 → 弹层 → 选 V4-Pro。
     const chip = document.querySelector(".ax-composer__model");
     expect(chip).toBeTruthy();
@@ -263,6 +269,8 @@ describe("多会话管理 + 对话级模型 (features/chat-multi-session.feature
         })}
       />,
     );
+    // 等设计器越过入口守卫挂载(空态 composer 出现)后再断言默认芯片。
+    await screen.findByText("描述你想要的表单");
     // 默认芯片显示 V4-Flash 的 pill(DS 在头部 + composer 两处都渲染 model,故用 getAllByText)。
     expect(screen.getAllByText(/DeepSeek · V4-Flash/).length).toBeGreaterThan(0);
     // 具体地,composer 内部模型芯片(.ax-composer__model)文本含默认 pill。

@@ -23,6 +23,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 
 // Put the App into a logged-in session: the banner only renders when loggedIn AND
 // emailVerified is false (§23.6). loggedIn comes from the token store (authIsLoggedIn),
@@ -31,9 +32,17 @@ function asLoggedIn() {
   setToken("test.session.jwt-not-decoded");
 }
 
-// Inert owner-only seams App injects into its children; chat never runs here.
+// Inert owner-only seams App injects into its children; chat never runs here. checkSession is
+// authed so the designer mounts behind the page-level 守卫 (the banner's verified bit still comes
+// from getCurrentUser, not the gate — see tests/helpers/authGate.js NOTE).
 function baseStubs() {
-  return { chat: vi.fn(), login: vi.fn(), register: vi.fn(), logout: vi.fn() };
+  return {
+    checkSession: authedCheck,
+    chat: vi.fn(),
+    login: vi.fn(),
+    register: vi.fn(),
+    logout: vi.fn(),
+  };
 }
 
 afterEach(() => {

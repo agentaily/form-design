@@ -7,6 +7,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/re
 import App from "../../src/App.jsx";
 import { SignInScreen } from "../../src/signin.jsx";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/owner-login.feature"));
@@ -64,14 +65,23 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     clearToken();
   });
 
-  Scenario("未登录时对话触发登录引导", ({ Given, When, Then, And }) => {
+  Scenario("会话中途失效时对话触发重新登录引导", ({ Given, When, Then, And }) => {
     const navigate = vi.fn();
-    Given("设计器处于空状态且未登录", () => {
-      clearToken();
-      render(<App chat={chat401()} navigate={navigate} />);
-      expect(screen.getByText("描述你想要的表单")).toBeInTheDocument();
+    Given("设计器已载入（owner 已登录）", async () => {
+      // 入口守卫放行(checkSession→authed)后设计器挂载;随后会话在一次对话动作上失效(chat 401),
+      // 由 needLogin 引导去 /signin —— 入口守卫只在进入时校验,会话中途失效仍走这条行为级兜底。
+      setToken("owner-jwt");
+      render(
+        <App
+          chat={chat401()}
+          navigate={navigate}
+          checkSession={authedCheck}
+          getCurrentUser={async () => ({ email: "owner@example.com", emailVerified: true })}
+        />,
+      );
+      await screen.findByText("描述你想要的表单");
     });
-    When("作者发起一句对话且后端返回 401", async () => {
+    When("作者发起一句对话但后端返回 401（会话已失效）", async () => {
       fireEvent.click(screen.getByText("做一个线下活动报名表"));
       await screen.findByText("请先登录 owner 后再使用对话设计。");
     });
@@ -257,6 +267,7 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
         <App
           chat={vi.fn()}
           logout={logout}
+          checkSession={authedCheck}
           getCurrentUser={async () => ({ email: "owner@example.com", emailVerified: true })}
         />,
       );

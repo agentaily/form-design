@@ -18,6 +18,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 import { DESIGN_PROJECT_ID_KEY } from "../../src/core/projectClient";
 import { readProjectId } from "../../src/core/router";
 
@@ -40,6 +41,9 @@ afterEach(() => {
 // suffix + that a project segment is present, not an exact id.
 function withProjectClients(props = {}) {
   return {
+    // Entry guard seam: authed by default so the designer (+ its settings overlay) mounts behind the
+    // page-level 守卫. Per-test overrides win (spread last).
+    checkSession: authedCheck,
     loadProject: vi.fn(async () => ({ project: null })),
     saveProjectWorkspace: vi.fn(async () => ({ projectId: "pj", updatedAt: "t" })),
     listProjects: vi.fn(async () => ({ projects: [] })),

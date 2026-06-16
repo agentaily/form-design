@@ -8,6 +8,7 @@ import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { setToken, clearToken } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/build-form.feature"));
@@ -81,9 +82,11 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
   });
 
   Scenario("从提示词搭出活动报名表", ({ Given, When, Then, And }) => {
-    Given("设计器处于空状态", () => {
-      render(<App chat={makeFakeChat()} />);
-      expect(screen.getByText("描述你想要的表单")).toBeInTheDocument();
+    Given("设计器处于空状态", async () => {
+      // 设计器在入口守卫之后(现需登录方可使用);放行后落到空态设计器。
+      setToken("owner-jwt");
+      render(<App chat={makeFakeChat()} checkSession={authedCheck} />);
+      await screen.findByText("描述你想要的表单");
     });
     When("作者选择「做一个线下活动报名表」起步提示", async () => {
       fireEvent.click(screen.getByText("做一个线下活动报名表"));
@@ -119,17 +122,18 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
     // put the App in a logged-in session so 发布 publishes directly.
     const publishForm = vi.fn(async () => ({ slug: "f8Kq2pXa" }));
     const publicFormUrl = vi.fn((slug) => `/f/${slug}`);
-    Given("设计器处于空状态", () => {
+    Given("设计器处于空状态", async () => {
       setToken("owner-jwt");
       render(
         <App
           chat={makeFakeChat()}
+          checkSession={authedCheck}
           publishForm={publishForm}
           publicFormUrl={publicFormUrl}
           getCurrentUser={async () => ({ email: "owner@example.com", emailVerified: true })}
         />,
       );
-      expect(screen.getByText("描述你想要的表单")).toBeInTheDocument();
+      await screen.findByText("描述你想要的表单");
     });
     When("作者选择「做一个线下活动报名表」起步提示", async () => {
       fireEvent.click(screen.getByText("做一个线下活动报名表"));

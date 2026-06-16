@@ -23,6 +23,7 @@ import { loadFeature, describeFeature } from "@amiceli/vitest-cucumber";
 import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { ApiError } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/public-fill.feature"));
@@ -142,9 +143,20 @@ describeFeature(feature, ({ Scenario, AfterEachScenario }) => {
 
   Scenario("普通路径仍进入设计器", ({ Given, When, Then }) => {
     Given("浏览器地址是 /", () => {});
-    When("应用按路径分流", () => {
-      // No public slug → App renders the designer (no public I/O seams needed).
-      render(<App pathname="/" chat={vi.fn()} login={vi.fn()} logout={vi.fn()} />);
+    When("应用按路径分流", async () => {
+      // No public slug → App falls through to the designer branch. The designer sits behind the
+      // entry guard (a protected page), so a logged-in session is declared via checkSession →
+      // the route lands on the designer (not the public fill page).
+      render(
+        <App
+          pathname="/"
+          chat={vi.fn()}
+          login={vi.fn()}
+          logout={vi.fn()}
+          checkSession={authedCheck}
+        />,
+      );
+      await screen.findByText("描述你想要的表单");
     });
     Then("渲染设计器而非公开填写页", () => {
       // The designer's empty-state heading is present; no public form title.

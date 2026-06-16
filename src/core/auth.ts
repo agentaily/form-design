@@ -12,7 +12,7 @@
 // §17.3) — both surface as the {@link ApiError} thrown by apiFetch for the caller
 // (LoginDialog) to map to a readable message.
 
-import { apiFetch, setToken, clearToken, getToken } from "./apiClient";
+import { apiFetch, setToken, clearToken, getToken, ApiError } from "./apiClient";
 
 /** Success body of register (201) / login (200): only the session token (§17.2 / §17.3). */
 interface AuthResponse {
@@ -149,6 +149,59 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
     emailVerified: !!res.emailVerified,
     // displayName is null when the backend omits it (account never named); a string passes through.
     displayName: typeof res.displayName === "string" ? res.displayName : null,
+  };
+}
+
+/**
+ * The discriminated result of the entry-guard session check ({@link validateSession}).
+ * Unlike {@link getCurrentUser} (which fails soft to `null` for BOTH a 401 and a
+ * network/backend hiccup), this distinguishes the three outcomes the page-level
+ * 未登录守卫 (AuthGate) must route on:
+ *   - `authed`   → the owner is signed in (carry the {@link CurrentUser}; `emailVerified`
+ *                  drives the soft 未验证 提醒条 — a 软提醒, never a hard wall, §23.6).
+ *   - `unauthed` → no/invalid session (no token, or a 401) → the in-place 登录视图.
+ *   - `error`    → the check itself failed (5xx / network) → a neutral 「重试」 placeholder,
+ *                  NOT the login view (an offline owner is not 未登录).
+ */
+export type SessionState =
+  | { status: "authed"; user: CurrentUser }
+  | { status: "unauthed" }
+  | { status: "error" };
+
+/**
+ * The page-level entry guard's session check (the production 守卫 behind {@link
+ * import("../auth-gate.jsx")}): the real `GET /api/auth/me`, mapped to a {@link
+ * SessionState} the guard can route on. This is the one mandatory difference from
+ * {@link getCurrentUser}: the guard must tell a 401 (→ 登录视图) apart from a transient
+ * 5xx/network error (→ 重试占位), which the fail-soft `getCurrentUser` collapses into `null`.
+ *
+ * A missing token short-circuits to `unauthed` WITHOUT a round-trip — no credential is
+ * definitively not authenticated, and the backend would only answer 401 anyway. With a
+ * token: a 200 carrying an email → `authed`; a 401 → `unauthed`; any other non-2xx OR a
+ * `fetch` rejection (offline) → `error`; a malformed 2xx (no email) degrades to `unauthed`
+ * (never throws — the guard always lands on a deterministic view).
+ */
+export async function validateSession(): Promise<SessionState> {
+  // No credential held → definitively not authenticated; skip the pointless 401 round-trip.
+  if (!getToken()) return { status: "unauthed" };
+  let res: { email?: unknown; emailVerified?: unknown; displayName?: unknown } | undefined;
+  try {
+    res = await apiFetch("/api/auth/me", { auth: true });
+  } catch (e) {
+    // 401 = 会话失效/无效 → 登录视图; everything else (5xx, other ApiError, network throw) → 重试占位.
+    if (e instanceof ApiError && e.status === 401) return { status: "unauthed" };
+    return { status: "error" };
+  }
+  // A 2xx that doesn't carry a usable email is a protocol oddity — degrade to the login view
+  // rather than mount the designer with a half-formed identity.
+  if (!res || typeof res.email !== "string") return { status: "unauthed" };
+  return {
+    status: "authed",
+    user: {
+      email: res.email,
+      emailVerified: !!res.emailVerified,
+      displayName: typeof res.displayName === "string" ? res.displayName : null,
+    },
   };
 }
 

@@ -26,6 +26,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { setToken, clearToken, ApiError } from "../../src/core/apiClient";
+import { authedCheck } from "../helpers/authGate.js";
 import { DESIGN_SESSION_ID_KEY } from "../../src/core/chatSessionClient";
 import { DESIGN_PROJECT_ID_KEY } from "../../src/core/projectClient";
 
@@ -36,6 +37,10 @@ import { DESIGN_PROJECT_ID_KEY } from "../../src/core/projectClient";
 // scenarios actually assert. Per-test overrides win (spread last).
 function withProjectClients(props = {}) {
   return {
+    // Entry guard seam: authed by default so the designer mounts. This is the page-level session
+    // gate (separate from the designer's own token-store authIsLoggedIn check that the 未登录
+    // scenarios exercise — the gate's user does NOT seed the designer). Per-test overrides win.
+    checkSession: authedCheck,
     loadProject: vi.fn(async () => ({ project: null })),
     saveProjectWorkspace: vi.fn(async () => ({ projectId: "pj", updatedAt: "t" })),
     listProjects: vi.fn(async () => ({ projects: [] })),
@@ -285,8 +290,8 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
       />,
     );
 
-    // When 助手的回复正在逐字流式输出。
-    fireEvent.click(screen.getByText("做一个线下活动报名表"));
+    // When 助手的回复正在逐字流式输出。(等设计器越过入口守卫挂载后再点 starter hint。)
+    fireEvent.click(await screen.findByText("做一个线下活动报名表"));
     await waitFor(() => expect(saveChatTurns).toHaveBeenCalledTimes(1));
 
     // Then 流式过程中不向后端发起逐 token 的写入请求(每个片段时刻都还是 0 次),
@@ -335,8 +340,8 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
       />,
     );
 
-    // When owner 发布这份表单(先搭出字段使「发布」可点)。
-    fireEvent.click(screen.getByText("做一个线下活动报名表"));
+    // When owner 发布这份表单(先搭出字段使「发布」可点)。(等设计器越过入口守卫挂载后再点。)
+    fireEvent.click(await screen.findByText("做一个线下活动报名表"));
     await waitFor(() => expect(saveChatTurns).toHaveBeenCalledTimes(1));
     const publishBtn = screen.getByRole("button", { name: "发布" });
     await waitFor(() => expect(publishBtn).toBeEnabled());
@@ -383,8 +388,8 @@ describe("设计对话持久化 + 刷新恢复 (features/chat-session-persistenc
       />,
     );
 
-    // When owner 在设计器里输入并发送一条消息。
-    fireEvent.click(screen.getByText("做一个线下活动报名表"));
+    // When owner 在设计器里输入并发送一条消息。(等设计器越过入口守卫挂载后再点。)
+    fireEvent.click(await screen.findByText("做一个线下活动报名表"));
 
     // Then 发送对话设计请求返回 401 → 提示需要先登录并引导去登录页(/signin)。
     await waitFor(() => expect(navigate).toHaveBeenCalled());

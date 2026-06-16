@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup } from "@testing-library/react/pure";
 import App from "../../src/App.jsx";
 import { setToken, clearToken } from "../../src/core/apiClient";
+import { authedCheck, unauthedCheck } from "../helpers/authGate.js";
 
 beforeEach(() => {
   // A held token = a logged-in owner session, which is the precondition for the
@@ -27,8 +28,10 @@ afterEach(() => {
 });
 
 // chat/login/logout are inert here — no message is ever sent and no dialog driven.
+// checkSession is authed so the designer mounts behind the page-level 未登录守卫; the banner's
+// verified bit still comes from getCurrentUser, NOT the gate (see tests/helpers/authGate.js NOTE).
 function baseStubs() {
-  return { chat: vi.fn(), login: vi.fn(), logout: vi.fn() };
+  return { checkSession: authedCheck, chat: vi.fn(), login: vi.fn(), logout: vi.fn() };
 }
 
 const findBanner = () => screen.findByTestId("verify-banner");
@@ -100,15 +103,16 @@ describe("App: 未验证 banner reads GET /api/auth/me (§23.6)", () => {
     expect(await findBanner()).toBeInTheDocument();
   });
 
-  it("does not fetch me when logged OUT (no token) — nothing to verify", async () => {
+  it("never reaches the banner's me-check when logged OUT — the gate denies before the designer mounts", async () => {
     clearToken();
+    // Override the authed default: a denied session (no token) lands the entry guard on the
+    // in-place 登录视图, so the protected designer — and its banner's me-check — never mount.
     const getCurrentUser = vi.fn(async () => ({ email: "x@y.z", emailVerified: false }));
-    render(<App {...baseStubs()} getCurrentUser={getCurrentUser} />);
+    render(<App {...baseStubs()} checkSession={unauthedCheck} getCurrentUser={getCurrentUser} />);
 
-    // The logged-out shell shows the AccountControl 登录 button (no avatar menu) and
-    // never mounts the banner.
-    expect(screen.getByRole("button", { name: "登录" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "账户菜单" })).not.toBeInTheDocument();
+    // The guard shows the standalone SignInScreen (登录视图), NOT the designer; the banner is
+    // never mounted and its authoritative me-check is never consulted.
+    expect(await screen.findByText("登录 Agentaily Forms")).toBeInTheDocument();
     expect(queryBanner()).not.toBeInTheDocument();
     expect(getCurrentUser).not.toHaveBeenCalled();
   });

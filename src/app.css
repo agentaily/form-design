@@ -197,6 +197,150 @@ body {
   min-width: 0;
 }
 
+/* ── 未登录守卫 (AuthGate, 设计源 _QB7NM8v) ────────────────────────────────────
+   入口守卫的中性占位:校验中(品牌标记 + 发丝扫描条 + mono 状态)与校验异常(重试占位)。
+   全屏 grid 居中,绝不渲染受保护内容。布局-only,值全引用 DS token(色/字/动效/圆角)。 */
+.ag-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--surface-page);
+  color: var(--text-body);
+}
+/* 24px 点阵(品牌「潜在空间」母题),中心向外淡出 —— 纯装饰,不承载任何受保护内容。 */
+.ag-gate::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.55;
+  background-image: radial-gradient(var(--border-default) 1px, transparent 1px);
+  background-size: 24px 24px;
+  -webkit-mask-image: radial-gradient(circle at 50% 45%, #000, transparent 60%);
+  mask-image: radial-gradient(circle at 50% 45%, #000, transparent 60%);
+}
+.ag-loader {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+  padding: 28px;
+  /* rise only(无 opacity 淡入)→ 静止帧永不透明,占位内容始终可见。 */
+  animation: ag-rise var(--dur-3, 320ms) var(--ease-out, cubic-bezier(0.2, 0, 0, 1)) both;
+}
+@keyframes ag-rise {
+  from {
+    transform: translateY(6px);
+  }
+  to {
+    transform: none;
+  }
+}
+.ag-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* 扫描条:细发丝轨 + 往复扫过的亮段 —— 机械、科技感,不喧宾夺主。 */
+.ag-bar {
+  position: relative;
+  width: 176px;
+  height: 2px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--border-default);
+}
+.ag-bar__run {
+  position: absolute;
+  top: 0;
+  left: -42%;
+  height: 100%;
+  width: 42%;
+  border-radius: 2px;
+  background: var(--text-body);
+  animation: ag-run 1.15s linear infinite;
+}
+@keyframes ag-run {
+  0% {
+    left: -42%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+.ag-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.ag-status__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--text-faint);
+  animation: ag-blink 1.05s steps(1, end) infinite;
+}
+@keyframes ag-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0.25;
+  }
+}
+/* 校验出错 / 重试态 */
+.ag-loader.is-error {
+  gap: 18px;
+  max-width: 380px;
+  text-align: center;
+}
+.ag-errhead {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+.ag-errsub {
+  margin: 0;
+  max-width: 320px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  line-height: var(--leading-body, 1.6);
+}
+.ag-erractions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ag-loader {
+    animation: none;
+  }
+  .ag-bar__run {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.35;
+  }
+  .ag-status__dot {
+    animation: none;
+  }
+}
+
 /* preview body */
 .d-pvbody {
   flex: 1;
