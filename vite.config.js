@@ -1,8 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { themeInitScript } from "@agentaily/web-kit";
+import { themeInitScript } from "@agentaily/design-system";
 
-// Anti-FOUC: inline web-kit's themeInitScript synchronously at the top of <head> so the FIRST
+// Anti-FOUC: inline the design-system's themeInitScript synchronously at the top of <head> so the FIRST
 // paint already carries the persisted theme (read from the cross-subdomain cookie `agentaily:theme`,
 // falling back to localStorage; default dark). Generated FROM the lib — single source of truth —
 // so it stays byte-identical to what <ThemeProvider> persists AND to the marketing site

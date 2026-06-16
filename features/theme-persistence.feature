@@ -3,8 +3,8 @@ Feature: 主题持久化(跨子域)
   我希望在设计器里切换的亮/暗主题被记住、刷新后仍生效
   以便不会每次重新加载都回落到默认 dark,且与营销站(同一 *.agentaily.com 子域)主题保持一致
 
-  背景(SPEC §27 · 接 @agentaily/web-kit 的 ThemeProvider/useTheme):主题不再是设计器的内存态,而是
-  通过 web-kit 的跨子域 cookie(`agentaily:theme`,`domain=.agentaily.com`;localhost 自动回退
+  背景(SPEC §27 · 接 @agentaily/design-system 的 ThemeProvider/useTheme):主题不再是设计器的内存态,而是
+  通过 design-system 的跨子域 cookie(`agentaily:theme`,`domain=.agentaily.com`;localhost 自动回退
   localStorage)持久化 —— 与营销站(form-design-website,已正确)共用同一存储键 + 默认 dark + 同一段
   防 FOUC 首屏内联脚本(`themeInitScript({defaultTheme:"dark"})`,与营销站逐字节一致)。设计器顶栏的
   主题钮在亮/暗间二态切换;split/density/formStyle 仍是固定产品默认,非用户持久化(本特性不动它们)。
