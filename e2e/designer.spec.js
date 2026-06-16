@@ -35,6 +35,9 @@ test.describe("Agentaily Forms · 设计器", () => {
   });
 
   test("empty state offers starter prompts", async ({ page }) => {
+    // The designer is now an owner-only protected page behind the entry guard (<AuthGate>):
+    // a signed-in session is the precondition for its empty state to mount at all.
+    await seedSession(page);
     await page.goto("/");
     await expect(page.getByText("描述你想要的表单")).toBeVisible();
     await expect(page.getByText("做一个线下活动报名表")).toBeVisible();

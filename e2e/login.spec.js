@@ -1,14 +1,18 @@
 import { test, expect } from "@playwright/test";
 
 // End-to-end of the owner register / login flow (SPEC §17, open-registration
-// multi-user) in a real browser. Since the UI refactor login is a standalone /signin
-// page (DS SignInPage, 登录 / 注册 双模) reached from the header AccountControl 登录
-// button — not an in-app modal. We intercept POST /api/auth/register, /api/auth/login
-// and GET /api/auth/me so the flow is deterministic and needs no backend:
+// multi-user) in a real browser. Since the SPA + 未登录守卫 refactor (PR #90), the designer
+// is a PROTECTED page behind the entry guard (<AuthGate>): landing on `/` WITHOUT a session no
+// longer renders the designer with a header 登录 button — the guard shows the 登录视图
+// (<SignInScreen>, DS SignInPage, 登录 / 注册 双模) IN PLACE, directly at `/` (no /signin
+// redirect). On a successful login the guard re-validates in place and the designer mounts.
+// We intercept POST /api/auth/register, /api/auth/login and GET /api/auth/me so the flow is
+// deterministic and needs no backend:
 //   - register: a fresh email → 201 { token }; an already-"taken" email → 409.
 //   - login:    the registered email + password → 200 { token }; anything else
 //               → a UNIFIED 401 (the backend never reveals 邮箱不存在 vs 密码错, §17.3).
-//   - me:       once a token is held, the designer reads it → { email, emailVerified }.
+//   - me:       once a token is held, the guard's validateSession + the designer both read it
+//               → 200 { email, emailVerified } (authed → designer mounts).
 const KNOWN_EMAIL = "owner@example.com";
 const KNOWN_PASSWORD = "open-sesame-8chars";
 const TAKEN_EMAIL = "taken@example.com";
@@ -66,28 +70,28 @@ test.describe("Agentaily Forms · owner 注册 / 登录", () => {
   });
 
   test("wrong credentials error, correct credentials log in, then logout", async ({ page }) => {
-    // From the designer, the header AccountControl 登录 button routes to the /signin page.
-    await page.getByRole("button", { name: "登录", exact: true }).click();
-    await expect(page).toHaveURL(/\/signin/);
-    // SignInPage in 登录 mode by default.
+    // A signed-out owner lands on `/` → the entry guard shows the 登录视图 IN PLACE (no header
+    // button, no /signin redirect). SignInPage is in 登录 mode by default.
     await expect(page.getByRole("heading", { name: "登录 Agentaily Forms" })).toBeVisible();
 
-    // Wrong email/password → the unified, anti-enumeration error, still on /signin.
+    // Wrong email/password → the unified, anti-enumeration error; the guard stays on the 登录视图.
     await page.locator('input[type="email"]').fill(KNOWN_EMAIL);
     await page.getByPlaceholder("输入登录密码").fill("definitely-wrong");
     await page.getByRole("button", { name: "登录", exact: true }).click();
     // SignInPage's own danger banner (0.5.0 `error` seam) above the submit button.
     await expect(page.getByRole("alert")).toContainText("账号或密码错误，请重试。");
-    await expect(page).toHaveURL(/\/signin/);
+    await expect(page.getByRole("heading", { name: "登录 Agentaily Forms" })).toBeVisible();
 
-    // Correct email + password → token persisted → navigate back to the designer, where
-    // the AccountControl now shows the signed-in avatar menu.
+    // Correct email + password → token persisted → the guard re-validates IN PLACE (GET
+    // /api/auth/me → 200 authed) and mounts the designer, whose AccountControl shows the avatar menu.
     await page.locator('input[type="email"]').fill(KNOWN_EMAIL);
     await page.getByPlaceholder("输入登录密码").fill(KNOWN_PASSWORD);
     await page.getByRole("button", { name: "登录", exact: true }).click();
     await expect(page.getByRole("button", { name: "账户菜单" })).toBeVisible();
 
-    // Logout: open the avatar menu → 退出登录 → the signed-out 登录 button returns.
+    // Logout: open the avatar menu → 退出登录. The entry guard is additive — logout drops the
+    // session in place (the designer stays mounted, workspace reset) and its header flips back to
+    // the signed-out 登录 button (a later gated action would bounce to /signin).
     await page.getByRole("button", { name: "账户菜单" }).click();
     await page.getByRole("menuitem", { name: /退出登录/ }).click();
     await expect(page.getByRole("button", { name: "登录", exact: true })).toBeVisible();
@@ -95,23 +99,21 @@ test.describe("Agentaily Forms · owner 注册 / 登录", () => {
   });
 
   test("new email self-registers (注册即登录); a taken email errors", async ({ page }) => {
-    await page.getByRole("button", { name: "登录", exact: true }).click();
-    await expect(page).toHaveURL(/\/signin/);
-
-    // Switch to 注册 (signup) mode via the SignInPage footer link.
+    // Signed out → the guard's in-place 登录视图. Switch to 注册 (signup) mode via the footer link.
+    await expect(page.getByRole("heading", { name: "登录 Agentaily Forms" })).toBeVisible();
     await page.getByRole("button", { name: "注册一个" }).click();
     await expect(page.getByRole("heading", { name: "创建 owner 账户" })).toBeVisible();
 
-    // A taken email → 409 readable error, still on /signin.
+    // A taken email → 409 readable error; the guard stays on the 注册视图.
     await page.locator('input[type="email"]').fill(TAKEN_EMAIL);
     await page.getByPlaceholder("设置一个至少 8 位的密码").fill(KNOWN_PASSWORD);
     await page.getByPlaceholder("再次输入密码").fill(KNOWN_PASSWORD);
     await page.getByRole("button", { name: "注册并继续" }).click();
     await expect(page.getByRole("alert")).toContainText("该邮箱已注册，请直接登录。");
-    await expect(page).toHaveURL(/\/signin/);
+    await expect(page.getByRole("heading", { name: "创建 owner 账户" })).toBeVisible();
 
-    // A fresh email + ≥ 8-char password → 201 注册即登录 → navigate back to the designer,
-    // where the AccountControl now shows the signed-in avatar menu.
+    // A fresh email + ≥ 8-char password → 201 注册即登录 → the guard re-validates in place and
+    // mounts the designer, whose AccountControl now shows the signed-in avatar menu.
     await page.locator('input[type="email"]').fill("brand-new@example.com");
     await page.getByPlaceholder("设置一个至少 8 位的密码").fill(KNOWN_PASSWORD);
     await page.getByPlaceholder("再次输入密码").fill(KNOWN_PASSWORD);
