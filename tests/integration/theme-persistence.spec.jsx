@@ -14,11 +14,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(path.join(here, "../../features/theme-persistence.feature"));
 
 // theme-persistence.feature realized at the component level against the REAL <App>: the designer
-// mounts behind <AuthGate> (driven by authedCheck), and theme is owned by @agentaily/web-kit's
+// mounts behind <AuthGate> (driven by authedCheck), and theme is owned by @agentaily/design-system's
 // <ThemeProvider> (wired in App). Production persists to the cross-subdomain cookie `agentaily:theme`
-// (domain=.agentaily.com); on localhost that cookie is rejected so web-kit's `auto` backend falls
+// (domain=.agentaily.com); on localhost that cookie is rejected so design-system's `auto` backend falls
 // back to localStorage under the SAME key. We pin that localhost path by stubbing a working
-// localStorage (Node 26's jsdom has none — same reason i18n-render.test.jsx stubs it) so web-kit
+// localStorage (Node 26's jsdom has none — same reason i18n-render.test.jsx stubs it) so design-system
 // resolves to it and persistence round-trips deterministically.
 const DESIGNER = "描述你想要的表单";
 const THEME_BTN = "切换主题"; // IconButton label → aria-label
@@ -28,7 +28,7 @@ const verifiedMe = async () => ({ email: "owner@example.com", emailVerified: tru
 
 const themeAttr = () => document.documentElement.getAttribute("data-theme");
 
-/** Install a Map-backed localStorage (optionally seeded) so web-kit + the test share one store. */
+/** Install a Map-backed localStorage (optionally seeded) so design-system + the test share one store. */
 function installStorage(seed) {
   const store = new Map(seed ? Object.entries(seed) : []);
   vi.stubGlobal("localStorage", {

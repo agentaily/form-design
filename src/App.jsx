@@ -25,7 +25,7 @@ import {
   BrandMark,
 } from "@agentaily/design-system";
 
-import { ThemeProvider, useTheme } from "@agentaily/web-kit";
+import { ThemeProvider, useTheme } from "@agentaily/design-system";
 import { L, getLocale, setLocale } from "./core/i18n";
 import { Icon, renderChatTurn } from "./chat.jsx";
 import { FormPreview } from "./preview.jsx";
@@ -121,7 +121,7 @@ const FOLLOWUPS = [
 
 // UI state for the designer. In the design prototype these were exposed through a
 // Tweaks panel; here they're plain app state — split is the only user-driven one, the
-// rest are fixed product defaults. NOTE: theme is NOT here — it's owned by web-kit's
+// rest are fixed product defaults. NOTE: theme is NOT here — it's owned by design-system's
 // <ThemeProvider> (cross-subdomain persistence + FOUC), read/written via useTheme().
 const UI_DEFAULTS = {
   split: 46,
@@ -207,7 +207,7 @@ function schemaFor(meta, fields) {
 // Zero protected-content flash for unauthorized users. The public/auth routes above are NOT
 // gated (they ARE the login / public surfaces). 行为级 401 兜底 (会话中途失效) 仍由 DesignerApp 的
 // guard()/needLogin 处理 (bounce to /signin → re-login → 守卫原地重跑); the entry guard is additive.
-// App shell entry. Wrap the whole route tree in web-kit's <ThemeProvider> so the persisted
+// App shell entry. Wrap the whole route tree in design-system's <ThemeProvider> so the persisted
 // theme (cross-subdomain cookie `agentaily:theme`, default dark; localhost falls back to
 // localStorage) drives `data-theme` on EVERY route, and the designer's theme toggle (useTheme)
 // has its context. The matching FOUC inline script is injected into index.html at build/dev
@@ -342,7 +342,7 @@ function DesignerApp({
   },
 } = {}) {
   const [t, setTweak] = useUiState(UI_DEFAULTS);
-  // Theme is owned by web-kit's <ThemeProvider> (cross-subdomain persistence + FOUC); the
+  // Theme is owned by design-system's <ThemeProvider> (cross-subdomain persistence + FOUC); the
   // header toggle reads/writes it here. resolvedTheme is the concrete light|dark in effect.
   const { resolvedTheme, setTheme } = useTheme();
   const [messages, setMessages] = useState([]);
@@ -515,7 +515,7 @@ function DesignerApp({
   // must NOT overwrite the form's design session — kept in sync by loadFormForEdit / doExit).
   const editingFormRef = useRef(null);
 
-  // (theme → data-theme is applied by web-kit's ThemeProvider; no local useEffect needed.)
+  // (theme → data-theme is applied by design-system's ThemeProvider; no local useEffect needed.)
 
   const setValue = useCallback((id, v) => setValuesState((s) => ({ ...s, [id]: v })), []);
   // All thread mutations go through setMessagesTracked. We compute `next` synchronously off
@@ -1719,6 +1719,14 @@ function DesignerApp({
                 }
                 onLogin={() => goSignIn({})}
                 onLogout={doLogout}
+                // DS 0.14 headless 化了 AccountControl 的可见文案(默认翻成英文);中文产品需用
+                // 现成 L() DSL 把 copy 传回来(还原 DS 0.13 中文,行为零变化)。signInLabel 略 → 走 copy.signIn。
+                copy={{
+                  signIn: L("登录", "Sign in"),
+                  menuLabel: L("账户菜单", "Account menu"),
+                  signedIn: L("已登录账户", "Signed in"),
+                  signOut: L("退出登录", "Sign out"),
+                }}
                 // The email row opens the 账户 tab (§17 个人资料); menu items below it match the
                 // design handoff order: 集成设置 (plug) above 我的表单 (folder), with a separator.
                 onProfile={() =>

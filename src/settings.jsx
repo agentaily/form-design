@@ -292,6 +292,17 @@ function FeishuConnectionCard({
       onTest={onTest}
       testDisabled={testDisabled}
       idleHint={L("填写应用凭证后测试连接", "Enter app credentials, then test the connection")}
+      // DS 0.14 headless 化:卡壳 chrome + 内嵌 TestRow 文案默认翻英文,用 L() 传回中文(还原 0.13)。
+      copy={{
+        connected: L("已连接", "Connected"),
+        disconnected: L("未连接", "Not connected"),
+        collapse: L("收起", "Collapse"),
+      }}
+      testCopy={{
+        testing: L("正在握手…", "Handshaking…"),
+        test: L("测试连接", "Test connection"),
+        retest: L("重新测试", "Test again"),
+      }}
     >
       <Input
         label="App ID"
@@ -598,6 +609,73 @@ export function SettingsOverlay({
         "Connect your own DeepSeek key and Feishu Bitable — conversational design runs on your quota, and answers land in your tenant.",
       );
 
+  // DS 0.14 把 settings/账户区组件 headless 化:可见文案默认翻成英文,中文产品需用现成 L() DSL 把 copy
+  // 传回来(还原 DS 0.13 中文,行为零变化)。DeepSeekCard 一个 copy 对象贯穿整张卡(内嵌 ConnectionCard
+  // + TestRow + help 指南);title/apiKeyLabel/keyPlaceholder 两版相同,不必传。
+  const dsCardCopy = {
+    desc: L(
+      "驱动对话式交互。用户发送的每一条消息，都通过这把密钥调用 DeepSeek 补全。",
+      "Powers conversational interaction. Every message a user sends calls DeepSeek completion through this key.",
+    ),
+    connected: L("已连接", "Connected"),
+    disconnected: L("未连接", "Not connected"),
+    collapse: L("收起", "Collapse"),
+    maskedPlaceholder: L(
+      "已保存 ········  ·  留空则保持不变",
+      "Saved ········  ·  leave blank to keep",
+    ),
+    maskedHint: L(
+      "已存密钥 · 留空表示不修改，输入新值即覆盖",
+      "Key stored · leave blank to keep, enter a new value to replace",
+    ),
+    idleHint: L("填写密钥后测试连通性", "Enter a key, then test the connection"),
+    testing: L("正在握手…", "Handshaking…"),
+    test: L("测试连接", "Test connection"),
+    retest: L("重新测试", "Test again"),
+    help: {
+      title: L("如何获取 DeepSeek API Key？", "How do I get a DeepSeek API key?"),
+      steps: [
+        <React.Fragment>
+          {L("登录 ", "Sign in to ")}
+          <code>platform.deepseek.com</code>
+          {L("，进入「API Keys」页面。", " and open the “API Keys” page.")}
+        </React.Fragment>,
+        <React.Fragment>
+          {L(
+            "点击「创建 API Key」，命名后立即复制——密钥只在创建时完整显示一次。",
+            "Click “Create API Key”, name it, then copy it right away — the key is shown in full only once.",
+          )}
+        </React.Fragment>,
+        <React.Fragment>
+          {L(
+            "在「充值」中确认账户余额充足，对话才能持续调用。",
+            "Top up your balance under “Billing” so conversations can keep calling the API.",
+          )}
+        </React.Fragment>,
+        <React.Fragment>
+          {L("把以 ", "Paste the key (it starts with ")}
+          <code>sk-</code>
+          {L(" 开头的密钥粘贴到上方输入框。", ") into the field above.")}
+        </React.Fragment>,
+      ],
+      link: {
+        href: "https://platform.deepseek.com",
+        label: L("打开 DeepSeek 开放平台", "Open the DeepSeek platform"),
+      },
+    },
+  };
+
+  // SettingsSaveBar 同样 headless 化;两个 tab(账户 / 集成)的保存栏共用一份中文 copy。
+  const saveBarCopy = {
+    save: L("保存", "Save"),
+    reset: L("放弃更改", "Discard changes"),
+    saving: L("正在保存…", "Saving…"),
+    saved: L("已保存", "Saved"),
+    error: L("保存失败，请重试", "Couldn’t save — please retry"),
+    cleanHint: L("全部更改已保存", "All changes saved"),
+    dirtyHint: L("有未保存的更改", "Unsaved changes"),
+  };
+
   // ── 账户 tab state ────────────────────────────────────────────────────────────
   // Form.useForm owns the editable 显示名; SettingsSaveBar (form mode) gates 保存 on dirty+valid,
   // validates-then-commits on click, and 放弃更改 calls form.reset(). Seeded from the current
@@ -630,7 +708,7 @@ export function SettingsOverlay({
   // ── render: the floating sheet with the two-tab nav + per-tab footer + body ──────
   const footer =
     section === "account" ? (
-      <SettingsSaveBar form={accountForm} onSave={persistAccount} />
+      <SettingsSaveBar form={accountForm} onSave={persistAccount} copy={saveBarCopy} />
     ) : (
       <SettingsSaveBar
         dirty={dirty}
@@ -639,6 +717,7 @@ export function SettingsOverlay({
         error={saveError}
         onSave={onSave}
         onReset={resetForm}
+        copy={saveBarCopy}
       />
     );
 
@@ -647,6 +726,7 @@ export function SettingsOverlay({
       open={open}
       crumb={L("设置", "Settings")}
       label={L("设置", "Settings")}
+      navLabel={L("设置", "Settings")}
       onClose={onClose}
       nav={[
         { id: "account", label: L("账户", "Account"), icon: "user" },
@@ -710,6 +790,7 @@ export function SettingsOverlay({
           <div className="d-integ-cards">
             <DeepSeekCard
               apiKey={apiKey}
+              copy={dsCardCopy}
               onApiKeyChange={(v) => {
                 touch();
                 clearFieldError("keyError");
